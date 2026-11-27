@@ -39,11 +39,15 @@ impl Connection {
             Ok(outcome) => Err(failure(&self.server, outcome)),
             Err(e) => Err(json!({ "status": "unreachable", "message": e })),
         };
-        let executable = rows(fingerprint::EXECUTABLE_QUERY)?.first().and_then(|row| row.first()).and_then(|n| n.as_u64().or_else(|| n.as_str()?.parse().ok())).unwrap_or(0) > 0;
-        if executable && !fingerprint::lists_signatures(&self.version) {
+        let base = rows(&fingerprint::query(false))?;
+        let executable = base.first().and_then(|row| row.get(1)).and_then(|n| n.as_u64().or_else(|| n.as_str()?.parse().ok())).unwrap_or(0) > 0;
+        if !executable {
+            return Ok(crate::Schema::of(&base, None));
+        }
+        if !fingerprint::lists_signatures(&self.version) {
             return Err(json!({ "status": "error", "message": format!("ClickHouse {} lists no executable function's arguments and result, which 26.2 and later do", self.version) }));
         }
-        Ok(crate::Schema::of(&rows(&fingerprint::query(executable))?, None))
+        Ok(crate::Schema::of(&rows(&fingerprint::query(true))?, None))
     }
 
     /// The analysis of one statement; a failure is the answer the program gives for it.

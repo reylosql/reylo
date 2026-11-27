@@ -10,20 +10,18 @@
 //! database built the same way under another name has the same fingerprint, and any other's with
 //! its own.
 
-/// The query: one row, the server's version, and how many lines there are with two sums of their
-/// hashes. With `signatures`, it reads each executable function's arguments and result too, which
-/// are the server's configuration's, from `system.user_defined_functions`: a table an account may
-/// read only by its own grant, so it is read only where [`EXECUTABLE_QUERY`] finds such a function.
+/// The query: one row, the server's version and how many lines there are with two sums of their
+/// hashes, then how many executable functions the server's configuration defines. With
+/// `signatures`, it reads each one's arguments and result too, from `system.user_defined_functions`:
+/// a table an account may read only by its own grant, so it is asked for only where the first
+/// answer counts such a function.
 pub fn query(signatures: bool) -> String {
     let mut rows = ROWS.to_vec();
     if signatures {
         rows.push("SELECT cityHash64('x', name, toString(type), return_type, toString(argument_types), toString(argument_names)) FROM system.user_defined_functions");
     }
-    format!("SELECT concat(version(), ' ', toString(count()), ' ', toString(sum(x)), ' ', toString(groupBitXor(x))) FROM (\n    {}\n  )", rows.join("\n    UNION ALL "))
+    format!("SELECT concat(version(), ' ', toString(count()), ' ', toString(sum(x)), ' ', toString(groupBitXor(x))), (SELECT count() FROM system.functions WHERE origin = 'ExecutableUserDefined') FROM (\n    {}\n  )", rows.join("\n    UNION ALL "))
 }
-
-/// How many executable functions the server's configuration defines.
-pub const EXECUTABLE_QUERY: &str = "SELECT count() FROM system.functions WHERE origin = 'ExecutableUserDefined'";
 
 /// Whether a server of `version` (`26.8.1.1`) lists an executable function's signature, which it
 /// does from 26.2.
