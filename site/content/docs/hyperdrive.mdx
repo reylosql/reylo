@@ -49,7 +49,7 @@ export default {
 
 ## MySQL
 
-Hyperdrive refuses prepared statements. Reylo runs [`mysql2`](/docs/mysql#mysql2) through `query()` with values written into the statement, and runs [`mariadb`](/docs/mysql#mariadb) without prepared statements everywhere:
+Hyperdrive refuses prepared statements. So Reylo runs [`mysql2`](/docs/mysql#mysql2) and [`mariadb`](/docs/mysql#mariadb) there through `query()`, with values written into the statement:
 
 ```ts tab="mysql2"
 import mysql from "mysql2/promise";

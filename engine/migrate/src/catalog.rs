@@ -1870,13 +1870,26 @@ async fn mysql(db: &mut Db) -> Result<Vec<String>, Error> {
     // databases the same migrations build (a deploy's account, a developer's) where nothing else does,
     // and MySQL has no owner to read it against, as Postgres's owners are read against the history
     // table's. Whether an object runs as its definer or its invoker is read.
-    // A view's algorithm is in its own statement alone.
-    static ALGORITHM: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new(r"^CREATE ALGORITHM=(\w+)").expect("a valid pattern"));
-    for r in db.rows("select table_name as n, view_definition as def, check_option as opt, security_type as sec from information_schema.views where table_schema = database()").await? {
-        let text = db.rows(&format!("show create view `{}`", r.text("n").replace('`', "``"))).await?.first().map(|v| v.text("Create View").to_string()).unwrap_or_default();
-        let algorithm = ALGORITHM.captures(&text).map(|c| c[1].to_string()).unwrap_or_default();
-        lines.push(format!("view {} as {} check={} security={} algorithm={algorithm}", r.text("n"), strip(r.text("def")), r.text("opt"), r.text("sec")));
+    // A view's body is read as its own statement writes it, which MySQL writes alike however the
+    // view was written: `view_definition` keeps a comma join as `from a join b`, where the same view
+    // made from its statement reads `from (a join b)`. The statement quotes names by the session's
+    // settings, so it is read without ANSI_QUOTES and with sql_quote_show_create on.
+    let session = db.rows("select @@session.sql_mode as mode, @@session.sql_quote_show_create as quote").await?;
+    let (mode, quote) = session.first().map(|r| (r.text("mode").to_string(), r.flag("quote"))).unwrap_or_default();
+    let plain: Vec<&str> = mode.split(',').filter(|m| !m.is_empty() && !matches!(*m, "ANSI_QUOTES" | "ANSI")).collect();
+    let unquoted = plain.len() != mode.split(',').filter(|m| !m.is_empty()).count();
+    if unquoted {
+        db.exec(&format!("set session sql_mode = {}", literal(&plain.join(",")))).await?;
     }
+    if !quote {
+        db.exec("set session sql_quote_show_create = 1").await?;
+    }
+    let views = mysql_views(db, &strip).await;
+    let mode = if unquoted { db.exec(&format!("set session sql_mode = {}", literal(&mode))).await } else { Ok(()) };
+    let quote = if quote { Ok(()) } else { db.exec("set session sql_quote_show_create = 0").await };
+    lines.extend(views?);
+    mode?;
+    quote?;
 
     // Each routine's parameters are read in a query of their own and joined here, not in a
     // subquery correlated with the routines: Vitess, which PlanetScale's MySQL runs behind, plans
@@ -2275,6 +2288,37 @@ fn fold_names(expression: &str) -> String {
     out
 }
 
+/// Each view of a MySQL database as a catalog line: its body as `SHOW CREATE VIEW` writes it, past
+/// its name and its column list, with `strip` taking the database's own name out, and what
+/// `information_schema.views` says of its check option and security.
+async fn mysql_views(db: &mut Db, strip: &(dyn Fn(&str) -> String + Sync)) -> Result<Vec<String>, Error> {
+    // A view's algorithm is in its own statement alone.
+    static ALGORITHM: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new(r"^CREATE ALGORITHM=(\w+)").expect("a valid pattern"));
+    let mut lines = Vec::new();
+    for r in db.rows("select table_name as n, view_definition as def, check_option as opt, security_type as sec from information_schema.views where table_schema = database()").await? {
+        let text = db.rows(&format!("show create view `{}`", r.text("n").replace('`', "``"))).await?.first().map(|v| v.text("Create View").to_string()).unwrap_or_default();
+        let algorithm = ALGORITHM.captures(&text).map(|c| c[1].to_string()).unwrap_or_default();
+        let body = view_body(&text).unwrap_or_else(|| r.text("def").to_string());
+        lines.push(format!("view {} as {} check={} security={} algorithm={algorithm}", r.text("n"), strip(&body), r.text("opt"), r.text("sec")));
+    }
+    Ok(lines)
+}
+
+/// The body of a MySQL `CREATE VIEW` statement: what follows the `AS` after its name and its column
+/// list, without the check option, which is read apart.
+fn view_body(text: &str) -> Option<String> {
+    let tokens = tokenize(text, Dialect::Mysql);
+    let mut k = tokens.iter().position(|t| t.upper() == "VIEW")? + 2;
+    if tokens.get(k).is_some_and(|t| t.text == "(") {
+        k += tokens[k..].iter().position(|t| t.text == ")")? + 1;
+    }
+    if tokens.get(k)?.upper() != "AS" {
+        return None;
+    }
+    let body = text[tokens[k].end..].trim();
+    Some(["CASCADED", "LOCAL"].iter().fold(body, |b, c| b.strip_suffix(&format!(" WITH {c} CHECK OPTION")).unwrap_or(b)).to_string())
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -2285,6 +2329,12 @@ mod tests {
         assert_eq!(fold_names("concat('it\\'s `X`', `Y`)"), "concat('it\\'s `X`', `y`)");
     }
     use super::*;
+
+    #[test]
+    fn a_mysql_views_body_is_read_past_its_name_and_its_column_list() {
+        assert_eq!(view_body("CREATE ALGORITHM=UNDEFINED DEFINER=`root`@`%` SQL SECURITY DEFINER VIEW `v` (`x AS y`) AS select 1 AS `x AS y` WITH CASCADED CHECK OPTION").as_deref(), Some("select 1 AS `x AS y`"));
+        assert_eq!(view_body("CREATE VIEW `a AS b` AS select `t`.`id` AS `id` from (`t` join `u`)").as_deref(), Some("select `t`.`id` AS `id` from (`t` join `u`)"));
+    }
 
     #[test]
     fn a_partitions_owner_line_goes_with_it() {

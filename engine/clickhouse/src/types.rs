@@ -196,11 +196,23 @@ impl Parser<'_> {
             c if c.is_ascii_digit() || c == b'-' => self.number().map(Arg::Number),
             _ => {
                 let mut name = self.name()?;
-                // A JSON type's path, which only ever names a member.
+                // A JSON type's path, which only ever names a member. A part may be empty or open
+                // with a digit, as in `a.1`, which a name written before member names with a dot
+                // were quoted still holds.
                 let mut path = false;
                 while self.b.get(self.i) == Some(&b'.') {
                     self.i += 1;
-                    name = format!("{name}.{}", self.name()?);
+                    let part = match self.b.get(self.i) {
+                        Some(&quote @ (b'`' | b'"')) => self.quoted(quote)?,
+                        _ => {
+                            let start = self.i;
+                            while self.b.get(self.i).is_some_and(|c| c.is_ascii_alphanumeric() || *c == b'_') {
+                                self.i += 1;
+                            }
+                            self.text[start..self.i].to_string()
+                        }
+                    };
+                    name = format!("{name}.{part}");
                     path = true;
                 }
                 match self.peek() {
@@ -239,18 +251,50 @@ impl Parser<'_> {
     }
 }
 
-/// A string as ClickHouse writes one: in single quotes, a quote and a backslash escaped.
+/// A string as ClickHouse writes one: in single quotes, escaped as [`quoted_in`] says.
 pub fn quoted(text: &str) -> String {
-    format!("'{}'", text.replace('\\', "\\\\").replace('\'', "\\'"))
+    quoted_in(text, '\'')
 }
 
-/// A member's name: as it is where it reads as a name, else in backquotes.
+/// Text between `quote`s as ClickHouse writes it: the quote, a backslash, and each character the
+/// server writes an escape for (NUL, backspace, tab, newline, form feed and carriage return)
+/// escaped, so that a type's name stays on one line.
+fn quoted_in(text: &str, quote: char) -> String {
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push(quote);
+    for c in text.chars() {
+        match c {
+            '\0' => out.push_str("\\0"),
+            '\u{8}' => out.push_str("\\b"),
+            '\t' => out.push_str("\\t"),
+            '\n' => out.push_str("\\n"),
+            '\u{c}' => out.push_str("\\f"),
+            '\r' => out.push_str("\\r"),
+            '\\' => out.push_str("\\\\"),
+            c if c == quote => {
+                out.push('\\');
+                out.push(c);
+            }
+            c => out.push(c),
+        }
+    }
+    out.push(quote);
+    out
+}
+
+/// The words ClickHouse 26.8 writes in backquotes, in any case, though each is letters alone: NULL,
+/// which is no name in SQL, and the keywords a query would read as a clause or its modifier.
+const QUOTED_WORDS: [&str; 7] = ["null", "all", "distinct", "table", "select", "from", "values"];
+
+/// A member's name: as it is where it reads as a name, else in backquotes, as the server writes it.
+/// A dot is quoted too: a tuple's member is one name, and only a JSON type reads a bare `a.b` as a
+/// path, which the server also writes in backquotes.
 fn member(name: &str) -> String {
-    let plain = name.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_') && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.');
+    let plain = name.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_') && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') && !QUOTED_WORDS.iter().any(|word| name.eq_ignore_ascii_case(word));
     if plain {
         name.to_string()
     } else {
-        format!("`{}`", name.replace('\\', "\\\\").replace('`', "\\`"))
+        quoted_in(name, '`')
     }
 }
 
@@ -828,13 +872,18 @@ mod tests {
             "Tuple(UInt8, String)",
             "Tuple(n UInt8, s Nullable(String))",
             "Tuple(`a b` UInt8)",
+            "Tuple(`a.b` UInt8, b String)",
+            "Nested(`a.b` UInt8, `select` String)",
+            "Tuple(`NULL` UInt8, `Values` String)",
+            "Tuple(`a\\nb` UInt8)",
+            "Enum8('a\\nb' = 1, 'c\\td' = 2, 'e\\rf' = 3, 'g\\0h' = 4, 'i\\bj' = 5, 'k\\fl' = 6)",
             "Tuple()",
             "Map(String, Array(UInt8))",
             "LowCardinality(Nullable(String))",
             "Variant(String, UInt8)",
             "AggregateFunction(quantiles(0.5, 0.9), UInt64)",
             "SimpleAggregateFunction(sum, UInt64)",
-            "JSON(a.b UInt32, max_dynamic_paths = 8, SKIP c.d)",
+            "JSON(`a.b` UInt32, max_dynamic_paths = 8, SKIP c.d)",
             "Nested(a UInt8, b String)",
         ] {
             assert_eq!(parse(name).expect(name).to_string(), name);
@@ -847,6 +896,8 @@ mod tests {
         assert_eq!(parse(""), None);
         assert_eq!(parse("Enum8('a' = 1)").unwrap().args, vec![Arg::Label("a".into(), 1)]);
         assert_eq!(parse("JSON(a.b UInt32)").unwrap().args, vec![Arg::Member("a.b".into(), parse("UInt32").unwrap())]);
+        // A member with a dot as it was written bare before such names were quoted, which reads as the same member.
+        assert_eq!(parse("Tuple(a.1 UInt8, a..b String, a. UInt8)").unwrap().to_string(), "Tuple(`a.1` UInt8, `a..b` String, `a.` UInt8)");
     }
 
     #[test]
