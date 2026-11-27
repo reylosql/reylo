@@ -154,7 +154,7 @@ When an expression's type depends on the value you pass, it's typed as every typ
 
 A `DECIMAL` comes back as its exact text, keeping the column's scale. So do `SUM(…)`, `AVG(…)` and division, since MySQL computes them as `DECIMAL`: `sum(total)` returns `"19.75"`, and `id / 2` returns `"0.5000"`.
 
-A `FLOAT` is a 32-bit float. On `mysql2` it comes back as its exact value. The `mariadb` driver, PlanetScale and `Bun.sql` may round it to its shorter text, such as `1.1`. A `DOUBLE` is the same on every driver.
+A `FLOAT` is a 32-bit float. On `mysql2` and `mariadb` 3 it comes back as its exact value. PlanetScale, `Bun.sql` and `mariadb` 2 may round it to its shorter text, such as `1.1`, and so does any driver through Hyperdrive. A `DOUBLE` is the same on every driver.
 
 <Pairs>
 
@@ -630,7 +630,9 @@ const callbackPool = mariadbCallbacks.createPool(process.env.DATABASE_URL);
 await getUser.run(callbackPool, { id: 1 });
 ```
 
-Reylo runs each query through its `query()` method, which prepares nothing. So it also works through Cloudflare Hyperdrive, in a Worker with Node's APIs. Connect it with the fields of the binding:
+Reylo runs each query through the driver's `execute()`, which binds each value. The driver may send the statement a round trip after `.run()` is called, so await `.run()` before the connection's own `commit()` or `rollback()`.
+
+It also works through Cloudflare Hyperdrive, in a Worker with Node's APIs. Hyperdrive refuses prepared statements, so Reylo uses `query()` there. Connect it with the fields of the binding:
 
 ```ts twoslash tab="worker.ts"
 /// <reference types="@cloudflare/workers-types" />
@@ -649,7 +651,7 @@ export default {
 };
 ```
 
-The driver writes each value into the statement itself. For a value holding a quote, a backslash or a non-ASCII character, Reylo reads the session's `sql_mode` and charset. It refuses a value the session would read otherwise:
+Through `query()`, as there and on `mariadb` 2, the driver writes each value into the statement itself. For a value holding a quote, a backslash or a non-ASCII character, Reylo reads the session's `sql_mode` and charset first. It refuses a value the session would read otherwise:
 
 - A character outside ASCII, where the driver or the session uses a charset other than UTF-8.
 - A quote or a backslash, where the session reads a backslash otherwise than the driver writes it. A stored routine that sets `sql_mode` can cause this, so set `sql_mode` again after calling one.
