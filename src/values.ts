@@ -141,7 +141,7 @@ function jsonNumber(n: number, at: string, dialect: Dialect, fail: (message: str
   if (Number.isFinite(n)) return String(n);
   if (dialect === "postgres") return `"${n}"`;
   if (dialect === "sqlite" && !Number.isNaN(n)) return n > 0 ? "9e999" : "-9e999";
-  return fail(`${at ? `at ${at} ` : ""}is ${n}, which ${dialect === "mysql" ? "MySQL" : dialect === "sqlite" ? "SQLite" : "ClickHouse"} holds no value for: write null or a string in its place.`);
+  return fail(`${at ? `at ${at} ` : ""}is ${n}, which ${dialect === "mysql" ? "MySQL holds no value" : dialect === "sqlite" ? "SQLite holds no value" : "JSON holds no number"} for: write null or a string in its place.`);
 }
 
 /**

@@ -847,8 +847,8 @@ function checkBinary(type: EngineType | undefined, name: string, v: unknown, dia
   throw new ParameterError(`Parameter "${name}" is binary data, so it takes a Uint8Array (a Buffer is one), as \`.run()\` returns one; got ${describe(v)}. ${v instanceof ArrayBuffer ? "Wrap an ArrayBuffer in one: new Uint8Array(buffer)." : "Decode base64 or hex text into one first."}`);
 }
 
-// A number JSON.stringify writes as null, NaN or an infinity, goes only where the database holds
-// it. MySQL holds neither, and its drivers fail in their own ways (mysql2's "DOUBLE value is out of
+// NaN and an infinity, which JSON.stringify writes as null, go only where the database holds them.
+// MySQL holds neither, and its drivers fail in their own ways (mysql2's "DOUBLE value is out of
 // range", mariadb's "Unknown column 'NaN'"); SQLite holds no NaN, which every driver but libSQL
 // binds as NULL; and a Postgres float holds both, a numeric with a precision NaN alone, as the
 // type says. Elsewhere on Postgres the server refuses the text, and ClickHouse's values are
