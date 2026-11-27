@@ -727,14 +727,28 @@ impl Alterer for SqliteAlterer {
     /// A table's rebuild makes the tables that reference it, at any depth, again from the text each
     /// has then: so each one's own change waits for every rebuild that makes it again, rather than
     /// run first and be undone. A table it references whose change runs in place makes nothing
-    /// again, and waiting for it could close a circle where none was.
+    /// again, and waiting for it could close a circle where none was. A rebuild that takes others
+    /// of tables that reference each other to the target waits for what each of those needs there
+    /// too: a table one comes to reference, which a copied row looks its key up in.
     fn waits_for(&self, from: &Object, to: &Object) -> Vec<String> {
         if to.kind != Some(Kind::Table) {
             return Vec::new();
         }
         let schemas = self.schemas.borrow();
         let Some((f, t)) = schemas.as_ref() else { return Vec::new() };
-        parents_of(f, t, &from.id).into_iter().filter(|p| self.makes_again(p, &from.id)).collect()
+        let mut out: Vec<String> = parents_of(f, t, &from.id).into_iter().filter(|p| self.makes_again(p, &from.id)).collect();
+        let decided = |name: &str| self.decided.of(name);
+        if rebuilt_by(f, t, &from.id, &decided).as_deref() == Some(from.id.as_str()) {
+            let circling = circle(f, t, &from.id);
+            for m in circling.iter().filter(|m| **m != from.id && self.makes_again(&from.id, m)) {
+                let Some(target) = t.objects.get(m) else { continue };
+                let carried = f.objects.get(m).is_some_and(|x| m.strip_prefix("table ").and_then(|name| shape(x, target, decided(name))).is_some_and(|s| s.rebuild));
+                if carried {
+                    out.extend(target.deps.iter().filter(|d| !circling.contains(*d) && !out.contains(*d)).cloned().collect::<Vec<_>>());
+                }
+            }
+        }
+        out
     }
 
     /// A table's change, or a table made, needs the change of a table it references first only
