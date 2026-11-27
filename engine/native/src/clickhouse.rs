@@ -30,9 +30,14 @@ struct Connection {
     shown: HashMap<Option<String>, String>,
     /// The fingerprint every answer `answers` holds was shown to be of, by an analysis kept under it.
     confirmed: Option<String>,
-    /// Whether the server has listed an executable function, so that the fingerprint is read in the
-    /// one request that lists their signatures too.
+    /// Whether the server has listed an executable function's signature, so that the fingerprint is
+    /// read in the one request that lists the signatures too.
     executables: std::cell::Cell<bool>,
+    /// The UUID each server name answered the fingerprint with ([`Connection::read`]).
+    uuids: HashMap<Option<String>, String>,
+    /// Whether one name has answered for two servers, as replicas that share a `display_name`, or
+    /// a proxy that sets the header or drops it, make them: nothing is kept on such a connection.
+    ambiguous: bool,
 }
 
 /// The most reads of the schema's fingerprint after an analysis, to hear again from each server it
@@ -49,7 +54,7 @@ struct Judged {
 
 impl Connection {
     fn new(server: Server, version: String) -> Connection {
-        Connection { server, version, answers: AnswerCache::until_cleared(), shown: HashMap::new(), confirmed: None, executables: std::cell::Cell::new(false) }
+        Connection { server, version, answers: AnswerCache::until_cleared(), shown: HashMap::new(), confirmed: None, executables: std::cell::Cell::new(false), uuids: HashMap::new(), ambiguous: false }
     }
 
     /// Drops the engine's answers.
@@ -62,13 +67,18 @@ impl Connection {
     /// the one that server showed.
     fn read(&mut self) -> (Result<crate::Schema, Value>, Option<Option<String>>) {
         self.server.answered();
-        let schema = self.fingerprint();
+        let read = self.fingerprint();
         let by = self.server.answered();
         let server = (by.len() == 1).then(|| by.into_iter().next()).flatten();
-        if let (Ok(schema), Some(server)) = (&schema, &server) {
+        if let (Ok((schema, uuid)), Some(server)) = (&read, &server) {
             self.shown.insert(server.clone(), schema.fingerprint.clone());
+            if let Some(uuid) = uuid {
+                if self.uuids.insert(server.clone(), uuid.clone()).is_some_and(|before| before != *uuid) {
+                    self.ambiguous = true;
+                }
+            }
         }
-        (schema, server)
+        (read.map(|(schema, _)| schema), server)
     }
 
     /// The schema's fingerprint; a failure is the answer the program gives for it.
@@ -81,26 +91,37 @@ impl Connection {
     /// can't list it, there is no fingerprint to keep an analysis by. The signatures are read where the
     /// server lists such a function, which reading them needs a grant for, and from then on in one
     /// request, so that one server answers it.
-    fn fingerprint(&self) -> Result<crate::Schema, Value> {
+    fn fingerprint(&self) -> Result<(crate::Schema, Option<String>), Value> {
         use crate::engines::clickhouse::schema_fingerprint as fingerprint;
         let rows = |sql: &str| match self.server.ask(sql) {
             Ok(Outcome::Rows(rows)) => Ok(rows),
             Ok(outcome) => Err(failure(&self.server, outcome)),
             Err(e) => Err(json!({ "status": "unreachable", "message": e })),
         };
+        // The fingerprint is the row's first two columns; the third is the server's UUID.
+        let of = |rows: Vec<Vec<Value>>| {
+            let uuid = rows.first().and_then(|row| row.get(2)).and_then(Value::as_str).map(String::from);
+            let hashed: Vec<Vec<Value>> = rows.into_iter().map(|row| row.into_iter().take(2).collect()).collect();
+            (crate::Schema::of(&hashed, None), uuid)
+        };
+        // Where the signatures were read before and can't be now, the base query says whether any is left to read.
         if self.executables.get() {
-            return Ok(crate::Schema::of(&rows(&fingerprint::query(true))?, None));
+            match rows(&fingerprint::query(true)) {
+                Ok(signed) => return Ok(of(signed)),
+                Err(_) => self.executables.set(false),
+            }
         }
         let base = rows(&fingerprint::query(false))?;
         let executable = base.first().and_then(|row| row.get(1)).and_then(|n| n.as_u64().or_else(|| n.as_str()?.parse().ok())).unwrap_or(0) > 0;
         if !executable {
-            return Ok(crate::Schema::of(&base, None));
+            return Ok(of(base));
         }
         if !fingerprint::lists_signatures(&self.version) {
             return Err(json!({ "status": "error", "message": format!("ClickHouse {} lists no executable function's arguments and result, which 26.2 and later do", self.version) }));
         }
+        let signed = rows(&fingerprint::query(true))?;
         self.executables.set(true);
-        Ok(crate::Schema::of(&rows(&fingerprint::query(true))?, None))
+        Ok(of(signed))
     }
 
     /// The analysis of one statement, and, where the loader names the fingerprint it would keep it
@@ -126,7 +147,7 @@ impl Connection {
                 (Ok(schema), server) => Some(server.map(|server| (server, schema.fingerprint))),
                 (Err(_), _) => None,
             });
-            Judged { kept, after }
+            Judged { kept: kept && !self.ambiguous, after }
         });
         match (&judged, label) {
             (Some(Judged { kept: true, .. }), Some(label)) => self.confirmed = Some(label.to_string()),
@@ -153,8 +174,9 @@ impl Connection {
 /// after the analysis answered for it throughout, where one that had not may answer for the schema
 /// before, as by refusing a table the migration just made, or for the one after. The answers the
 /// engine reused were given in an analysis kept under the same label (`Connection::confirmed`). On
-/// one server it costs the one read the loader would make itself. Replicas that answer with one
-/// name, as a shared `display_name` or a proxy that sets its own makes them, are one server here.
+/// one server it costs the one read the loader would make itself. Replicas are told apart by the name
+/// each answers with, its `display_name`, the host's name by default; where one name answers the
+/// fingerprint with two servers' UUIDs, the connection keeps nothing (`Connection::ambiguous`).
 fn judged(label: &str, before: &HashMap<Option<String>, String>, by: &BTreeSet<Option<String>>, mut read: impl FnMut() -> Option<Option<(Option<String>, String)>>) -> (bool, Option<String>) {
     let kept = by.iter().all(|server| before.get(server).is_some_and(|f| f == label));
     let mut heard = BTreeSet::new();
@@ -323,6 +345,74 @@ mod tests {
         for typed in ["25.11.1.558", "25.12.9.1", "26.8.40.7", "27.1.1.1", "v-next", ""] {
             assert_eq!(too_old(typed), None, "{typed}");
         }
+    }
+
+    /// A stand-in for the HTTP interface that answers one request per connection with each of
+    /// `answers` in turn, each `(display name, status, body)`, and the URL it listens at.
+    fn stand_in(answers: Vec<(&'static str, u16, String)>) -> (String, std::thread::JoinHandle<()>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let serving = std::thread::spawn(move || {
+            for (name, status, body) in answers {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = Vec::new();
+                let mut chunk = [0u8; 4096];
+                // The head, then as much body as it says it has.
+                loop {
+                    let read = stream.read(&mut chunk).unwrap();
+                    request.extend_from_slice(&chunk[..read]);
+                    let text = String::from_utf8_lossy(&request).to_string();
+                    if let Some(end) = text.find("\r\n\r\n") {
+                        let length = text.to_ascii_lowercase().split("content-length: ").nth(1).and_then(|rest| rest.split("\r\n").next()?.trim().parse::<usize>().ok()).unwrap_or(0);
+                        if request.len() >= end + 4 + length {
+                            break;
+                        }
+                    }
+                    if read == 0 {
+                        break;
+                    }
+                }
+                let code = if status == 200 { String::new() } else { "X-ClickHouse-Exception-Code: 497\r\n".to_string() };
+                stream.write_all(format!("HTTP/1.1 {status} X\r\nX-ClickHouse-Query-Id: q\r\nX-ClickHouse-Server-Display-Name: {name}\r\n{code}Content-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).unwrap();
+            }
+        });
+        (url, serving)
+    }
+
+    /// The fingerprint query's answer: the fingerprint, the executable functions, the server's UUID.
+    fn row(fingerprint: &str, executables: u32, uuid: &str) -> String {
+        format!(r#"{{"meta": [], "data": [["{fingerprint}", {executables}, "{uuid}"]]}}"#)
+    }
+
+    #[test]
+    fn one_name_that_answers_for_two_servers_keeps_nothing_on_the_connection() {
+        for (names, ambiguous) in [(["r", "r"], true), (["r1", "r2"], false)] {
+            let (url, serving) = stand_in(vec![(names[0], 200, row("f", 0, "uuid-a")), (names[1], 200, row("f", 0, "uuid-b"))]);
+            let mut c = Connection::new(Server::of(&url).unwrap(), "26.8.1.1".to_string());
+            assert!(c.read().0.is_ok() && c.read().0.is_ok());
+            serving.join().unwrap();
+            assert_eq!(c.ambiguous, ambiguous, "{names:?}");
+        }
+    }
+
+    #[test]
+    fn a_fingerprint_whose_signatures_can_no_longer_be_read_is_the_base_one_where_no_executable_is_left() {
+        let denied = || ("r", 403, "Code: 497. DB::Exception: Not enough privileges. (ACCESS_DENIED)".to_string());
+        // The signatures read once, then refused: with no executable left, the base query's fingerprint.
+        let (url, serving) = stand_in(vec![("r", 200, row("base", 1, "u")), ("r", 200, row("signed", 1, "u")), denied(), ("r", 200, row("base", 0, "u"))]);
+        let c = Connection::new(Server::of(&url).unwrap(), "26.8.1.1".to_string());
+        let signed = c.fingerprint().unwrap().0;
+        assert!(c.executables.get());
+        let base = c.fingerprint().unwrap().0;
+        serving.join().unwrap();
+        assert!(!c.executables.get() && signed != base);
+        // With one left, the refusal stands.
+        let (url, serving) = stand_in(vec![denied(), ("r", 200, row("base", 1, "u")), denied()]);
+        let c = Connection::new(Server::of(&url).unwrap(), "26.8.1.1".to_string());
+        c.executables.set(true);
+        assert!(c.fingerprint().is_err());
+        serving.join().unwrap();
     }
 
     #[test]
