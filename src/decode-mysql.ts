@@ -407,7 +407,7 @@ const MARIADB_OPTIONS = {
 /** A GEOMETRY's bytes, where mariadb would give GeoJSON; only for a statement whose columns hold one, since a typeCast sends every value through mariadb's slower path. */
 const mariadbGeometry = (column: { type: string; buffer(): unknown }, next: () => unknown) => (column.type === "GEOMETRY" ? column.buffer() : next());
 
-type MariadbColumn = { type?: string; columnType?: number; name?: string | (() => string); isSet?: () => boolean };
+type MariadbColumn = { type?: string; columnType?: number; name?: string | (() => string); isSet?: () => boolean; scale?: number };
 
 // mariadb writes each value into the statement's text itself, escaping it as its escape() does:
 // a quote doubled, which every session reads alike, and a backslash as it is, or each of them after
@@ -571,27 +571,64 @@ async function asWritten<T>(c: AnyClient, values: unknown[], built: SqlMode | un
   }
 }
 
-/** mariadb's query(), on its promise or its callback API, with Reylo's options. */
+/** A TIME's text with its column's `digits` of fraction, where execute() writes six, or none where they are all zero. */
+function timeOfScale(text: string, digits: number): string {
+  const dot = text.indexOf(".");
+  if (dot < 0) return withFraction(text, digits);
+  return digits <= 0 ? text.slice(0, dot) : withFraction(text.slice(0, dot + 1 + digits), digits);
+}
+
+/**
+ * mariadb's execute(), which prepares the statement and binds each value, or its query(), which
+ * writes each value into the statement's text, on its promise or its callback API, with Reylo's
+ * options. mariadb 3 runs each statement through execute(), so that the server reads every value as
+ * a value, whatever the session's sql_mode or charset, and no read of the session stands between a
+ * run and its statement. mariadb 2 has no execute(), and a server that refuses prepared statements,
+ * as Cloudflare Hyperdrive does, takes query(), each value held to how the session reads it
+ * (asWritten).
+ */
 export async function mariadb(c: AnyClient, text: string, values: unknown[], columns: Columns | undefined, built?: SqlMode, marks?: Marks): Promise<unknown[]> {
-  // Without values the driver writes nothing into the text, so no place can be misread. A query
-  // defined by hand carries no reading of its own: where its text holds a backslash or a double
-  // quote, which the sql_mode can read otherwise, it runs only on a session that reads it as the
-  // driver's scan does.
-  const placed = !values.length ? undefined : (built ?? (marks === undefined && /["\\]/.test(text) ? SCANS : undefined));
-  scansAsBuilt("mariadb", placed);
-  // By position where the module declares the columns: mariadb writes each value into the statement's text, so MySQL names a column with no alias after it (`select :x::int + 1` is `CAST(5 AS SIGNED) + 1`), and two of them may share a name.
+  // By position where the module declares the columns: MySQL names a column with no alias after its text, which is `?` where the value is bound and the value itself where query() writes it in (`select :x::int + 1` is `CAST(5 AS SIGNED) + 1`), and two of them may share a name.
   const options = { sql: text, ...MARIADB_OPTIONS, rowsAsArray: Boolean(columns?.length), ...(columns?.some(([, kind]) => kind === "unknown" || kind.split("|").includes("geometry")) ? { typeCast: mariadbGeometry } : {}) };
   // The promise API resolves to the rows with their `meta`; the callback API hands the meta over as a third argument.
   let callbackMeta: MariadbColumn[] | undefined;
-  const query = (conn: AnyClient) =>
+  const call = (conn: AnyClient, method: "execute" | "query") =>
     new Promise((resolve, reject) => {
-      const returned = conn.query(options, values, (error: Error | null, rows: unknown, meta?: MariadbColumn[]) => (error ? reject(error) : ((callbackMeta = meta), resolve(rows))));
+      const returned = conn[method](options, values, (error: Error | null, rows: unknown, meta?: MariadbColumn[]) => (error ? reject(error) : ((callbackMeta = meta), resolve(rows))));
       if (typeof returned?.then === "function") returned.then(resolve, reject);
     });
-  const result = await asWritten(c, values, placed, query);
+  let result: unknown;
+  let prepared = typeof c.execute === "function" && !refusesPrepares.has(preparesKey(c));
+  if (prepared) {
+    try {
+      result = await call(c, "execute");
+    } catch (e) {
+      if (!isPrepareRefusal(e)) throw e;
+      refusesPrepares.add(preparesKey(c));
+      prepared = false;
+    }
+  }
+  if (!prepared) {
+    // Without values the driver writes nothing into the text, so no place can be misread. A query
+    // defined by hand carries no reading of its own: where its text holds a backslash or a double
+    // quote, which the sql_mode can read otherwise, it runs only on a session that reads it as the
+    // driver's scan does.
+    const placed = !values.length ? undefined : (built ?? (marks === undefined && /["\\]/.test(text) ? SCANS : undefined));
+    scansAsBuilt("mariadb", placed);
+    result = await asWritten(c, values, placed, (conn) => call(conn, "query"));
+  }
   if (!Array.isArray(result)) return [];
   if (!result.length) return result;
   const meta = () => ((result as { meta?: MariadbColumn[] }).meta ?? callbackMeta ?? []) as MariadbColumn[];
+  if (prepared) {
+    const times = meta().flatMap((m, i) => (m.type === "TIME" ? [[i, typeof m.name === "function" ? m.name() : m.name, m.scale ?? 0] as const] : []));
+    for (const row of result as Record<string | number, unknown>[]) {
+      for (const [i, name, scale] of times) {
+        const key = Array.isArray(row) ? i : name;
+        if (key !== undefined && typeof row[key] === "string") row[key] = timeOfScale(row[key] as string, scale);
+      }
+    }
+  }
   // The module's columns as the result holds them, the last of each name: a row keeps that one's value.
   const cols = columns && Array.isArray(result[0]) ? resultColumns(columns, meta().map((m) => (typeof m.name === "function" ? m.name() : m.name) as string), result[0]) : (columns ?? []).map(([name, kind]) => [name, kind] as const);
   const rows = asObjects(result, cols);

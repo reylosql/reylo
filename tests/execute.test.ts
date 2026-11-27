@@ -746,10 +746,11 @@ function mariadbShapes(connection: Record<string, unknown>): MariadbShape[] {
   ];
 }
 
-test("mysql: mariadb, which writes each value into the statement, refuses one holding a quote or a backslash where a stored routine has left the session reading a backslash otherwise than the driver writes it", { skip: mariadbLive }, async () => {
+test("mysql: where the server refuses prepared statements, as Cloudflare Hyperdrive does, mariadb, which writes each value into the statement, refuses one holding a quote or a backslash where a stored routine has left the session reading a backslash otherwise than the driver writes it", { skip: mariadbLive }, async () => {
   const own = await mysqlDatabase("reylo_execute_mariadb_mode", "create table t (id int primary key, s varchar(80)); create procedure escapes_nothing() set session sql_mode = concat(@@session.sql_mode, ',NO_BACKSLASH_ESCAPES'); create procedure escapes() set session sql_mode = replace(@@session.sql_mode, 'NO_BACKSLASH_ESCAPES', '')");
   const u = new URL(MYSQL!);
-  const connection = { host: u.hostname, port: Number(u.port), user: decodeURIComponent(u.username) || "root", password: decodeURIComponent(u.password), database: new URL(own.url).pathname.slice(1) };
+  const proxy = await refusingPrepares();
+  const connection = { host: "127.0.0.1", port: proxy.port, user: decodeURIComponent(u.username) || "root", password: decodeURIComponent(u.password), database: new URL(own.url).pathname.slice(1) };
   // Defined by hand, without marks. Each value, read otherwise than the driver wrote it, ends its
   // literal and adds a row: one holding a backslash where the session reads it as an escape and the
   // driver wrote it as itself, one holding a quote where the session reads a backslash as itself and
@@ -777,9 +778,13 @@ test("mysql: mariadb, which writes each value into the statement, refuses one ho
       }
     }
   } finally {
+    await proxy.close();
     await own.drop();
   }
 });
+
+/** A statement of no values, which teaches a connection behind refusingPrepares() that its server refuses prepared statements. */
+const WARM_UP: QueryModule<"mysql"> = { dialect: "mysql", sql: "select 1", params: [] };
 
 // As a build under NO_BACKSLASH_ESCAPES compiles it: 'a\', 'x?' and 'b\' are strings, and :n is the
 // one placeholder. A scan in the default sql_mode reads 'a\', ' as one string, so its placeholder
@@ -790,6 +795,51 @@ const scannedOtherwise: QueryModule<"mysql"> = { dialect: "mysql", sql: "select 
 const LEAK = ", (select @@version) as leaked -- ";
 const SCAN_REFUSAL = /finds the placeholders in its text as a session reads them whose sql_mode has neither NO_BACKSLASH_ESCAPES nor ANSI_QUOTES, and the build found them as a session reads them whose sql_mode has NO_BACKSLASH_ESCAPES and not ANSI_QUOTES/;
 const SESSION_READ = "select @@session.sql_mode, @@session.character_set_client";
+
+test("mysql: on a server that takes prepared statements, mariadb binds each value, so a value is stored as given whatever the session's sql_mode, charset or stored routine, and a statement built under NO_BACKSLASH_ESCAPES gets its value at its own placeholder", { skip: mariadbLive }, async () => {
+  const own = await mysqlDatabase("reylo_execute_mariadb_bound", "create table t (id int primary key, s varchar(80), b varbinary(80)); create procedure escapes_nothing() set session sql_mode = concat(@@session.sql_mode, ',NO_BACKSLASH_ESCAPES')");
+  const u = new URL(MYSQL!);
+  const connection = { host: u.hostname, port: Number(u.port), user: decodeURIComponent(u.username) || "root", password: decodeURIComponent(u.password), database: new URL(own.url).pathname.slice(1) };
+  const ins: QueryModule<"mysql"> = { dialect: "mysql", sql: "insert into t (id, s, b) values (:id, :s, :b)", params: ["id", "s", "b"] };
+  // Each state, and the value that ends its literal where the driver writes it into the text.
+  const states = [
+    { options: {}, calls: ["call escapes_nothing()"], s: "x\\'), (2, 2, null) -- ", b: null },
+    // latin1 has no Ŝ, so the driver writes its low byte, a backslash, which the server stores as part of the one value.
+    { options: { charset: "latin1" }, calls: [], s: "\u015c'), (2, 2, null) -- ", b: null, stored: "\\'), (2, 2, null) -- " },
+    { options: { charset: "sjis" }, calls: [], s: "x", b: Buffer.concat([Buffer.from([0xe0]), Buffer.from("', null), (2, 0x32, null) -- ")]) },
+    // A driver writing SJIS to a session reading UTF-8 sends bytes that are no UTF-8, which the server refuses.
+    { options: { charset: "sjis" }, calls: ["set session session_track_system_variables = ''", "set names utf8mb4"], s: "\u30bd'), (2, 2, null) -- ", b: null, refused: true },
+  ];
+  try {
+    for (const [shape, open] of mariadbShapes(connection)) {
+      for (const { options, calls, s, b, stored, refused } of states as { options: object; calls: string[]; s: string; b: Buffer | null; stored?: string; refused?: boolean }[]) {
+        const [, reopen] = mariadbShapes({ ...connection, ...options }).find(([name]) => name === shape)!;
+        const { client, run, end } = await reopen();
+        try {
+          for (const sql of calls) await run(sql);
+          if (refused) await assert.rejects(async () => execute(client, ins, { id: 1, s, b }), (e: { errno?: number }) => e.errno === 1366, shape);
+          else await execute(client, ins, { id: 1, s, b });
+        } finally {
+          await end();
+        }
+        if (refused) assert.deepEqual(await own.rows("select id from t"), [], shape);
+        else assert.deepEqual(await own.rows("select id, s, hex(b) as b from t"), [{ id: 1, s: stored ?? s, b: b && b.toString("hex").toUpperCase() }], `${shape}, ${JSON.stringify(options)} ${calls.join("; ")}`);
+        await own.db.query("delete from t");
+      }
+      void open;
+      // The server finds the placeholders as the session reads the text, so the value is bound where the build found it.
+      const { client, run, end } = await open();
+      try {
+        await run("set session sql_mode = 'NO_BACKSLASH_ESCAPES'");
+        assert.deepEqual(plain((await execute(client, scannedOtherwise, { n: LEAK })) as object[]).map((row) => Object.values(row)), [["a\\", "x?", "b\\", LEAK]], shape);
+      } finally {
+        await end();
+      }
+    }
+  } finally {
+    await own.drop();
+  }
+});
 
 test("mysql: mariadb and PlanetScale, whose own scans find a statement's placeholders as the default sql_mode reads it, refuse a statement whose build read its strings otherwise, and mariadb runs one whose build read them so only on a session that reads them so too", async () => {
   const sent: string[] = [];
@@ -831,10 +881,11 @@ test("mysql: mariadb from before 3.5.4, which writes a backslash before a double
   assert.deepEqual(sent, ["insert into t (s) values (?)"]);
 });
 
-test("mysql: mariadb refuses a statement whose build read its strings under NO_BACKSLASH_ESCAPES, where its own scan would write a value into one of them", { skip: mariadbLive }, async () => {
+test("mysql: where the server refuses prepared statements, as Cloudflare Hyperdrive does, mariadb refuses a statement whose build read its strings under NO_BACKSLASH_ESCAPES, where its own scan would write a value into one of them", { skip: mariadbLive }, async () => {
   const own = await mysqlDatabase("reylo_execute_mariadb_scan", "create table t (id int primary key)");
   const u = new URL(MYSQL!);
-  const connection = { host: u.hostname, port: Number(u.port), user: decodeURIComponent(u.username) || "root", password: decodeURIComponent(u.password), database: new URL(own.url).pathname.slice(1) };
+  const proxy = await refusingPrepares();
+  const connection = { host: "127.0.0.1", port: proxy.port, user: decodeURIComponent(u.username) || "root", password: decodeURIComponent(u.password), database: new URL(own.url).pathname.slice(1) };
   try {
     // The driver alone, on a session that reads the statement as its build did, runs the value as SQL.
     const bare = await driver("mariadb").createConnection(connection);
@@ -857,14 +908,16 @@ test("mysql: mariadb refuses a statement whose build read its strings under NO_B
       }
     }
   } finally {
+    await proxy.close();
     await own.drop();
   }
 });
 
-test("mysql: mariadb refuses a value holding a character outside ASCII where it writes text in another charset than the session reads, as after SET NAMES on a server that reports no change of charset", { skip: mariadbLive }, async () => {
+test("mysql: where the server refuses prepared statements, as Cloudflare Hyperdrive does, mariadb refuses a value holding a character outside ASCII where it writes text in another charset than the session reads, as after SET NAMES on a server that reports no change of charset", { skip: mariadbLive }, async () => {
   const own = await mysqlDatabase("reylo_execute_mariadb_encoder", "create table t (id int primary key, s varbinary(80))");
   const u = new URL(MYSQL!);
-  const connection = { host: u.hostname, port: Number(u.port), user: decodeURIComponent(u.username) || "root", password: decodeURIComponent(u.password), database: new URL(own.url).pathname.slice(1) };
+  const proxy = await refusingPrepares();
+  const connection = { host: "127.0.0.1", port: proxy.port, user: decodeURIComponent(u.username) || "root", password: decodeURIComponent(u.password), database: new URL(own.url).pathname.slice(1) };
   const ins: QueryModule<"mysql"> = { dialect: "mysql", sql: "insert into t (id, s) values (:id, :s)", params: ["id", "s"] };
   // SJIS writes ソ as 0x83 0x5c, which a session in UTF-8 reads as a byte and a backslash: that
   // backslash escapes the one the driver writes before the quote, and the quote ends the literal.
@@ -886,19 +939,23 @@ test("mysql: mariadb refuses a value holding a character outside ASCII where it 
       await own.db.query("delete from t");
     }
   } finally {
+    await proxy.close();
     await own.drop();
   }
 });
 
-test("mysql: a run on mariadb that reads the driver's state of the session waits for the runs called before it to answer, since the driver takes that state from each answer", { skip: mariadbLive }, async () => {
+test("mysql: where the server refuses prepared statements, as Cloudflare Hyperdrive does, a run on mariadb that reads the driver's state of the session waits for the runs called before it to answer, since the driver takes that state from each answer", { skip: mariadbLive }, async () => {
   const own = await mysqlDatabase("reylo_execute_mariadb_answered", "create table t (id int primary key, s varchar(80)); create procedure escapes_nothing() set session sql_mode = concat(@@session.sql_mode, ',NO_BACKSLASH_ESCAPES')");
   const u = new URL(MYSQL!);
-  const connection = { host: u.hostname, port: Number(u.port), user: decodeURIComponent(u.username) || "root", password: decodeURIComponent(u.password), database: new URL(own.url).pathname.slice(1) };
+  const proxy = await refusingPrepares();
+  const connection = { host: "127.0.0.1", port: proxy.port, user: decodeURIComponent(u.username) || "root", password: decodeURIComponent(u.password), database: new URL(own.url).pathname.slice(1) };
   const call: QueryModule<"mysql"> = { dialect: "mysql", sql: "call escapes_nothing()", params: [] };
   const ins: QueryModule<"mysql"> = { dialect: "mysql", sql: "insert into t (id, s) values (:id, :s)", params: ["id", "s"] };
   try {
     for (const [shape, open] of mariadbShapes(connection).filter(([shape]) => shape === "a Connection" || shape === "a PoolConnection in a transaction")) {
       const { client, end } = await open();
+      // Refused once, the connection takes query() from then on.
+      await execute(client, WARM_UP, {});
       try {
         // The routine's answer tells the driver the session is in NO_BACKSLASH_ESCAPES, which it no
         // longer is, so the driver would write the backslash as it is, which the session reads as an escape.
@@ -912,6 +969,7 @@ test("mysql: a run on mariadb that reads the driver's state of the session waits
       assert.deepEqual(await own.rows("select id from t"), [], shape);
     }
   } finally {
+    await proxy.close();
     await own.drop();
   }
 });
@@ -962,13 +1020,16 @@ test("mysql: mariadb and PlanetScale, which write an array as a list of values, 
   assert.equal(given[2]![0], stream);
 });
 
-test("mysql: a run on mariadb whose session needs no read hands the driver its statement before anything is awaited, so the connection's own rollback() called next follows it", { skip: mariadbLive }, async () => {
+test("mysql: where the server refuses prepared statements, as Cloudflare Hyperdrive does, a run on mariadb whose session needs no read hands the driver its statement before anything is awaited, so the connection's own rollback() called next follows it", { skip: mariadbLive }, async () => {
   const own = await mysqlDatabase("reylo_execute_mariadb_rollback", "create table t (id int primary key, s varchar(80))");
   const u = new URL(MYSQL!);
-  const connection = { host: u.hostname, port: Number(u.port), user: decodeURIComponent(u.username) || "root", password: decodeURIComponent(u.password), database: new URL(own.url).pathname.slice(1) };
+  const proxy = await refusingPrepares();
+  const connection = { host: "127.0.0.1", port: proxy.port, user: decodeURIComponent(u.username) || "root", password: decodeURIComponent(u.password), database: new URL(own.url).pathname.slice(1) };
   const ins: QueryModule<"mysql"> = { dialect: "mysql", sql: "insert into t (id, s) values (:id, :s)", params: ["id", "s"] };
   const conn = await driver("mariadb").createConnection(connection);
   try {
+    // Refused once, the connection takes query() from then on.
+    await execute(conn, WARM_UP, {});
     await conn.beginTransaction();
     // A double quote, which the driver writes after a backslash, as the session reads it.
     const wrote = execute(conn, ins, { id: 1, s: 'say "hello"' });
@@ -979,7 +1040,8 @@ test("mysql: a run on mariadb whose session needs no read hands the driver its s
     await conn.end();
   }
   assert.deepEqual(await own.rows("select id from t"), []);
-  await own.drop();
+  await proxy.close();
+    await own.drop();
 });
 
 test("mysql: on mariadb, a query defined by hand whose text holds a backslash or a double quote runs only on a session that reads its strings as the driver's scan does", async () => {
@@ -994,15 +1056,18 @@ test("mysql: on mariadb, a query defined by hand whose text holds a backslash or
   assert.deepEqual(sent, [SESSION_READ, SESSION_READ, text]);
 });
 
-test("mysql: a run on mariadb that reads the session first keeps its turn, so a run called after it on the same connection does not overtake it", { skip: mariadbLive }, async () => {
+test("mysql: where the server refuses prepared statements, as Cloudflare Hyperdrive does, a run on mariadb that reads the session first keeps its turn, so a run called after it on the same connection does not overtake it", { skip: mariadbLive }, async () => {
   const own = await mysqlDatabase("reylo_execute_mariadb_turn", "create table t (id int primary key, s varchar(80))");
   const u = new URL(MYSQL!);
-  const connection = { host: u.hostname, port: Number(u.port), user: decodeURIComponent(u.username) || "root", password: decodeURIComponent(u.password), database: new URL(own.url).pathname.slice(1) };
+  const proxy = await refusingPrepares();
+  const connection = { host: "127.0.0.1", port: proxy.port, user: decodeURIComponent(u.username) || "root", password: decodeURIComponent(u.password), database: new URL(own.url).pathname.slice(1) };
   const ins: QueryModule<"mysql"> = { dialect: "mysql", sql: "insert into t (id, s) values (:id, :s)", params: ["id", "s"] };
   const all: QueryModule<"mysql"> = { dialect: "mysql", sql: "select s from t", params: [] };
   try {
     for (const [shape, open] of mariadbShapes(connection).filter(([shape]) => shape === "a Connection" || shape === "a PoolConnection in a transaction")) {
       const { client, end } = await open();
+      // Refused once, the connection takes query() from then on.
+      await execute(client, WARM_UP, {});
       try {
         // The quote has the session read first; the select, called next and not awaited, reads nothing.
         const wrote = execute(client, ins, { id: 1, s: "it's" });
@@ -1015,14 +1080,16 @@ test("mysql: a run on mariadb that reads the session first keeps its turn, so a 
       await own.db.query("delete from t");
     }
   } finally {
+    await proxy.close();
     await own.drop();
   }
 });
 
-test("mysql: mariadb, which writes each value into the statement, refuses one holding a character outside ASCII on a connection whose charset is not UTF-8, which could write it with a quote's or a backslash's byte", { skip: mariadbLive }, async () => {
+test("mysql: where the server refuses prepared statements, as Cloudflare Hyperdrive does, mariadb, which writes each value into the statement, refuses one holding a character outside ASCII on a connection whose charset is not UTF-8, which could write it with a quote's or a backslash's byte", { skip: mariadbLive }, async () => {
   const own = await mysqlDatabase("reylo_execute_mariadb_charset", "create table t (id int primary key, s varchar(80))");
   const u = new URL(MYSQL!);
-  const connection = { host: u.hostname, port: Number(u.port), user: decodeURIComponent(u.username) || "root", password: decodeURIComponent(u.password), database: new URL(own.url).pathname.slice(1) };
+  const proxy = await refusingPrepares();
+  const connection = { host: "127.0.0.1", port: proxy.port, user: decodeURIComponent(u.username) || "root", password: decodeURIComponent(u.password), database: new URL(own.url).pathname.slice(1) };
   const ins: QueryModule<"mysql"> = { dialect: "mysql", sql: "insert into t (id, s) values (:id, :s)", params: ["id", "s"] };
   // latin1 keeps a character's low byte, so Ŝ is a backslash's, which would end the literal and add a row.
   const value = "\u015c'), (3, 3) -- ";
@@ -1053,14 +1120,16 @@ test("mysql: mariadb, which writes each value into the statement, refuses one ho
       await own.db.query("delete from t");
     }
   } finally {
+    await proxy.close();
     await own.drop();
   }
 });
 
-test("mysql: mariadb, which writes a backslash before a quote or a backslash in bytes, refuses bytes holding one after a byte of 0x80 or above on a connection whose charset reads that byte and the backslash as one character", { skip: mariadbLive }, async () => {
+test("mysql: where the server refuses prepared statements, as Cloudflare Hyperdrive does, mariadb, which writes a backslash before a quote or a backslash in bytes, refuses bytes holding one after a byte of 0x80 or above on a connection whose charset reads that byte and the backslash as one character", { skip: mariadbLive }, async () => {
   const own = await mysqlDatabase("reylo_execute_mariadb_bytes", "create table t (id int primary key, b varbinary(80), s varchar(80))");
   const u = new URL(MYSQL!);
-  const connection = { host: u.hostname, port: Number(u.port), user: decodeURIComponent(u.username) || "root", password: decodeURIComponent(u.password), database: new URL(own.url).pathname.slice(1) };
+  const proxy = await refusingPrepares();
+  const connection = { host: "127.0.0.1", port: proxy.port, user: decodeURIComponent(u.username) || "root", password: decodeURIComponent(u.password), database: new URL(own.url).pathname.slice(1) };
   const ins: QueryModule<"mysql"> = { dialect: "mysql", sql: "insert into t (id, b, s) values (:id, :b, :s)", params: ["id", "b", "s"] };
   // 0xe0 begins a character in each of these charsets, whose second byte may be a backslash's. A
   // session that reads it and the driver's backslash as one character would end the first value's
@@ -1102,6 +1171,7 @@ test("mysql: mariadb, which writes a backslash before a quote or a backslash in 
       await stored(`${shape}, euckr`);
     }
   } finally {
+    await proxy.close();
     await own.drop();
   }
 });
@@ -1343,17 +1413,29 @@ test("mysql: PlanetScale's execute() → { rows }", async () => {
   assert.deepEqual(await execute(conn, my, { id: 1, name: "ada" }), [row]);
 });
 
-test("mysql: mariadb runs through query(), not its own execute(); a write's OK packet gives no rows", async () => {
+test("mysql: mariadb 3 runs through its execute(), which binds each value, and query() where the server refuses prepared statements or the driver has no execute(); a write's OK packet gives no rows", async () => {
   const calls: string[] = [];
   const answers: unknown[] = [Object.assign([row], { meta: [] }), { affectedRows: 1, insertId: 7n, warningStatus: 0 }];
   const conn = {
-    query: async () => (calls.push("query"), answers.shift()),
+    query: async () => (calls.push("query"), [row]),
     batch: async () => (calls.push("batch"), {}),
-    execute: async () => (calls.push("execute"), [row]),
+    execute: async () => (calls.push("execute"), answers.shift()),
   };
   assert.deepEqual([...((await execute(conn, my, { id: 1, name: "ada" })) as unknown[])], [row]);
   assert.deepEqual(await execute(conn, my, { id: 1, name: "ada" }), []);
-  assert.deepEqual(calls, ["query", "query"]);
+  assert.deepEqual(calls, ["execute", "execute"]);
+  // Refused once, a connection takes query() from then on.
+  calls.length = 0;
+  const refusal = Object.assign(new Error("Hyperdrive does not currently support MySQL COM_STMT_PREPARE messages"), { code: "ER_UNKNOWN_COM_ERROR" });
+  const refusing = { ...conn, execute: async () => (calls.push("execute"), Promise.reject(refusal)) };
+  await execute(refusing, my, { id: 1, name: "ada" });
+  await execute(refusing, my, { id: 1, name: "ada" });
+  assert.deepEqual(calls, ["execute", "query", "query"]);
+  // mariadb 2 has no execute().
+  calls.length = 0;
+  const { execute: _, ...older } = conn;
+  await execute(older, my, { id: 1, name: "ada" });
+  assert.deepEqual(calls, ["query"]);
 });
 
 test("mysql: mariadb's callback API answers through the callback, and its errors reject", async () => {
