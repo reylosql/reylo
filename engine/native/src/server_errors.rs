@@ -26,15 +26,16 @@ pub fn of_statement(dialect: Dialect, code: &str) -> bool {
 }
 
 /// Whether an analysis whose diagnostic carries `code` may be kept in `reylo/.cache/`: an error
-/// that is the statement's ([`of_statement`]) and that no privilege decides. A `GRANT` moves no
-/// schema's fingerprint, so a statement refused for a privilege the role lacked would stay refused
-/// after the grant. The engine still reads such an error as the statement's answer.
+/// that is the statement's ([`of_statement`]), and that neither a privilege nor a remote source's
+/// data decides. A `GRANT` moves no schema's fingerprint, nor does the file a ClickHouse `url()` or
+/// `s3()` reads its schema from, so a statement refused for either would stay refused after the
+/// grant or the upload. The engine still reads such an error as the statement's answer.
 pub fn kept(dialect: Dialect, code: &str) -> bool {
     of_statement(dialect, code)
         && match dialect {
             Dialect::Postgres => code != "42501",
             Dialect::Mysql => code.parse().is_ok_and(|n: u16| MYSQL_PRIVILEGE.binary_search_by_key(&n, |&(n, _)| n).is_err()),
-            Dialect::Clickhouse => code.parse().is_ok_and(|n: u32| CLICKHOUSE_PRIVILEGE.binary_search_by_key(&n, |&(n, _)| n).is_err()),
+            Dialect::Clickhouse => code.parse().is_ok_and(|n: u32| [CLICKHOUSE_PRIVILEGE, CLICKHOUSE_INFERRED].iter().all(|list| list.binary_search_by_key(&n, |&(n, _)| n).is_err())),
             Dialect::Sqlite => true,
         }
 }
@@ -182,6 +183,7 @@ pub const MYSQL_SERVER: &[(u16, &str)] = &[
     (1792, "ER_CANT_EXECUTE_IN_READ_ONLY_TRANSACTION"),
     (1812, "ER_TABLESPACE_MISSING"),
     (1814, "ER_TABLESPACE_DISCARDED"),
+    (1815, "ER_INTERNAL_ERROR"),
     (1817, "ER_INNODB_INDEX_CORRUPT"),
     (1820, "ER_MUST_CHANGE_PASSWORD"),
     (1836, "ER_READ_ONLY_MODE"),
@@ -417,6 +419,15 @@ pub const CLICKHOUSE_PRIVILEGE: &[(u32, &str)] = &[
     (1022, "SEMI_ANTI_JOIN_COLUMN_ACCESS_DENIED"),
 ];
 
+/// The numbers ClickHouse 26.10 defines for a schema it could not infer from a source's data, as
+/// `url()`, `s3()` and `file()` infer one from the files they read, which [`kept`] keeps no
+/// analysis with. By number, each with its name.
+pub const CLICKHOUSE_INFERRED: &[(u32, &str)] = &[
+    (636, "CANNOT_EXTRACT_TABLE_STRUCTURE"),
+    (652, "ONLY_NULLS_WHILE_READING_SCHEMA"),
+    (715, "CANNOT_DETECT_FORMAT"),
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -442,7 +453,7 @@ mod tests {
         }
         // A deadlock, a lock timeout, an interrupt, the prepared statements' limit (42000), a table
         // whose definition changed, out of memory, a tablespace missing, a connection's memory limit.
-        for number in [1213, 1205, 1317, 1461, 1615, 1412, 1037, 3024, 3169, 1812, 4082] {
+        for number in [1213, 1205, 1317, 1461, 1615, 1412, 1037, 3024, 3169, 1812, 4082, 1815] {
             assert!(!mysql(number, Some("HY000"), None), "{number}");
         }
         // Vitess's own failures, which it answers with the unknown error too.
@@ -489,6 +500,8 @@ mod tests {
         assert!(kept(Dialect::Postgres, "42703") && !kept(Dialect::Postgres, "42501") && !kept(Dialect::Postgres, "40P01"));
         assert!(kept(Dialect::Mysql, "1054") && !kept(Dialect::Mysql, "1142") && !kept(Dialect::Mysql, "1045") && !kept(Dialect::Mysql, "1213"));
         assert!(kept(Dialect::Clickhouse, "47") && !kept(Dialect::Clickhouse, "497") && !kept(Dialect::Clickhouse, "394"));
+        // A schema inferred from a remote file's data: the statement's answer, kept by no cache.
+        assert!(of_statement(Dialect::Clickhouse, "636") && !kept(Dialect::Clickhouse, "636"));
     }
 
     #[test]
@@ -498,7 +511,7 @@ mod tests {
         for list in [MYSQL_SERVER, MYSQL_PRIVILEGE] {
             assert!(list.windows(2).all(|w| w[0].0 < w[1].0) && list.iter().all(|&(n, _)| known(MYSQL_NUMBERS, n)));
         }
-        for list in [CLICKHOUSE_SERVER, CLICKHOUSE_PRIVILEGE] {
+        for list in [CLICKHOUSE_SERVER, CLICKHOUSE_PRIVILEGE, CLICKHOUSE_INFERRED] {
             assert!(list.windows(2).all(|w| w[0].0 < w[1].0) && list.iter().all(|&(n, _)| known(CLICKHOUSE_NUMBERS, n)));
         }
     }

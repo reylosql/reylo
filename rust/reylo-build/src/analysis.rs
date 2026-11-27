@@ -754,7 +754,16 @@ fn fingerprint(rows: &[Vec<Value>]) -> String {
 
 fn read_entry(file: &Path) -> Option<Value> {
     let entry: Value = serde_json::from_str(&fs::read_to_string(file).ok()?).ok()?;
-    (entry["version"].as_u64() == Some(ENTRY_VERSION)).then_some(entry)
+    // An entry that carries an error no analysis is kept with, as one an older build wrote, is none.
+    let dialect = match entry["dialect"].as_str()? {
+        "postgres" => reylo_engine::Dialect::Postgres,
+        "mysql" => reylo_engine::Dialect::Mysql,
+        "sqlite" => reylo_engine::Dialect::Sqlite,
+        "clickhouse" => reylo_engine::Dialect::Clickhouse,
+        _ => return None,
+    };
+    let kept = entry["analysis"]["diagnostics"].as_array().is_none_or(|diagnostics| diagnostics.iter().all(|d| d["server_code"].as_str().is_none_or(|code| reylo_engine::server_errors::kept(dialect, code))));
+    (entry["version"].as_u64() == Some(ENTRY_VERSION) && kept).then_some(entry)
 }
 
 /// The entry written last for the statement, by any server.
