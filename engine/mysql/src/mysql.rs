@@ -3668,6 +3668,35 @@ mod tests {
     }
 
     #[test]
+    fn a_query_nested_in_another_is_proved_once_at_each_level() {
+        // Each level reads the one below it as a FROM item, and asks about it from several places:
+        // its keys and then its rows, again for each item a closure starts from, and again for
+        // DISTINCT or GROUP BY. Proved anew at each asking, the work doubled with each level.
+        // Each shape with the row count it has over a pinned row, at every depth; over every row
+        // of `posts`, each is many.
+        let shapes: [(fn(&str) -> String, &str); 6] = [
+            (|q| format!("select id from (with c as ({q}) select id from c) s"), "at_most_one"),
+            (|q| format!("select t.id from posts t left join ({q}) s on s.id = t.id"), "many"),
+            (|q| format!("select t.id from posts t join ({q}) s on s.id = t.id"), "at_most_one"),
+            (|q| format!("select distinct id from ({q}) s"), "at_most_one"),
+            (|q| format!("select id from ({q}) s group by id"), "at_most_one"),
+            (|q| format!("select s.id from posts t, lateral ({q}) s"), "many"),
+        ];
+        for (shape, pinned) in shapes {
+            for (base, rows) in [("select id from posts", "many"), ("select id from posts where id = ?", pinned)] {
+                let finds = |depth: usize| {
+                    let sql = (0..depth).fold(base.to_string(), |q, _| shape(&q));
+                    crate::mysql_keys::FINDS.set(0);
+                    assert_eq!(card(&sql), rows, "{sql}");
+                    (crate::mysql_keys::FINDS.get(), sql)
+                };
+                let ((shallow, _), (deep, sql)) = (finds(15), finds(30));
+                assert!(deep <= 2 * shallow, "{deep} proofs at 30 levels, {shallow} at 15: {sql}");
+            }
+        }
+    }
+
+    #[test]
     fn placeholders_parse_and_keys_prove() {
         // A name qualified with a schema is that schema's: a stored function is no aggregate,
         // and a table there has keys of its own.
