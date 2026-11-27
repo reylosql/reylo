@@ -45,11 +45,13 @@ struct Connection {
 const CONFIRM_READS: usize = 12;
 
 /// What the analysis of a statement the loader would keep under a fingerprint comes to: whether it
-/// may be kept under it ([`judged`]), and the fingerprint read after it, which the loader takes as its
-/// own read after the analysis.
+/// may be kept under it ([`judged`]), the fingerprint read after it, which the loader takes as its
+/// own read after the analysis, and whether an analysis not kept might be on another try: not where a
+/// server that answered it is not told apart from another, which no try changes.
 struct Judged {
     kept: bool,
     after: Option<String>,
+    again: bool,
 }
 
 impl Connection {
@@ -147,7 +149,7 @@ impl Connection {
                 (Ok(schema), server) => Some(server.map(|server| (server, schema.fingerprint))),
                 (Err(_), _) => None,
             });
-            Judged { kept: kept && !self.ambiguous, after }
+            Judged { kept: kept && !self.ambiguous, after, again: !self.ambiguous && !by.contains(&None) }
         });
         match (&judged, label) {
             (Some(Judged { kept: true, .. }), Some(label)) => self.confirmed = Some(label.to_string()),
@@ -254,7 +256,7 @@ impl Program for Clickhouse {
                 None => closed(id),
                 Some(c) => match c.analyze(sql, request["label"].as_str()) {
                     Ok((analysis, None)) => json!({ "status": "analysis", "analysis": analysis }),
-                    Ok((analysis, Some(Judged { kept, after }))) => json!({ "status": "analysis", "analysis": analysis, "kept": kept, "after": after }),
+                    Ok((analysis, Some(Judged { kept, after, again }))) => json!({ "status": "analysis", "analysis": analysis, "kept": kept, "after": after, "again": again }),
                     Err(failure) => failure,
                 },
             },

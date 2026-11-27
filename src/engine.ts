@@ -108,8 +108,8 @@ type Replies = {
   analyze: Extract<Response, { status: "need" | "analysis" }>;
   config: Extract<Response, { status: "config" | "configError" }>;
   open: { status: "opened"; conn: number; version: string };
-  /** `kept` and `after` are ClickHouse's alone, for a request that names a `label` (`Connection.analyzeFor`). */
-  run: { status: "analysis"; analysis: Analysis; kept?: boolean; after?: string | null };
+  /** `kept`, `after` and `again` are ClickHouse's alone, for a request that names a `label` (`Connection.analyzeFor`). */
+  run: { status: "analysis"; analysis: Analysis; kept?: boolean; after?: string | null; again?: boolean };
   query: { status: "rows"; rows: unknown[][] };
   schema: { status: "schema" } & Schema;
   describe: { status: "described"; params: number[]; columns: Described["columns"] };
@@ -204,10 +204,11 @@ export interface Connection {
    * the caller would keep it under: not where its answers came from replicas that did not show that
    * schema throughout, as when a load balancer in front of ClickHouse's replicas sends a connection's
    * requests to several (engine/native/src/clickhouse.rs, `judged`). On ClickHouse, `after` is the
-   * fingerprint the engine read after the analysis, which stands for the caller's own read. Every
-   * other database's analysis may be kept.
+   * fingerprint the engine read after the analysis, which stands for the caller's own read, and
+   * `again` is false where an analysis not kept would not be on another try, as when a server that
+   * answered it can't be told apart from another. Every other database's analysis may be kept.
    */
-  analyzeFor(sql: string, label?: string): Promise<{ analysis: Analysis; kept: boolean; after?: string }>;
+  analyzeFor(sql: string, label?: string): Promise<{ analysis: Analysis; kept: boolean; after?: string; again?: boolean }>;
   /** A query, its parameters bound and its rows read as the engine's catalog queries are. */
   query(sql: string, params: unknown[]): Promise<unknown[][]>;
   /** The schema as `reylo/.cache/` keeps analyses by it, read by the engine's own query, as every host reads it. */
@@ -314,8 +315,8 @@ export class Engine extends EngineCore {
       version,
       analyze: async (sql) => (await ask({ op: "run", conn, sql })).analysis,
       analyzeFor: async (sql, label) => {
-        const { analysis, kept, after } = await ask({ op: "run", conn, sql, ...(label !== undefined && { label }) });
-        return { analysis, kept: kept !== false, ...(typeof after === "string" && { after }) };
+        const { analysis, kept, after, again } = await ask({ op: "run", conn, sql, ...(label !== undefined && { label }) });
+        return { analysis, kept: kept !== false, ...(typeof after === "string" && { after }), ...(again === false && { again }) };
       },
       query: async (sql, params) => (await ask({ op: "query", conn, sql, params })).rows,
       schema: async () => {

@@ -332,6 +332,23 @@ test("an analysis whose connection says its answers came from replicas that had 
   assert.ok(kept.ok && kept.source === "database" && existsSync(kept.entry));
 });
 
+test("an analysis not kept is analyzed again while the schema stands, unless the engine says no try would keep it", async () => {
+  const { root, env } = project();
+  for (const [again, analyses] of [[undefined, 3], [false, 1]] as const) {
+    let runs = 0;
+    const change = (c: Connection): Connection => ({
+      ...c,
+      analyzeFor: async (sql, label) => {
+        runs++;
+        return { ...(await c.analyzeFor(sql, label)), kept: false, ...(again !== undefined && { again }) };
+      },
+    });
+    const outcome = await withConnections("sqlite", change, () => analyze(root, env, SELECT));
+    assert.ok(outcome.ok && outcome.source === "database" && !existsSync(outcome.entry));
+    assert.equal(runs, analyses, `again: ${again}`);
+  }
+});
+
 test("the fingerprint the engine read after an analysis stands for the session's own read, and one that moved has the statement analyzed again under it", async () => {
   const { root, env } = project();
   const labels: (string | undefined)[] = [];

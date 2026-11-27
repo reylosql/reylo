@@ -46,7 +46,7 @@ export type Outcome =
  * the schema changes. On SQLite, `drivers` are the app's own, which each statement is prepared on
  * too (src/sqlite-drivers.ts).
  */
-type Io = { analyze(sql: string, label?: string): Promise<{ analysis: Analysis; kept: boolean; after?: string }>; query(sql: string, params: unknown[]): Promise<unknown[][]>; schema(): Promise<Schema>; forget(): Promise<void>; close(): Promise<void>; drivers?: SqliteDriver[] };
+type Io = { analyze(sql: string, label?: string): Promise<{ analysis: Analysis; kept: boolean; after?: string; again?: boolean }>; query(sql: string, params: unknown[]): Promise<unknown[][]>; schema(): Promise<Schema>; forget(): Promise<void>; close(): Promise<void>; drivers?: SqliteDriver[] };
 
 const ENTRY_VERSION = 1;
 // How long a schema fingerprint is trusted, as long as a statement answer: a migration shows up
@@ -345,13 +345,14 @@ export class Session {
     let analysis: Analysis;
     let replicas = true;
     let after: string | undefined;
+    let again: boolean | undefined;
     let label: string = schema.value;
     let stamp = this.#schema?.stamp;
     for (let tries = 1; ; tries++) {
       const io = this.#connection();
       try {
         // The label goes with the analysis only where it may be kept under it.
-        ({ analysis, kept: replicas, after } = await (await io).analyze(sql, options.store === false || label.startsWith("unverified ") ? undefined : label));
+        ({ analysis, kept: replicas, after, again } = await (await io).analyze(sql, options.store === false || label.startsWith("unverified ") ? undefined : label));
       } catch (e) {
         // A dead connection is reopened by the next call; a server error is reported.
         if (e instanceof Unreachable) {
@@ -383,8 +384,9 @@ export class Session {
       const now = read.value;
       const moved = this.#schema?.stamp;
       // One kept back for a replica that had not shown the schema yet, which the engine read
-      // after the analysis, is analyzed again while the schema stands.
-      if (now === label && moved === stamp && (replicas || tries === ANALYSES)) break;
+      // after the analysis, is analyzed again while the schema stands, unless the engine says no
+      // try would keep it, as where it can't tell the servers that answered apart.
+      if (now === label && moved === stamp && (replicas || again === false || tries === ANALYSES)) break;
       // A read that found the database gone leaves the next statement to try it again, rather than a minute offline.
       if (now === null && !read.fatal) this.#schema = undefined;
       if (now === null || now.startsWith("unverified ") || tries === ANALYSES) return { ok: true, analysis, source: "database", entry: file };
