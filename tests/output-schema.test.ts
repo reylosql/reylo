@@ -215,11 +215,17 @@ const POSTGRES: readonly Case[] = [
   ["composite named like a built-in type", "public.point", ["row(1)"]],
 ];
 
+/** The extension each case's type comes from, which a server without it leaves out: a Postgres installed on Windows has no pgvector. */
+const EXTENSIONS: Readonly<Record<string, string>> = { citext: "citext", hstore: "hstore", ltree: "ltree", vector: "vector", halfvec: "vector", sparsevec: "vector" };
+
 test("Postgres: every type's values hold to the output schema, as a column and inside each document Postgres builds", { skip: pgLive }, async () => {
-  const types = "create extension if not exists citext; create extension if not exists hstore; create extension if not exists ltree; create extension if not exists vector; create type mood as enum ('ok', 'sad'); create type pair as (a int4, b text); create domain posint as int4 check (value > 0); create type shape as (p point, r int4range, m money); create domain cash as money; create type semver as (major int4, minor int4); create type public.point as (x int4);";
-  const own = await postgresDatabase("reylo_output_schema", `${types}\n${tables(POSTGRES)}`);
+  const own = await postgresDatabase("reylo_output_schema");
   try {
-    const problems = await check(project(own.url, ["postgres"]), POSTGRES, (t, [, column]) => [
+    const available = new Set((await own.sql`select name from pg_available_extensions`).map((r: { name: string }) => r.name));
+    const cases = POSTGRES.filter(([name]) => EXTENSIONS[name] === undefined || available.has(EXTENSIONS[name]));
+    const extensions = [...new Set(Object.values(EXTENSIONS))].filter((e) => available.has(e)).map((e) => `create extension if not exists ${e};`).join(" ");
+    await own.sql.unsafe(`${extensions} create type mood as enum ('ok', 'sad'); create type pair as (a int4, b text); create domain posint as int4 check (value > 0); create type shape as (p point, r int4range, m money); create domain cash as money; create type semver as (major int4, minor int4); create type public.point as (x int4);\n${tables(cases)}`).simple();
+    const problems = await check(project(own.url, ["postgres"]), cases, (t, [, column]) => [
       `select c, to_json(c) as j, json_build_object('v', c) as o, jsonb_build_object('v', c) as b, json_build_array(c) as a, row_to_json(t) as r from ${t} t`,
       `select json_agg(c) as a, jsonb_agg(c) as b, json_object_agg(id, c) as o from ${t}`,
       // A column and a key named __proto__, which a literal or an assignment would take for the object's prototype.
