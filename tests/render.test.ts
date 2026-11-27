@@ -92,6 +92,10 @@ test("a union is either", () => {
   const bytes = array({ kind: "integer", bits: 8, unsigned: true }, false);
   assert.equal(renderType(oneOf(bytes, { kind: "text" }), false, "clickhouse"), "number[] | string");
   assert.equal(renderType(oneOf(bytes, { kind: "unknown" }), false, "clickhouse"), "unknown");
+  // A codec reaches a Variant whose members are all of its family, and no member of any other.
+  const decimal = (precision: number): EngineType => ({ kind: "decimal", precision, min_scale: 2, max_scale: 2 });
+  assert.equal(renderType(oneOf(decimal(9), decimal(18)), false, "clickhouse", { decimal: "number" }), "number");
+  assert.equal(renderType(oneOf(array(decimal(9), false), { kind: "text" }), false, "clickhouse", { decimal: "number" }), "string[] | string");
 });
 
 test("pgvector's vector and halfvec are arrays of numbers, as columns and as parameters; inside a document their text", () => {

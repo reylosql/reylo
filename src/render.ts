@@ -113,8 +113,10 @@ export function renderType(t: EngineType, inJson = false, dialect: Dialect = "po
       if (inJson) break;
       return t.alternatives.length ? t.alternatives.map((a) => `{ tag: ${JSON.stringify(a.tag)}; value: ${a.nullable ? orNull(renderType(a.type, false, dialect, codecs)) : renderType(a.type, false, dialect, codecs)} }`).join(" | ") : "never";
     // A ClickHouse Variant's value is its member's own, read as a column of that type is
-    // (src/decode-clickhouse.ts) and reached by no codec (src/codecs.ts, `planOf`), so its type is
-    // the union of its members'; a member of no known type leaves any value.
+    // (src/decode-clickhouse.ts), so its type is the union of its members'; a member of no known
+    // type leaves any value. A codec of the Variant whole, whose members are all of its family,
+    // took it above; past that no codec reaches a member, since the value no longer says which
+    // member it is (src/codecs.ts, `planOf`).
     case "union": {
       if (inJson || dialect !== "clickhouse") break;
       const members = [...new Set(t.members.map((m) => renderType(m, false, dialect)))];

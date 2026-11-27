@@ -742,8 +742,9 @@ fn render_type(t: &Value, in_json: bool, dialect: &str, codecs: &Value) -> Strin
                 .collect::<Vec<_>>()
                 .join(" | ");
         }
-        // A ClickHouse Variant's value is its member's own, which no codec reaches, so its type is
-        // the union of its members' (src/render.ts); a member of no known type leaves any value.
+        // A ClickHouse Variant's value is its member's own, so its type is the union of its
+        // members' (src/render.ts); a member of no known type leaves any value. A codec of the
+        // Variant whole took it above; past that no codec reaches a member.
         "union" if !in_json && dialect == "clickhouse" => {
             let members = dedupe(items(&t["members"]).iter().map(|m| render_type(m, false, dialect, NO_CODECS)).collect());
             return if members.iter().any(|m| m == "unknown") { "unknown".into() } else { members.join(" | ") };
