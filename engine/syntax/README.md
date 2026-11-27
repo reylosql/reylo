@@ -12,7 +12,7 @@ assert_eq!(tree.errors[0].message, "syntax error at end of input");
 
 | Dialect | Read with | Errors |
 | --- | --- | --- |
-| Postgres | Tables from Postgres 18.6's `gram.y`, a port of `scan.l` | Postgres's own |
+| Postgres | Tables from Postgres 19.0's `gram.y`, a port of `scan.l` | Postgres's own |
 | SQLite | Tables from SQLite 3.53.4's `parse.y`, a port of `tokenize.c` | SQLite's own |
 | MySQL | Tables from TiDB's `parser.y`, with the MySQL 8.4 syntax it lacks, a port of TiDB's lexer | MySQL's wording |
 | ClickHouse, SQL Server | The dialect's lexer, with statements, clauses and parentheses | What doesn't end or balance |
@@ -41,4 +41,4 @@ python3 -I engine/syntax/gen/sqlite.py --sqlite <sqlite-src-3530400> --amalgamat
 python3 -I engine/syntax/gen/mysql.py --tidb <tidb>
 ```
 
-Postgres's, PL/pgSQL's and MySQL's need Bison 3.8.2.
+Postgres's, PL/pgSQL's and MySQL's need Bison 3.8.2. Postgres's generator applies `gen/patches/` over its pinned inputs: libpg_query's and pg_query.rs's files brought to Postgres 19's nodes, and a change to `gram.y` that keeps `ignore` and `respect` usable as a column's alias, as Postgres 14 to 18 read them.
