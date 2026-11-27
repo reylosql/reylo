@@ -10,14 +10,14 @@
 // the databases its queries are written for.
 
 import type { QueryError } from "./query-error.ts";
-import { columnKind, describe, given, holdsArray, hstoreText, isLevel, lastOfEach, isMultirangeKind, isRangeKind, isRowKind, numbersInJson, ParameterError, writeJson, postgresInterval, postgresLiteral, postgresYear, rowMasks, vectorText, withinDimensions, zoned, type Columns, type JsonNumbers, type Kind } from "./values.ts";
+import { columnKind, describe, given, holdsArray, hstoreText, isLevel, isMultirangeKind, isRangeKind, isRowKind, numbersInJson, ParameterError, writeJson, postgresInterval, postgresLiteral, postgresYear, rowMasks, vectorText, withinDimensions, zoned, type Columns, type JsonNumbers, type Kind } from "./values.ts";
 import { bareName, holdsWholeArrays, isMysqlSet, schemaOf, type EngineType } from "./engine-type.ts";
 import { withSqlcommenter } from "./sqlcommenter.ts";
 import type { JsonSchema } from "./engine-type.ts";
 import type { SqlMode } from "./engine-core.ts";
 import type { Checks } from "./checks.ts";
 import type { Members, Structured } from "./rows.ts";
-import type { RowBuilder } from "./row.ts";
+import { lastOfEach, type RowBuilder } from "./row.ts";
 import { decodeCodecs, encodePlan, type Libraries, type Plan } from "./codecs.ts";
 
 export type Dialect = "postgres" | "mysql" | "sqlite" | "clickhouse";

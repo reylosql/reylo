@@ -16,7 +16,7 @@
 import { decodePlan } from "./codecs.ts";
 import { compile, rawStatement, sentText, type Dialect, type QueryModule } from "./execute.ts";
 import type { StandardTypedV1 } from "./standard.ts";
-import { rowOf, type RowBuilder } from "./row.ts";
+import { lastOfEach, rowOf, type RowBuilder } from "./row.ts";
 import { DecodeError } from "./values.ts";
 
 /** The Standard Query interface: a statement a driver can execute, as a typed function from an input to an output. */
@@ -158,8 +158,10 @@ export function standardQuery<D extends Dialect, Output>(module: QueryModule<D>,
   // column's type does not allow included. Its default suits a driver whose integer mode is
   // unknown: a BigInt is read exact, and a number past 2^53 in an INTEGER column is refused as a
   // rounded one.
+  // A column a later one of its name replaces in the row is never returned, so, as in `.run()`, it is held to no dimensions.
+  const kept = new Set(lastOfEach((module.columns ?? []).map(([name], i) => [name, i] as const)).map(([, i]) => i));
   const decoders = (mapped ? module.columns : undefined)?.map(([name, kind, delim], i): ((v: never) => unknown) => {
-    const decode = module.runtime.decoder(name, kind, delim, module.nonFinite?.[i] ?? undefined, module.nestedArrays);
+    const decode = module.runtime.decoder(name, kind, delim, module.nonFinite?.[i] ?? undefined, module.nestedArrays || !kept.has(i));
     // A family the project file's `js.codecs` gives another type takes it here too, as in `.run()` (src/codecs.ts).
     const plan = module.codecs?.[name];
     return plan === undefined ? decode : (v) => decodePlan(plan, decode(v), name, module.libraries);

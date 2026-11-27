@@ -29,6 +29,7 @@
 // This module runs in every generated module's process, so it names no Node type: a Buffer is
 // reached through `globalThis` where one exists.
 import { bareName, holdsWholeArrays, isMysqlSet, type EngineType } from "./engine-type.ts";
+import { lastOfEach } from "./row.ts";
 
 export type Dialect = "postgres" | "mysql" | "sqlite" | "clickhouse";
 
@@ -1197,20 +1198,30 @@ export function parseArray(text: string, element: (text: string) => unknown, del
  * its own by the dimensions its text had (`recordDepth`). An array a row value's field holds is held
  * to the field's kind, in a column of rows or an array of them, and named by its field.
  */
-export function withinDimensions(v: unknown, kind: Kind, column: string, field?: string): unknown {
+export function withinDimensions(v: unknown, kind: Kind, column: string, path?: FieldPath): unknown {
   if (!kind.endsWith("[]")) {
     // Of two fields of one name the row holds the last one's value, and its type shows that field.
-    if (isRowKind(kind) && isObject(v)) for (const [name, inner] of lastOfEach(rowFields(kind))) if (holdsArray(inner)) withinDimensions(v[name], inner, column, field === undefined ? name : `${field}.${name}`);
+    if (isRowKind(kind) && isObject(v)) for (const [name, inner] of lastOfEach(rowFields(kind))) if (holdsArray(inner)) withinDimensions(v[name], inner, column, { fields: [...(path?.fields ?? []), name], inArray: path?.inArray ?? false });
     return v;
   }
   if (!Array.isArray(v)) return v;
   const element = elementKind(kind);
   const declared = (kind.length - element.length) / 2;
   const whole = wholeArrayKind(element);
+  // Each row value the array holds, at every level, its fields held to their own kinds.
+  const rows = (level: unknown[]): void => {
+    if (!holdsArray(element)) return;
+    const inside: FieldPath = { fields: path?.fields ?? [], inArray: true };
+    const each = (at: unknown[]): void => {
+      for (const e of at) Array.isArray(e) ? each(e) : withinDimensions(e, element, column, inside);
+    };
+    each(level);
+  };
   // A whole array's own dimensions, from its text, whatever its elements are.
   const recorded = wholeDepths.get(v);
   if (recorded !== undefined && whole === undefined) {
-    if (recorded > declared) throw tooDeep(column, recorded, declared, field);
+    if (recorded > declared) throw tooDeep(column, recorded, declared, path);
+    rows(v);
     return v;
   }
   if (element === "json") return v;
@@ -1218,24 +1229,22 @@ export function withinDimensions(v: unknown, kind: Kind, column: string, field?:
     // An array of whole arrays: only its text told its own levels from its elements' (a driver's
     // own arrays are taken at the levels declared); each element is held to its own.
     const depth = recorded ?? declared;
-    if (depth > declared) throw tooDeep(column, depth, declared, field);
+    if (depth > declared) throw tooDeep(column, depth, declared, path);
     const each = (level: unknown[], at: number): void => {
-      for (const e of level) if (Array.isArray(e)) at > 1 ? each(e, at - 1) : withinDimensions(e, whole, column, field);
+      for (const e of level) if (Array.isArray(e)) at > 1 ? each(e, at - 1) : withinDimensions(e, whole, column, path && { ...path, inArray: true });
     };
     each(v, declared);
     return v;
   }
   let depth = 0;
   for (let level: unknown = v; Array.isArray(level) && (depth === 0 || isLevel(element, level)); level = level.find((e) => e !== null)) depth++;
-  if (depth > declared) throw tooDeep(column, depth, declared, field);
-  if (holdsArray(element)) {
-    const each = (level: unknown[]): void => {
-      for (const e of level) Array.isArray(e) ? each(e) : withinDimensions(e, element, column, field);
-    };
-    each(v);
-  }
+  if (depth > declared) throw tooDeep(column, depth, declared, path);
+  rows(v);
   return v;
 }
+
+/** The row value's fields that lead to an array, from the column, and whether an array of rows stands between, so that the field can't be read off the column alone. */
+type FieldPath = { readonly fields: readonly string[]; readonly inArray: boolean };
 
 const holdsArrayCache = new Map<Kind, boolean>();
 /** Whether a value of `kind` is a Postgres array or holds one in a row value's field: what `withinDimensions` holds to its dimensions. */
@@ -1247,18 +1256,18 @@ export function holdsArray(kind: Kind): boolean {
   return holds;
 }
 
-/** Each name's last entry of a row's fields or a statement's columns, which is the one a row object holds. */
-export function lastOfEach<C extends readonly [string, ...unknown[]]>(columns: readonly C[]): C[] {
-  return columns.filter((c, i) => !columns.slice(i + 1).some((later) => later[0] === c[0]));
-}
+/** A name as SQL writes it: bare where it can be, else quoted. */
+const ident = (name: string) => (/^[a-z_][a-z0-9_]*$/.test(name) && !RESERVED.has(name) ? name : `"${name.replace(/"/g, '""')}"`);
+const RESERVED: ReadonlySet<string> = new Set(["all", "and", "any", "array", "as", "case", "check", "column", "constraint", "default", "do", "else", "end", "false", "for", "from", "group", "having", "in", "limit", "not", "null", "offset", "on", "or", "order", "row", "select", "table", "then", "to", "true", "union", "user", "when", "where", "with"]);
 
-/** Why a Postgres array is refused: it holds `depth` dimensions, and its type `declared`; `field` names the row value's field that holds it. */
-function tooDeep(column: string, depth: number, declared: number, field?: string): DecodeError {
-  // An array built of arrays is too deep only where an array column it collects is.
-  if (field !== undefined) {
-    // The field read alone, a column expression, is typed as JSON through to_jsonb: the whole row's to_jsonb holds the field's array, which is held to its dimensions there too.
-    return new DecodeError(`Column "${column}" holds, in its row value's field ${JSON.stringify(field)}, an array of ${depth} dimensions, and its type has ${declared === 1 ? "one" : declared}: Reylo types a Postgres array with the dimensions its type declares, which Postgres doesn't enforce. Select to_jsonb((${column}).${field}) to read that field as JSON, or set allow_nested_arrays: true in .reylo.yaml to type it at any depth.`);
+/** Why a Postgres array is refused: it holds `depth` dimensions, and its type `declared`; `path` names the row value's field that holds it. */
+function tooDeep(column: string, depth: number, declared: number, path?: FieldPath): DecodeError {
+  if (path !== undefined) {
+    // The field read off the column, a column expression, is typed as JSON through to_jsonb, where the whole row's to_jsonb holds the field's array to its dimensions too. A field of a row inside an array can be read so only once that row is.
+    const read = path.inArray ? " Set" : ` Select to_jsonb((${ident(column)}).${path.fields.map(ident).join(".")}) to read that field as JSON, or set`;
+    return new DecodeError(`Column "${column}" holds, in its row value's field ${JSON.stringify(path.fields.join("."))}, an array of ${depth} dimensions, and its type has ${declared === 1 ? "one" : declared}: Reylo types a Postgres array with the dimensions its type declares, which Postgres doesn't enforce.${read} allow_nested_arrays: true in .reylo.yaml to type it at any depth.`);
   }
+  // An array built of arrays is too deep only where an array column it collects is.
   return new DecodeError(
     declared === 1
       ? `Column "${column}" holds an array of ${depth} dimensions, and its type has one: Reylo types a Postgres array column with one dimension, which Postgres doesn't enforce. Select to_jsonb(${column}) to read it as JSON, or set allow_nested_arrays: true in .reylo.yaml to type it at any depth.`

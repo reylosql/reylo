@@ -980,7 +980,7 @@ test("postgres: an array of a domain over an array type comes back as whole arra
 });
 
 test("postgres: an array a row value's field holds is held to one dimension on pg, postgres.js and PGlite, as an array column is, and nests under allow_nested_arrays", { skip: pgLive }, async () => {
-  const setup = "create type pair as (a int4, b int4[]); create type outer_pair as (inner_pair pair)";
+  const setup = "create type pair as (a int4, b int4[]); create type outer_pair as (inner_pair pair); create domain pairs as pair[]";
   const own = await postgresDatabase("reylo_execute_row_fields", setup);
   const pg = driver("pg");
   const client = new pg.Client(own.url);
@@ -991,6 +991,8 @@ test("postgres: an array a row value's field holds is held to one dimension on p
   const int4 = { ...pgType("int4"), label: "int4" } as EngineType;
   const pair = record([field("a", int4), field("b", array(int4, true, "_int4"))], "public.pair");
   const outer = record([field("inner_pair", pair)], "public.outer_pair");
+  // `pairs[]`, its domain written as its base, `_pair`, as the loader writes it.
+  const pairs = array(array(pair, true, "_pair"), true, "public._pairs");
   const read = (sql: string, type: EngineType, nestedArrays = false) => defineQuery({ dialect: "postgres", sql: `select ${sql} as v`, params: [], cardinality: "one", columns: [["v", columnKind(type, "postgres")]], nestedArrays });
   try {
     for (const [name, c] of [["pg", client], ["postgres.js", own.sql], ["PGlite", lite]] as const) {
@@ -998,6 +1000,8 @@ test("postgres: an array a row value's field holds is held to one dimension on p
       await assert.rejects(async () => read("row(1, '{{1,2}}')::pair", pair).run(c as never), /Column "v" holds, in its row value's field "b", an array of 2 dimensions, and its type has one/, name);
       await assert.rejects(async () => read("array[null, row(1, '{{1}}')::pair]", array(pair, true, "public._pair")).run(c as never), /Column "v" holds, in its row value's field "b", an array of 2 dimensions/, name);
       await assert.rejects(async () => read("row(row(1, '{{{1}}}')::pair)::outer_pair", outer).run(c as never), /Column "v" holds, in its row value's field "inner_pair\.b", an array of 3 dimensions/, name);
+      // An array of a domain over an array of rows holds each row's fields to their kinds too.
+      await assert.rejects(async () => read("array[array[row(1, '{{1,2}}')::pair]::pairs]", pairs).run(c as never), /Column "v" holds, in its row value's field "b", an array of 2 dimensions/, name);
       assert.deepEqual({ ...((await read("row(1, '{{1,2}}')::pair", pair, true).run(c as never)) as object) }, { v: { a: 1, b: [[1, 2]] } }, `${name}, nesting`);
     }
   } finally {
