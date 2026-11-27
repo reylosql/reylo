@@ -28,7 +28,7 @@
 // row, and a built-in catalog table's row type is below 10000 too.
 import { civilFromDays, coerce, DecodeError, elementKind, isRowKind, numbersInJson, scalarKind, textDecoder, utf8, wholeArrayKind, withFraction, withinDimensions, type Columns, type Decoder, type JsonNumbers, type Kind } from "./values.ts";
 import { lastOfEach, namesInResult, rowOf, type RowBuilder } from "./row.ts";
-import { arrayLiteral, asByteaHex, EFFECT_SQL, isJsonValue, jsonElements, jsonText, postgresText, type AnyClient as Client, type Bound, type EffectSql, type Marks, type QueryModule, type Runtime } from "./execute.ts";
+import { arrayLiteral, asByteaHex, EFFECT_SQL, isJsonValue, jsonElements, jsonText, jsonValue, postgresText, type AnyClient as Client, type Bound, type EffectSql, type Marks, type QueryModule, type Runtime } from "./execute.ts";
 import { readPostgresError } from "./query-error.ts";
 
 type AnyClient = Record<string, any>;
@@ -1045,12 +1045,14 @@ async function runPostgres(c: Client, query: QueryModule<"postgres">, { text, va
     // as it is either way. A query without inputs gets its values as they are, as on every driver.
     const bun = typeof c.commitDistributed === "function";
     // Each handle Bun.sql gives out, a transaction's, a savepoint's and a reserved connection's too, carries its client's options.
-    // The value its toJSON() returns is the JSON text read back, a -0 in it as JSON.rawJSON("-0"),
-    // which Bun writes as it is, where JSON.stringify writes 0.
+    // Where the JSON text is another than JSON.stringify writes (a NaN, an infinity or -0 in it), the
+    // value its toJSON() returns is that text read back, a -0 in it as JSON.rawJSON("-0"), which Bun
+    // has and writes as it is.
     const raw = (JSON as { rawJSON?: (text: string) => unknown }).rawJSON;
     const bunJson = (v: unknown, i: number) => {
       const written = jsonText(v, "postgres", names[i]!);
       if (c.options?.prepare === false || written === undefined) return written;
+      if (written === JSON.stringify(jsonValue(v))) return { toJSON: () => jsonValue(v) };
       const value: unknown = JSON.parse(written, (_key, x: unknown) => (Object.is(x, -0) && raw !== undefined ? raw("-0") : x));
       return { toJSON: () => value };
     };

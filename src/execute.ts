@@ -194,7 +194,7 @@ export type QueryModule<D extends Dialect = Dialect> = {
   readonly text?: string | undefined;
   /** The binding order for `text`: one name per placeholder of the rewritten statement. */
   readonly order?: readonly string[] | undefined;
-  /** Each placeholder's place in `text`, as the engine found it: where Reylo splits the statement for a driver that takes it in pieces (Slonik's tag) or writes the values into it (mysql2 on a server that refuses prepared statements, src/decode-mysql.ts). A ClickHouse placeholder carries its parameter's type, which Reylo reads at its mark to write the value (src/decode-clickhouse.ts). On SQLite, Reylo writes a number a driver binds as another value at its mark (src/execute.ts, `literalsAtMarks`). A build step writes them for every dialect; those two drivers, and a ClickHouse statement with parameters, refuse a query without them. */
+  /** Each placeholder's place in `text`, as the engine found it: where Reylo splits the statement for a driver that takes it in pieces (Slonik's tag) or writes the values into it (mysql2 on a server that refuses prepared statements, src/decode-mysql.ts). A ClickHouse placeholder carries its parameter's type, which Reylo reads at its mark to write the value (src/decode-clickhouse.ts). On MySQL and SQLite, Reylo writes a number a driver would bind as another value at its mark (`literalsAtMarks`). A build step writes them for every dialect; those two drivers, a ClickHouse statement with parameters, and such a number, refuse a query without them. */
   readonly marks?: Marks | undefined;
   /** How the MySQL session the statement was built on reads strings, where another `sql_mode` would read the statement otherwise: Reylo writes values into its text only on a session that reads it the same way (src/decode-mysql.ts). */
   readonly sqlMode?: SqlMode | undefined;
@@ -550,7 +550,7 @@ function checkParams(query: QueryModule, input: unknown): asserts input is Recor
 // The rows are bound positionally in every dialect. A value left out binds NULL, as pg,
 // PGlite, better-sqlite3 and Bun.sql already do; postgres.js, mysql2, node:sqlite and libSQL
 // would reject it instead.
-function statement(query: QueryModule, params: ParamsInput) {
+function statement(query: QueryModule, params: ParamsInput, run = true) {
   // The build step already compiled the statement; only the values need ordering.
   const compiled = compile(query);
   const bound: Bound = { text: compiled.text, values: compiled.order.map((name) => value(params, name)), names: compiled.order, marks: compiled.marks };
@@ -634,19 +634,23 @@ function statement(query: QueryModule, params: ParamsInput) {
       if (typeof v === "bigint" && (v >= 2n ** 63n || v < -(2n ** 63n))) throw new ParameterError(`Parameter "${bound.names[i]}" is ${v}, outside the 64-bit integers SQLite holds (-2^63 to 2^63 - 1), so no SQLite driver binds it exactly.`);
     });
   // A number a SQLite driver binds as another value goes in at its mark as SQLite's literal for it,
-  // on every driver: sqlite3 and Turso's engine bind -0 as the INTEGER 0, and libSQL refuses an
-  // infinity, which a REAL holds. -0 is written so for a float, or a value of no declared type,
-  // whose sign a REAL keeps (src/decode-mysql.ts, `signedZeros`, does the same on MySQL).
-  if (query.dialect === "sqlite") {
+  // on every driver: sqlite3, Turso's engine, sql.js and SQLite Wasm bind -0 as the INTEGER 0, D1
+  // sends -0 as 0 and an infinity as null, and libSQL refuses an infinity, which a REAL holds. -0 is
+  // written so where the type takes a float, whose sign a REAL value keeps (a REAL column stores it
+  // as 0), and one whose place isn't known is refused (src/decode-mysql.ts, `signedZeros`, does the
+  // same on MySQL). A Standard Query's values bind to the module's own text (src/standard-query.ts),
+  // so they go as they are.
+  if (query.dialect === "sqlite" && run) {
+    const zero = (v: unknown, name: string) => {
+      const type = query.inputs?.[name]?.type;
+      return Object.is(v, -0) && type !== undefined && takesFloat(type, "sqlite");
+    };
     Object.assign(
       bound,
-      literalsAtMarks(bound, (v, i) => {
-        if (typeof v !== "number") return undefined;
-        if (v === Infinity || v === -Infinity) return v > 0 ? "(9e999)" : "(-9e999)";
-        const type = query.inputs?.[bound.names[i]!]?.type;
-        return Object.is(v, -0) && type !== undefined && takesFloat(type, "sqlite") ? "(-0.0)" : undefined;
-      }),
+      literalsAtMarks(bound, (v, i) => (v === Infinity || v === -Infinity ? (v > 0 ? "(9e999)" : "(-9e999)") : zero(v, bound.names[i]!) ? "(-0.0)" : undefined)),
     );
+    const left = bound.values.findIndex((v, i) => zero(v, bound.names[i]!));
+    if (left >= 0) throw new ParameterError(`Parameter "${bound.names[left]}" is -0, which most SQLite drivers bind as the INTEGER 0, and Reylo writes it in as -0.0 only where it knows the placeholder's place, which this query doesn't carry: pass 0, or give the query its marks as a build step writes them.`);
   }
   // The comment naming the file goes on last, after a structured parameter's lists are written. It
   // ends the statement on Postgres and MySQL, so every mark keeps its place; on SQLite and ClickHouse
@@ -658,10 +662,10 @@ function statement(query: QueryModule, params: ParamsInput) {
   return bound;
 }
 
-/** Whether a parameter's type takes a float, alone or as one of the types its value decides between, or is no declared type at all (SQLite's), so that -0 keeps its sign there. */
+/** Whether a parameter's type takes a float, alone or as one of the types its value decides between, or is no type the run time knows, so that -0 keeps its sign there. */
 export function takesFloat(type: EngineType, dialect: Dialect): boolean {
   const kinds = columnKind(type, dialect).split("|");
-  return kinds.includes("float") || (dialect === "sqlite" && kinds.includes("unknown"));
+  return kinds.includes("float") || kinds.includes("unknown");
 }
 
 /**
@@ -704,7 +708,7 @@ export function sentText(query: QueryModule, text: string): string {
  */
 export function rawStatement(query: QueryModule, params: unknown): { text: string; values: unknown[] } {
   checkParams(query, params);
-  const bound = statement(query, params);
+  const bound = statement(query, params, false);
   const { text, values, names } = bound;
   if (query.dialect !== "postgres") return { text, values };
   return { text, values: values.map((v, i) => postgresText(query, names[i]!, v)) };
@@ -911,7 +915,7 @@ function encode(type: EngineType | undefined, v: unknown, dialect: Dialect, name
   // A money holds cents in the C locale Reylo reads it in, and Postgres rounds a value past them
   // without an error.
   if (kind === "money" && (typeof v !== "string" || !/^-?\d+(?:\.\d{1,2}0*)?$/.test(v))) throw new ParameterError(`Parameter "${name}" is a Postgres money, which holds cents: pass its decimal text, with two digits after the point at most (1234.56); got ${describe(v)}.`);
-  if (kind === "float" && Object.is(v, -0)) return "-0";
+  if (Object.is(v, -0) && takesFloat(type, dialect)) return "-0";
   if (typeof v !== "string") return v;
   if (isTime(type, dialect)) return postgresYear(v);
   return kind === "interval" ? postgresInterval(v) : v;

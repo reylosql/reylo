@@ -1002,6 +1002,8 @@ test("a value goes into a document as JSON.stringify writes it, but for NaN, the
   assert.throws(() => writeJson({ "a/b~": Infinity }, "mysql", fail), /^TypeError: at \/a~1b~0 is Infinity, which MySQL holds no value for/);
   assert.throws(() => writeJson(NaN, "mysql", fail), /^TypeError: is NaN, which MySQL holds no value for/);
   assert.throws(() => writeJson([NaN], "mysql", fail, "[1]"), /^TypeError: at \[1\]\/0 is NaN/);
+  // A float's text NaN, as an array's element reads, is the number.
+  assert.ok(Number.isNaN(coerce("float", "NaN", "f")));
   // A boxed number is the number it holds.
   assert.equal(writeJson({ a: new Number(-0) }, "postgres", fail), `{"a":-0}`);
   assert.throws(() => writeJson({ a: new Number(Infinity) }, "mysql", fail), /^TypeError: at \/a is Infinity/);

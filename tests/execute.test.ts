@@ -179,6 +179,14 @@ test("a JSON parameter's NaN, infinities and -0 go in as each database's JSON re
   assert.equal(seen.length, 2);
 });
 
+test("postgres: a json field of a row value holds NaN, the infinities and -0 as a JSON parameter does, and a value of no type the run time knows keeps -0", async () => {
+  const seen: unknown[][] = [];
+  const client = pgPool(async (_: string, values?: unknown[]) => (seen.push(values!), { rows: [] }));
+  const q: QueryModule<"postgres"> = { dialect: "postgres", sql: "select :e::event, :u", params: ["e", "u"], inputs: { e: { type: record([field("id", pgType("int4")), field("meta", pgType("jsonb"))], "public.event") }, u: { type: { kind: "unknown" } } } };
+  await execute(client, q, { e: { id: 1, meta: { score: Infinity, n: NaN, z: -0 } }, u: -0 });
+  assert.deepEqual(seen, [[String.raw`("1","{\"score\":\"Infinity\",\"n\":\"NaN\",\"z\":-0}")`, "-0"]]);
+});
+
 test("NaN and the infinities go only where the database holds them: MySQL holds neither, SQLite no NaN, which its drivers bind as NULL, and a Postgres numeric with a precision no infinity", async () => {
   const seen: unknown[][] = [];
   const mysql2 = { query: async () => [[], []] as [unknown, unknown], execute: async (_: unknown, v?: unknown[]) => (seen.push(v!), [[], []] as [unknown, unknown]) };
@@ -207,13 +215,13 @@ test("sqlite: -0 for a float or a value of no declared type, and an infinity, go
     ["select (-0.0) as r, (-0.0) as u, ? as i, (-0.0) as n, 1-(-0.0) as m", [-0]],
     ["select (9e999) as r, (-9e999) as u, ? as i, ? as n, 1-(9e999) as m", [1, 2.5]],
   ]);
-  // Where the run time doesn't know a placeholder's place, sqlite3 and Turso's engine would bind
-  // the float's -0 as the INTEGER 0, so it is refused; another driver binds it as it is.
+  // Where the run time doesn't know a placeholder's place, a float's -0, which sqlite3, Turso's
+  // engine, sql.js, SQLite Wasm and D1 would bind as 0, is refused on every driver; an infinity, a
+  // REAL's, goes as it is.
   const unmarked: QueryModule<"sqlite"> = { dialect: "sqlite", sql: "select :r as r", params: ["r"], text: "select ? as r", order: ["r"], inputs: { r: { type: liteType("real") } } };
-  const sqlite3Like = { prepare: () => ({}), exec: () => {}, all: (_: string, v: unknown[], done: (e: null, rows: unknown[]) => void) => setImmediate(() => done(null, [{ r: v[0] }])) };
-  await assert.rejects(Promise.resolve().then(() => execute(sqlite3Like, unmarked, { r: -0 })), /^TypeError: Parameter "r" is -0, which sqlite3 binds as the INTEGER 0/);
-  assert.deepEqual(await execute(sqlite3Like, unmarked, { r: 0 }), [{ r: 0 }]);
-  assert.ok(Object.is((await execute(libsql, unmarked, { r: -0 }), seen.at(-1)![1] as unknown[])[0], -0));
+  await assert.rejects(Promise.resolve().then(() => execute(libsql, unmarked, { r: -0 })), /^TypeError: Parameter "r" is -0, which most SQLite drivers bind as the INTEGER 0/);
+  await execute(libsql, unmarked, { r: Infinity });
+  assert.deepEqual(seen.at(-1), ["select ? as r", [Infinity]]);
   // On the drivers themselves, each value comes back as it went in.
   const read = (rows: unknown) => (rows as Record<string, number>[]).map((r) => ({ r: r.r, u: r.u, m: r.m, sign: Object.is(r.r, -0) && Object.is(r.u, -0) }));
   const sqlite3 = driver("sqlite3");

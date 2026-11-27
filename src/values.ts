@@ -116,9 +116,9 @@ export class RawJson {
 /**
  * A value as the JSON text the database reads, written as JSON.stringify writes it (each value's
  * `toJSON()` read, a key whose value is undefined left out) but for the numbers JSON.stringify
- * writes as null or 0, the inverse of `numbersInJson`. -0 keeps its sign: `-0` on Postgres, which
- * writes a float's -0 so in a document, and `-0e0` on MySQL and SQLite, whose JSON reads `-0` as the
- * integer 0. NaN and the infinities go where the database's JSON holds them: on Postgres as the
+ * writes as null or 0, the inverse of `numbersInJson`. -0 keeps its sign: `-0` on Postgres, which a
+ * `json` value keeps as written (`jsonb` holds no -0), and `-0e0` on MySQL and SQLite, whose JSON
+ * reads `-0` as the integer 0. NaN and the infinities go where the database's JSON holds them: on Postgres as the
  * text it writes for a float's inside a document, `"NaN"`, `"Infinity"` and `"-Infinity"`, and on
  * SQLite an infinity as a number past a double's range, as SQLite writes one; the rest, which no
  * value of the database holds, is refused through `fail`, with the place in the value where it
@@ -1071,7 +1071,7 @@ export function postgresLiteral(t: EngineType, v: unknown, fail: (message: strin
     };
     return write(v);
   }
-  if (t.kind === "json") return JSON.stringify(v);
+  if (t.kind === "json") return writeJson(v, "postgres", fail) as string;
   if (kind === "hstore" && isObject(v)) return hstoreText(v, (message) => fail(message.replace(/^is /, "")));
   if (kind === "vector" && Array.isArray(v) && v.every((n) => typeof n === "number" && Number.isFinite(n))) return vectorText(v);
   if (v instanceof Uint8Array) {
@@ -1473,7 +1473,7 @@ export function coerce(kind: Kind, v: unknown, column: string, delim = ",", post
     case "float":
       if (typeof v === "number") return kind === "int" ? exactInteger(v, column) : v;
       if (typeof v === "bigint") return exactInteger(v, column);
-      if (typeof v === "string" && v !== "" && !Number.isNaN(+v)) return kind === "int" && /^[+-]?\d+$/.test(v) ? exactInteger(BigInt(v), column) : +v;
+      if (typeof v === "string" && v !== "" && (!Number.isNaN(+v) || (kind === "float" && v === "NaN"))) return kind === "int" && /^[+-]?\d+$/.test(v) ? exactInteger(BigInt(v), column) : +v;
       return v;
     case "int8":
       if (typeof v === "bigint" || typeof v === "number" || typeof v === "string") return bigInteger(v, column);
