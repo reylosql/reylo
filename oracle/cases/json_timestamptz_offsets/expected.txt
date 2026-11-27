@@ -1,0 +1,2 @@
+aggregate.sql: one () -> { ats: jsonb timestamptz[]? }
+object.sql: many () -> { o: json { id: int4, at: timestamptz } }
