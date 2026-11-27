@@ -1530,19 +1530,20 @@ impl Type {
                 if e.values.is_empty() {
                     return fail("an enum lists at least one value".into());
                 }
-                let texts: Vec<&str> = e.texts().collect();
-                if let Some((i, v)) = texts.iter().enumerate().find(|(i, v)| texts[..*i].contains(v)) {
-                    return fail(format!("value {v:?} is listed twice, at {i}"));
-                }
-                if matches!(e.ty.kind, Kind::Boolean(_)) {
-                    if texts.iter().any(|v| *v != "true" && *v != "false") {
-                        return fail(format!("a boolean's values are true and false, not {texts:?}"));
-                    }
-                    if e.values.len() == 2 {
-                        return fail("an enum of both booleans is a boolean".into());
-                    }
-                }
+                // Reading a value relies on its type's own rules (a UUID's versions, an integer's bits).
                 e.ty.check_at(&format!("{at}<enum>"))?;
+                let mut values = Vec::new();
+                for (i, v) in e.texts().enumerate() {
+                    // A value the check reads is told apart by what it is, and one it does not by its text.
+                    let value = enum_value(&e.ty.kind, v).map_err(|why| format!("{here}: value {v:?} is {why}"))?.ok_or(v);
+                    if values.contains(&value) {
+                        return fail(format!("value {v:?} is listed twice, at {i}"));
+                    }
+                    values.push(value);
+                }
+                if matches!(e.ty.kind, Kind::Boolean(_)) && values.len() == 2 {
+                    return fail("an enum of both booleans is a boolean".into());
+                }
             }
             Kind::Array(a) => {
                 unsized_(&a.size)?;
@@ -1643,6 +1644,214 @@ impl Type {
     }
 }
 
+/// Rule 7 on an enum's value: one of its type's values, in the canonical text rule 5 gives its
+/// kind, as what tells it from the others, which two texts of one value share (a UUID's in either
+/// case); `None` for one the check does not read; or why it is none. Only what the format settles
+/// refuses it: a date or a time not written as the format's examples write its kind, in ISO 8601's
+/// extended form, its characters in a character set other than Unicode's, US-ASCII and ISO-8859-1,
+/// a pattern, a duration, and a time of day's bounds where it keeps an offset are not read.
+fn enum_value(kind: &Kind, text: &str) -> Result<Option<String>, &'static str> {
+    let bounded = |bounds: &Bounds| if within(text, bounds, number_order) { Ok(Some(text.to_string())) } else { Err("outside its type's bounds") };
+    const FIELDS: &str = "a date or a time with a field out of its range";
+    match kind {
+        Kind::Boolean(_) => ["true", "false"].contains(&text).then(|| Some(text.to_string())).ok_or("not true or false"),
+        // -0 writes 0, and a float's -0 equals it.
+        Kind::Integer(_) | Kind::Float(_) | Kind::Decimal(_) if text == "-0" => enum_value(kind, "0"),
+        Kind::Integer(_) if !is_canonical_number(text) || text.contains('.') => Err("no whole number in canonical text"),
+        Kind::Integer(i) if !holds_bits(text, i) => Err("past its type's width"),
+        Kind::Integer(i) => bounded(&i.bounds),
+        Kind::Float(f) if is_canonical_number(text) => bounded(&f.bounds),
+        Kind::Decimal(d) if is_canonical_number(text) && !holds_scale(text, d) => Err("more digits than its type's precision and scales hold"),
+        Kind::Decimal(d) if is_canonical_number(text) => bounded(&d.bounds),
+        Kind::Float(_) | Kind::Decimal(_) => Err("no number in canonical text"),
+        Kind::Text(t) => text_value(text, t).map(|()| Some(text.to_string())),
+        Kind::Bytes(b) => match base64_length(text) {
+            None => Err("no base64 in canonical text"),
+            Some(length) if b.size.as_ref().is_some_and(|size| !sized(length, size)) => Err("longer or shorter than its type's size"),
+            Some(_) => Ok(Some(text.to_string())),
+        },
+        Kind::Uuid(u) => {
+            let form = text.len() == 36 && text.bytes().enumerate().all(|(i, c)| if matches!(i, 8 | 13 | 18 | 23) { c == b'-' } else { c.is_ascii_hexdigit() });
+            if !form {
+                return Err("no UUID in RFC 9562's text form");
+            }
+            let digits = text.replace('-', "").to_ascii_lowercase();
+            let (version, variant) = (digits.as_bytes()[12], digits.as_bytes()[16]);
+            let versioned = |versions: &Vec<u8>| matches!(variant, b'8' | b'9' | b'a' | b'b') && versions.iter().any(|v| version == b'0' + v);
+            if u.versions.as_ref().is_some_and(|versions| !versioned(versions)) {
+                return Err("of none of its type's versions");
+            }
+            Ok(Some(digits))
+        }
+        Kind::Date(DateType { bounds, .. }) | Kind::DateTime(DateTimeType { bounds, .. }) | Kind::Instant(InstantType { bounds, .. }) => {
+            let Some((at, fraction, _)) = moment(kind, text) else { return Ok(None) };
+            let at = at.ok_or(FIELDS)?;
+            // A side no bound limits runs from 0001-01-01 up to 9999-12-31.
+            let midnight = |day: &str| date(day).and_then(|(days, _)| days).map_or(0, |days| days * 86_400);
+            let low = bounds.min.is_some() || bounds.exclusive_min.is_some() || at >= midnight("0001-01-01");
+            let high = bounds.max.is_some() || bounds.exclusive_max.is_some() || at < midnight("+10000-01-01");
+            if !(low && high && within(text, bounds, |a, b| moment_order(kind, a, b))) {
+                return Err("outside its type's range");
+            }
+            Ok(Some(format!("{at}.{fraction}")))
+        }
+        Kind::ZonedDateTime(z) => {
+            let Some((at, fraction, zone)) = moment(kind, text) else { return Ok(None) };
+            let at = at.ok_or(FIELDS)?;
+            if !within(text, &z.bounds, |a, b| moment_order(kind, a, b)) {
+                return Err("outside its type's bounds");
+            }
+            Ok(Some(format!("{at}.{fraction}{zone}")))
+        }
+        Kind::Time(t) => {
+            let Some((at, fraction, rest)) = clock(text) else { return Ok(None) };
+            // A time of day is told apart as `time_order` orders it, by its `HH:MM:SS` and its
+            // fraction, so that a leap second's `23:59:60` is not `24:00:00`.
+            let time = &text[..8];
+            if t.offset {
+                let Some((east, "")) = offset(rest) else { return Ok(None) };
+                return match (at, east) {
+                    (Some(_), Some(east)) => Ok(Some(format!("{time}.{fraction}{east:+}"))),
+                    _ => Err(FIELDS),
+                };
+            }
+            if !rest.is_empty() {
+                return Ok(None);
+            }
+            if at.is_none() {
+                return Err(FIELDS);
+            }
+            // Up to 24:00:00, which only a bound reaches.
+            let mut range = t.bounds.clone();
+            if range.max.is_none() && range.exclusive_max.is_none() {
+                range.exclusive_max = Some("24:00:00".into());
+            }
+            if !within(text, &range, |a, b| time_order(t, a, b)) {
+                return Err("outside its type's range");
+            }
+            Ok(Some(format!("{time}.{fraction}")))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// Whether a number is written in its canonical text (rule 5): in decimal, with no exponent and no
+/// zero it needs not (`-0.25`, never `01`, `1.50` or `1e2`).
+fn is_canonical_number(text: &str) -> bool {
+    let body = text.strip_prefix('-').unwrap_or(text);
+    let (whole, fraction) = body.split_once('.').map_or((body, None), |(whole, fraction)| (whole, Some(fraction)));
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    digits(whole) && (whole == "0" || !whole.starts_with('0')) && fraction.is_none_or(|f| digits(f) && !f.ends_with('0'))
+}
+
+/// Whether an integer type's width holds a whole number's canonical text: its magnitude's bits,
+/// counted in base 2^32 so that no width is too wide, against two's complement's -2^(bits-1) to
+/// 2^(bits-1) - 1, or 0 to 2^bits - 1 where it is unsigned.
+fn holds_bits(text: &str, i: &IntegerType) -> bool {
+    let (below, magnitude) = text.strip_prefix('-').map_or((false, text), |magnitude| (true, magnitude));
+    let mut limbs: Vec<u32> = Vec::new();
+    for digit in magnitude.bytes() {
+        let mut carry = u64::from(digit - b'0');
+        for limb in &mut limbs {
+            let next = u64::from(*limb) * 10 + carry;
+            (*limb, carry) = (next as u32, next >> 32);
+        }
+        if carry > 0 {
+            limbs.push(carry as u32);
+        }
+    }
+    let length = limbs.last().map_or(0, |top| 32 * (limbs.len() as u64 - 1) + u64::from(32 - top.leading_zeros()));
+    let power_of_two = limbs.iter().map(|limb| limb.count_ones()).sum::<u32>() == 1;
+    let bits = u64::from(i.bits);
+    if i.unsigned {
+        !below && length <= bits
+    } else {
+        length < bits || (below && length == bits && power_of_two)
+    }
+}
+
+/// Whether a decimal type holds a number's canonical text: some scale from `min_scale` to
+/// `max_scale` writes it with a coefficient of at most `precision` digits (`1200` is 12 × 10^2,
+/// of scale -2, or 120 × 10^1, of scale -1).
+fn holds_scale(text: &str, d: &DecimalType) -> bool {
+    let Some((_, point, digits)) = number(text) else { return false };
+    if digits.is_empty() {
+        return true;
+    }
+    // The least scale that writes it, and the least the type keeps it at.
+    let least = digits.len() as i64 - point;
+    let scale = d.min_scale.map_or(least, |min| least.max(i64::from(min)));
+    d.max_scale.is_none_or(|max| scale <= i64::from(max)) && d.precision.is_none_or(|precision| digits.len() as i64 + scale - least <= i64::from(precision))
+}
+
+/// Whether text's value is one its type holds: every character within its code points and its
+/// encoding, and as long as its size says, in the size's unit. Only a character's code point is
+/// read, so another character set than Unicode's, US-ASCII and ISO-8859-1 holds any, and a size
+/// in another encoding's units any length.
+fn text_value(text: &str, t: &TextType) -> Result<(), &'static str> {
+    if t.code_points.as_ref().is_some_and(|ranges| text.chars().any(|c| !ranges.iter().any(|[lo, hi]| (*lo..=*hi).contains(&u32::from(c))))) {
+        return Err("a character outside its type's code points");
+    }
+    let encoding = t.encoding.as_deref().map(str::to_ascii_uppercase);
+    let widest = match encoding.as_deref() {
+        Some("US-ASCII") => 0x7F,
+        Some("ISO-8859-1") => 0xFF,
+        _ => MAX_CODE_POINT,
+    };
+    if text.chars().any(|c| u32::from(c) > widest) {
+        return Err("a character its type's encoding does not hold");
+    }
+    let Some(size) = &t.size else { return Ok(()) };
+    let length = match (size.unit, encoding.as_deref()) {
+        (None, _) | (Some(_), Some("US-ASCII" | "ISO-8859-1")) | (Some(SizeUnit::CodeUnit), Some("UTF-32")) => text.chars().count(),
+        (Some(_), Some("UTF-8")) => text.len(),
+        (Some(SizeUnit::CodeUnit), Some("UTF-16")) => text.encode_utf16().count(),
+        (Some(SizeUnit::Byte), Some("UTF-16")) => 2 * text.encode_utf16().count(),
+        (Some(SizeUnit::Byte), Some("UTF-32")) => 4 * text.chars().count(),
+        _ => return Ok(()),
+    };
+    if sized(length as u64, size) {
+        Ok(())
+    } else {
+        Err("longer or shorter than its type's size")
+    }
+}
+
+/// The length of the bytes base64's canonical text writes (RFC 4648: its alphabet, padded to
+/// groups of four, no bit set past the last byte), or `None` for any other text.
+fn base64_length(text: &str) -> Option<u64> {
+    let body = text.trim_end_matches('=');
+    let padding = text.len() - body.len();
+    if text.len() % 4 != 0 || padding > 2 {
+        return None;
+    }
+    let mut last = 0;
+    for c in body.bytes() {
+        last = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => return None,
+        };
+    }
+    // Padded once, the last character's two low bits are past the last byte; twice, its four.
+    (last & ((1 << (2 * padding)) - 1) == 0).then_some((text.len() / 4 * 3 - padding) as u64)
+}
+
+/// Whether a length is one a size allows.
+fn sized(length: u64, size: &Size) -> bool {
+    size.exact.is_none_or(|n| length == n) && size.min.is_none_or(|n| length >= n) && size.max.is_none_or(|n| length <= n)
+}
+
+/// Whether a value is within bounds by `order`, a bound it cannot read limiting nothing.
+fn within(value: &str, bounds: &Bounds, order: impl Fn(&str, &str) -> Option<std::cmp::Ordering>) -> bool {
+    use std::cmp::Ordering;
+    let keeps = |bound: &Option<String>, outside: fn(Ordering) -> bool| bound.as_deref().and_then(|bound| order(value, bound)).is_none_or(|o| !outside(o));
+    keeps(&bounds.min, Ordering::is_lt) && keeps(&bounds.exclusive_min, Ordering::is_le) && keeps(&bounds.max, Ordering::is_gt) && keeps(&bounds.exclusive_max, Ordering::is_ge)
+}
+
 fn check_bounds(b: &Bounds, order: impl Fn(&str, &str) -> Option<std::cmp::Ordering>) -> Result<(), String> {
     if b.min.is_some() && b.exclusive_min.is_some() {
         return Err("min beside exclusive_min".into());
@@ -1728,46 +1937,49 @@ fn time_order(t: &TimeType, a: &str, b: &str) -> Option<std::cmp::Ordering> {
     if t.offset {
         return Some(a.cmp(b));
     }
-    let ((_, a_fraction, ""), (_, b_fraction, "")) = (clock(a)?, clock(b)?) else { return None };
+    let ((Some(_), a_fraction, ""), (Some(_), b_fraction, "")) = (clock(a)?, clock(b)?) else { return None };
     Some((&a[..8], a_fraction).cmp(&(&b[..8], b_fraction)))
 }
 
 /// Two of a date-bearing kind's values compared as the moments they write ([`moment`]).
 fn moment_order(kind: &Kind, a: &str, b: &str) -> Option<std::cmp::Ordering> {
-    let ((a, a_fraction, _), (b, b_fraction, _)) = (moment(kind, a)?, moment(kind, b)?);
+    let ((Some(a), a_fraction, _), (Some(b), b_fraction, _)) = (moment(kind, a)?, moment(kind, b)?) else { return None };
     Some((a, a_fraction).cmp(&(b, b_fraction)))
 }
 
-/// A date-bearing kind's value in ISO 8601, as the kind writes it (`-4713-11-24`,
-/// `2026-11-14T18:14:00.5`, `2026-11-14T18:14:00Z`, `2026-11-14T10:14:00-08:00[America/Los_Angeles]`),
-/// as what orders it: its seconds from 1970-01-01T00:00:00 in the proleptic Gregorian calendar, in
-/// UTC where it writes an offset, and the digits of its fraction of a second without a trailing
-/// zero, which order as the fraction does; and the zone a zoned date and time names. `None` for
-/// text that is none of the kind's.
-fn moment<'a>(kind: &Kind, text: &'a str) -> Option<(i64, &'a str, &'a str)> {
+/// A date-bearing kind's value in ISO 8601's extended form, as the format's examples write the kind
+/// (`-4713-11-24`, `2026-11-14T18:14:00.5`, `2026-11-14T18:14:00Z`,
+/// `2026-11-14T10:14:00-08:00[America/Los_Angeles]`), as what orders it: its seconds from
+/// 1970-01-01T00:00:00 in the proleptic Gregorian calendar, in UTC where it writes an offset, or
+/// `None` where a field is out of its range (`2026-13-01`); the digits of its fraction of a second
+/// without a trailing zero, which order as the fraction does; and the zone a zoned date and time
+/// names. `None` for text in no such form.
+fn moment<'a>(kind: &Kind, text: &'a str) -> Option<(Option<i64>, &'a str, &'a str)> {
     let (days, rest) = date(text)?;
-    let midnight = days * 86_400;
+    let midnight = days.map(|days| days * 86_400);
     let (seconds, fraction, rest) = match (kind, rest.strip_prefix('T')) {
         (Kind::Date(_), None) => return rest.is_empty().then_some((midnight, "", "")),
         (Kind::DateTime(_) | Kind::Instant(_) | Kind::ZonedDateTime(_), Some(time)) => clock(time)?,
         _ => return None,
     };
+    let at = midnight.zip(seconds).map(|(midnight, seconds)| midnight + seconds);
     match kind {
-        Kind::DateTime(_) if rest.is_empty() => Some((midnight + seconds, fraction, "")),
-        Kind::Instant(_) if offset(rest) == Some((0, "")) => Some((midnight + seconds, fraction, "")),
+        Kind::DateTime(_) if rest.is_empty() => Some((at, fraction, "")),
+        Kind::Instant(_) if offset(rest) == Some((Some(0), "")) => Some((at, fraction, "")),
         Kind::ZonedDateTime(_) => {
             let (east, zone) = offset(rest)?;
             let named = zone.strip_prefix('[').and_then(|z| z.strip_suffix(']')).is_some_and(|z| !z.is_empty());
-            named.then_some((midnight + seconds - east, fraction, zone))
+            named.then_some((at.zip(east).map(|(at, east)| at - east), fraction, zone))
         }
         _ => None,
     }
 }
 
-/// The calendar date an ISO 8601 text starts with, its year of four digits, or more after a sign
-/// (`-4713-11-24`, `+5874897-12-31`), as its days from 1970-01-01 in the proleptic Gregorian
-/// calendar, and the rest of the text; `None` where the text starts with no such date.
-fn date(text: &str) -> Option<(i64, &str)> {
+/// The calendar date an ISO 8601 text starts with in its extended form, its year of four digits,
+/// or more after a sign (`-4713-11-24`, `+5874897-12-31`): its days from 1970-01-01 in the
+/// proleptic Gregorian calendar, or `None` for a month or a day no year has, and the rest of the
+/// text; `None` where the text starts with no date in that form.
+fn date(text: &str) -> Option<(Option<i64>, &str)> {
     let sign = usize::from(text.starts_with(['+', '-']));
     let digits = text[sign..].bytes().take_while(u8::is_ascii_digit).count();
     if digits < 4 || (sign == 0 && digits > 4) || text.as_bytes().get(sign + digits) != Some(&b'-') {
@@ -1776,28 +1988,30 @@ fn date(text: &str) -> Option<(i64, &str)> {
     let (year, rest) = text.split_at(sign + digits);
     let year = i64::from(year.parse::<i32>().ok()?);
     let (month, day) = (two_digits(rest, 1)?, two_digits(rest, 4)?);
+    if rest.as_bytes()[3] != b'-' {
+        return None;
+    }
     let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
     let last = match month {
         1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
         4 | 6 | 9 | 11 => 30,
         2 => 28 + i64::from(leap),
-        _ => return None,
+        // A month no year has holds no day.
+        _ => 0,
     };
-    if rest.as_bytes()[3] != b'-' || !(1..=last).contains(&day) {
-        return None;
-    }
     // Days from 1970-01-01, each year counted from March, so that a leap day ends it.
     let year = if month <= 2 { year - 1 } else { year };
     let of_era = year.rem_euclid(400);
     let of_year = (153 * ((month + 9) % 12) + 2) / 5 + day - 1;
-    Some((year.div_euclid(400) * 146_097 + of_era * 365 + of_era / 4 - of_era / 100 + of_year - 719_468, &rest[6..]))
+    let days = year.div_euclid(400) * 146_097 + of_era * 365 + of_era / 4 - of_era / 100 + of_year - 719_468;
+    Some(((1..=last).contains(&day).then_some(days), &rest[6..]))
 }
 
-/// The time of day an ISO 8601 text starts with, `HH:MM:SS` and any fraction of a second, up to
-/// `24:00:00` and with a leap second's `60`, as its seconds from midnight, the digits of its
-/// fraction without a trailing zero, and the rest of the text; `None` where the text starts with
-/// no such time.
-fn clock(text: &str) -> Option<(i64, &str, &str)> {
+/// The time of day an ISO 8601 text starts with in its extended form, `HH:MM:SS` and any fraction
+/// of a second: its seconds from midnight, up to `24:00:00` and with a leap second's `60`, or
+/// `None` for a time no day has (`25:00:00`); the digits of its fraction without a trailing zero;
+/// and the rest of the text. `None` where the text starts with no time in that form.
+fn clock(text: &str) -> Option<(Option<i64>, &str, &str)> {
     let (hours, minutes, seconds) = (two_digits(text, 0)?, two_digits(text, 3)?, two_digits(text, 6)?);
     if text.as_bytes()[2] != b':' || text.as_bytes()[5] != b':' {
         return None;
@@ -1811,27 +2025,29 @@ fn clock(text: &str) -> Option<(i64, &str, &str)> {
     };
     let fraction = fraction.trim_end_matches('0');
     let time = (hours < 24 && minutes < 60 && seconds <= 60) || (hours, minutes, seconds, fraction) == (24, 0, 0, "");
-    time.then_some((hours * 3_600 + minutes * 60 + seconds, fraction, rest))
+    Some((time.then_some(hours * 3_600 + minutes * 60 + seconds), fraction, rest))
 }
 
-/// The UTC offset an ISO 8601 text starts with, `Z` or a sign and `HH`, `HH:MM` or `HH:MM:SS`,
-/// as its seconds east of UTC, and the rest of the text.
-fn offset(text: &str) -> Option<(i64, &str)> {
+/// The UTC offset an ISO 8601 text starts with, `Z` or a sign and `HH`, `HH:MM` or `HH:MM:SS`:
+/// its seconds east of UTC, or `None` where a field is out of its range (`+24:00`), and the rest
+/// of the text.
+fn offset(text: &str) -> Option<(Option<i64>, &str)> {
     if let Some(rest) = text.strip_prefix('Z') {
-        return Some((0, rest));
+        return Some((Some(0), rest));
     }
     let east = match text.as_bytes().first()? {
         b'+' => 1,
         b'-' => -1,
         _ => return None,
     };
-    let (mut seconds, mut rest) = (two_digits(text, 1).filter(|hours| *hours < 24)? * 3_600, &text[3..]);
+    let hours = two_digits(text, 1)?;
+    let (mut seconds, mut fields, mut rest) = (hours * 3_600, hours < 24, &text[3..]);
     for unit in [60, 1] {
         let Some(part) = rest.strip_prefix(':') else { break };
-        seconds += two_digits(part, 0).filter(|n| *n < 60)? * unit;
-        rest = &part[2..];
+        let n = two_digits(part, 0)?;
+        (seconds, fields, rest) = (seconds + n * unit, fields && n < 60, &part[2..]);
     }
-    Some((east * seconds, rest))
+    Some((fields.then_some(east * seconds), rest))
 }
 
 /// The number the two ASCII digits at `at` write.
