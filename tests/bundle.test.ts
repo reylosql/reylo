@@ -6,8 +6,6 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
 import { build } from "esbuild";
 import { DEFINE } from "../src/loader.ts";
@@ -81,10 +79,8 @@ test("a query of Postgres's rarer types reads them with the postgresTypes its mo
 
 /** What `script` prints, run in a process of its own, where nothing has installed Postgres's rarer types. */
 function fresh(script: string): string {
-  // From a file, since a bundle is past the length a command line takes on Windows.
-  const file = join(mkdtempSync(join(tmpdir(), "reylo-bundle-")), "run.mjs");
-  writeFileSync(file, script);
-  const out = spawnSync(process.execPath, [file], { encoding: "utf8" });
+  // On standard input, since a bundle is past the length a command line takes on Windows.
+  const out = spawnSync(process.execPath, ["--input-type=module"], { input: script, encoding: "utf8" });
   return (out.stdout + out.stderr).trim();
 }
 
