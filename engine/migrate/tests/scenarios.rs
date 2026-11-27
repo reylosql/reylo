@@ -4435,7 +4435,7 @@ fn a_project_with_pg_cron_replays_in_shadows() {
         assert_eq!(q.dry_run().await, 0, "{}", q.peek());
         assert_eq!(q.migrate().await, 0, "{}", q.peek());
         // One that drops it and makes it again, in a shadow that has it.
-        q.file("20261126110000_again.sql", "drop extension pg_cron; create extension pg_cron;");
+        q.file("20261126110000_again.sql", "drop/* again */extension\npg_cron; create extension pg_cron;");
         assert_eq!(q.dry_run().await, 0, "{}", q.peek());
         assert_eq!(q.migrate().await, 0, "{}", q.peek());
         assert!(q.rows("select 1 from pg_database where datname = 'contrib_regression'").await.is_empty(), "a shadow kept pg_cron's name");
