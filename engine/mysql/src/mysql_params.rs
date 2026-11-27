@@ -907,12 +907,16 @@ impl Walk {
             }
             SetExpr::Insert(s) | SetExpr::Update(s) | SetExpr::Delete(s) | SetExpr::Merge(s) => self.statement(s, env),
             // `TABLE t` reads what `SELECT * FROM t` does, a WITH query in scope included. Its name
-            // is written as the statement quotes it.
+            // is written as the statement quotes it, in backticks or, under ANSI_QUOTES, in double quotes.
             SetExpr::Table(table) => {
                 self.by_schema |= table.schema_name.is_some();
-                let unquoted = |name: &str| match name.strip_prefix('`').and_then(|n| n.strip_suffix('`')) {
-                    Some(inner) => inner.replace("``", "`"),
-                    None => name.to_string(),
+                let unquoted = |name: &str| {
+                    for quote in ['`', '"'] {
+                        if let Some(inner) = name.strip_prefix(quote).and_then(|n| n.strip_suffix(quote)).filter(|_| name.len() > 1) {
+                            return inner.replace(&format!("{quote}{quote}"), &quote.to_string());
+                        }
+                    }
+                    name.to_string()
                 };
                 if let Some(name) = table.table_name.as_deref().filter(|_| table.schema_name.is_none()).map(unquoted) {
                     if !matches!(crate::mysql_names::with_query(env.ctes.iter().map(String::as_str), &name), Reads::With(_)) {
@@ -1251,6 +1255,7 @@ mod tests {
         // `TABLE t` reads its table, or the WITH query of its name, wherever it stands.
         assert_eq!(tables("select d.id from (table `users`) d union table posts"), (names(&["posts", "users"]), vec![]));
         assert_eq!(tables("with users as (select id from accounts) table users"), (names(&["accounts"]), vec![]));
+        assert_eq!(tables("select d.id from (table `a``b`) d"), (names(&["a`b"]), vec![]));
         let statement = crate::mysql::parse_default("select d.id from (table other.users) d").unwrap().pop().unwrap();
         assert_eq!((super::tables(&statement).read, super::reads_by_schema(&statement)), (vec![], true));
         // A multi-table UPDATE or DELETE may write any of its tables; one that names a table of

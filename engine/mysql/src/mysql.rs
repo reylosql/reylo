@@ -3008,11 +3008,21 @@ fn unconverted(statement: Option<&Statement>, raw: &MysqlDescribe, views: &HashS
     let mut tables = crate::mysql_params::tables(statement).read;
     tables.sort();
     tables.dedup();
-    // Per table, as the statement names it, each column's character set, or `None` where the
-    // session will not show the table.
+    // Per table, as the statement names it, each column's character set, or `None` where it is not
+    // read. Only a table the catalog lists is shown: `SHOW FULL COLUMNS` of any other name, `DUAL`
+    // or a TEMPORARY table's, is refused only as it runs, which stops the analysis. A TEMPORARY
+    // table that hides none is one whose columns are not read.
+    let listed = match answered_by_table(host, crate::mysql_params::TYPES_QUERY, &tables)? {
+        Ok((_, answers)) => answers,
+        Err(_) => Default::default(),
+    };
     let mut charsets: Vec<(String, Option<HashMap<String, String>>)> = Vec::with_capacity(tables.len());
     let mut pending = false;
     for table in tables {
+        if listed.name(&table).is_none() {
+            charsets.push((table, None));
+            continue;
+        }
         match session_charsets(&table, host) {
             Some(found) => charsets.push((table, found)),
             None => pending = true,
@@ -3056,18 +3066,13 @@ fn unconverted(statement: Option<&Statement>, raw: &MysqlDescribe, views: &HashS
 /// Each column of a table, in lower case, with its character set, empty for none, as the session's
 /// own `SHOW FULL COLUMNS` has it, which reads the table the name resolves to: `information_schema`
 /// lists none of a TEMPORARY table's columns, and lists those of a table one of the same name hides.
-/// `None` for a table the session will not show.
+/// Asked only of a table the catalog lists, which the session can show. `None` where it is not read.
 fn session_charsets(table: &str, host: &Host) -> Lazy<Option<HashMap<String, String>>> {
     // A host writes a value at each `?` of a catalog query, so a name holding one cannot be asked about.
     if table.contains('?') {
         return Some(None);
     }
     let sql = format!("SHOW FULL COLUMNS FROM `{}`", table.replace('`', "``"));
-    // A host stops the analysis on a catalog query the server refuses, and answers a prepare with
-    // the error: a table the server will not show leaves its columns unread.
-    if host.describe(&sql)?.is_err() {
-        return Some(None);
-    }
     let Ok(rows) = host.query(&sql, Vec::new(), Scope::Statement)? else { return Some(None) };
     // `Field`, `Type`, `Collation`, …: a collation's name opens with its character set's.
     Some(Some(
@@ -4358,6 +4363,9 @@ mod tests {
         assert_eq!(one(r"select 'C:\' as p, id from t where id = ?", plain), r"SELECT 'C:\' AS p, id FROM t WHERE id = ?");
         assert!(parse(&SessionDialect(MysqlText::default(), true, false), r"select 'C:\' as p, id from t where id = ?").is_err());
         assert_eq!(one(r#"select "id" from "t" where "id" = 1"#, ansi), r#"SELECT "id" FROM "t" WHERE "id" = 1"#);
+        // A TABLE statement's name in double quotes is the table's.
+        let quoted = parse(&SessionDialect(ansi, true, false), r#"select d.id from (table "t") d"#).unwrap().pop().unwrap();
+        assert_eq!(crate::mysql_params::tables(&quoted).read, ["t"]);
         // `||` is OR, bound as OR binds, unless the session joins strings with it.
         let pipes = |sql: &str, or: bool| parse(&SessionDialect(MysqlText::default(), or, false), sql).unwrap().pop().unwrap().to_string();
         assert_eq!(pipes("select id from t where id = 1 || name = 'a' && n = 2", true), "SELECT id FROM t WHERE id = 1 OR name = 'a' AND n = 2");
@@ -4643,7 +4651,8 @@ mod tests {
     #[test]
     fn a_column_inside_a_document_keeps_its_length_by_the_character_set_the_session_resolves() {
         // `information_schema` lists the permanent `t`, in utf8mb4, while a TEMPORARY `t` the
-        // session reads hides it; `SHOW FULL COLUMNS` reads what the session resolves.
+        // session reads hides it; `SHOW FULL COLUMNS` reads what the session resolves. `None` for a
+        // `t` the catalog does not list, a TEMPORARY table that hides none.
         let doc = |shown: Option<&str>| {
             let json = json!({ "name": "doc", "type": 245, "flags": 0, "charset": 63, "length": 4_294_967_295u32, "decimals": 0, "schema": "", "org_table": "", "org_name": "" });
             let u = json!({ "name": "u", "type": 253, "flags": 0, "charset": 255, "length": 16, "decimals": 0, "schema": "app", "org_table": "t", "org_name": "u" });
@@ -4655,14 +4664,11 @@ mod tests {
                 }
                 for need in host.needs() {
                     let (id, answer) = match need {
-                        crate::api::Need::Describe { id, sql } if sql.starts_with("SHOW FULL COLUMNS") => match shown {
-                            Some(_) => (id, json!({ "mysql": { "columns": [], "params": [] } })),
-                            None => (id, json!({ "error": { "message": "Table 'app.t' doesn't exist", "code": "1146" } })),
-                        },
                         crate::api::Need::Describe { id, sql } if sql.to_ascii_lowercase().contains("json_object") => (id, json!({ "mysql": { "columns": [json.clone()], "params": [] } })),
                         crate::api::Need::Describe { id, .. } => (id, json!({ "mysql": { "columns": [u.clone()], "params": [] } })),
-                        crate::api::Need::Query { id, sql, .. } if sql.starts_with("SHOW FULL COLUMNS") => (id, json!({ "rows": [["u", "varchar(4)", shown, "YES", "", null, "", "select", ""]] })),
-                        crate::api::Need::Query { id, sql, .. } if sql == crate::mysql_params::TYPES_QUERY => (id, json!({ "rows": [["t", "u", "varchar", "varchar(4)", "", "", "utf8mb4"]] })),
+                        // MySQL refuses `SHOW FULL COLUMNS` of a table it does not hold only as it runs, which stops the analysis.
+                        crate::api::Need::Query { id, sql, .. } if sql.starts_with("SHOW FULL COLUMNS") => (id, json!({ "rows": [["u", "varchar(4)", shown.expect("a table the catalog does not list is not shown"), "YES", "", null, "", "select", ""]] })),
+                        crate::api::Need::Query { id, sql, .. } if sql == crate::mysql_params::TYPES_QUERY => (id, json!({ "rows": if shown.is_some() { json!([["t", "u", "varchar", "varchar(4)", "", "", "utf8mb4"]]) } else { json!([]) } })),
                         crate::api::Need::Query { id, .. } => (id, json!({ "rows": [] })),
                     };
                     answers.insert(id, serde_json::from_value(answer).unwrap());
@@ -4672,7 +4678,6 @@ mod tests {
         };
         assert_eq!(doc(Some("utf8mb4_0900_ai_ci")), "json { k: varchar(≤4)? }");
         assert_eq!(doc(Some("utf32_general_ci")), "json { k: varchar? }");
-        // A table the session will not show keeps no length.
         assert_eq!(doc(None), "json { k: varchar? }");
     }
 

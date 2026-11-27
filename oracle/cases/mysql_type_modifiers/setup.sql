@@ -47,6 +47,8 @@ create table wide_sets (
   u16_note tinytext character set utf16,
   plain varchar(4)
 );
+-- A table whose name holds a `?`, which no catalog query can write as a literal.
+create table `wide?mark` (id int primary key, u16 varchar(4) character set utf16, plain varchar(4));
 -- A DECIMAL of no whole digits, apart, since the seeding's first value, 1, does not fit it.
 create table parts (id int primary key, part decimal(5,5) not null);
 create view sized_view as select name, concat(name, name) as twice, price, at_ms from sized;
