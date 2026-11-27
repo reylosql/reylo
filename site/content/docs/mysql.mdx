@@ -743,3 +743,4 @@ What Reylo can't type on MySQL, and what to do instead:
 | A statement other than a query, such as `create index` or `show tables` | None: it returns nothing, or rows whose columns are all nullable, as MySQL reports |
 | `explain` and `call`, whose rows MySQL describes only once they run | None: each is an error |
 | A file of several statements, such as a migration | Put each statement in a file of its own |
+| A change to any database the type check's account can see, since a query can read another database: Reylo analyzes your queries again | Grant that account only the databases your queries read |

@@ -329,7 +329,7 @@ export function rowFields(kind: Kind): Columns {
 }
 
 /** What separates the elements of an array of `element` in Postgres's text: its type's `typdelim`, `;` for a box and `:` for PostGIS's types. */
-function delimiterOf(element: EngineType): string | undefined {
+export function delimiterOf(element: EngineType): string | undefined {
   if (geometric(element) === "box") return ";";
   return element.kind === "geometry" && (bareName(element) === "geometry" || bareName(element) === "geography") ? ":" : undefined;
 }
@@ -864,6 +864,23 @@ export const isRangeKind = (kind: Kind): boolean => kind.startsWith("range:");
 export const isMultirangeKind = (kind: Kind): boolean => kind.startsWith("multirange:");
 /** Whether one value of `kind` is itself a JavaScript array (a vector, a segment, a polygon, a multirange), so that an array of them is no deeper dimension. */
 export const isArrayValued = (kind: Kind): boolean => kind === "vector" || kind === "lseg" || kind === "polygon" || isMultirangeKind(kind);
+
+/**
+ * Whether a JavaScript array standing where an element of `element` goes is a level of the array
+ * around it rather than one element: the one rule `.run()` counts a Postgres array's dimensions by
+ * and a parameter writes them by. A value of most types is no array, so an array there is a level.
+ * One that is an array itself (`isArrayValued`) holds neither an array nor a null (a vector its
+ * numbers, a segment and a polygon their points, a multirange its ranges), so an array holding
+ * either, or a hole, is a level and any other is one value, `[]` an empty multirange. A JSON value may be any
+ * array, so an array there is one JSON value.
+ */
+export function isLevel(element: Kind, a: readonly unknown[]): boolean {
+  if (element === "json") return false;
+  if (!isArrayValued(element)) return true;
+  // A hole is an undefined too, which `some` would skip.
+  for (let i = 0; i < a.length; i++) if (!(i in a) || a[i] === null || a[i] === undefined || Array.isArray(a[i])) return true;
+  return false;
+}
 /** The kind of a whole array standing as an element, `int[]` of `{int[]}`; undefined for any other kind. */
 export const wholeArrayKind = (kind: Kind): Kind | undefined => (kind.startsWith("{") && kind.endsWith("}") ? kind.slice(1, -1) : undefined);
 
@@ -1046,12 +1063,6 @@ function rangeText(t: Extract<EngineType, { kind: "range" | "multirange" }>, v: 
 /** A value inside an array's or a row value's text: quoted, with each quote and backslash escaped. */
 const quoted = (text: string) => `"${text.replace(/["\\]/g, "\\$&")}"`;
 
-/** Whether a value of `t` may itself be a JavaScript array, which is then one element, never a dimension: a vector, a segment, a polygon, a multirange (`isArrayValued`), and a JSON value. */
-const arrayValued = (t: EngineType) => {
-  const kind = columnKind(t, "postgres");
-  return isArrayValued(kind) || kind === "json";
-};
-
 /**
  * A value of the Postgres type `t` as the text its input function reads: a row value from an
  * object of its fields, a geometric type from its object, and each part of either as a parameter
@@ -1085,7 +1096,7 @@ export function postgresLiteral(t: EngineType, v: unknown, fail: (message: strin
     const delim = delimiterOf(element) ?? ",";
     const write = (a: unknown): string => {
       if (!Array.isArray(a)) return fail(`an array; got ${describe(a)}.`);
-      return `{${a.map((e) => (e === null || e === undefined ? "NULL" : Array.isArray(e) && !arrayValued(element) && !holdsWholeArrays(t) ? write(e) : quoted(postgresLiteral(element, e, fail)))).join(delim)}}`;
+      return `{${a.map((e) => (e === null || e === undefined ? "NULL" : Array.isArray(e) && !holdsWholeArrays(t) && isLevel(columnKind(element, "postgres"), e) ? write(e) : quoted(postgresLiteral(element, e, fail)))).join(delim)}}`;
     };
     return write(v);
   }
@@ -1180,8 +1191,9 @@ export function parseArray(text: string, element: (text: string) => unknown, del
  * column holds, so a value of more is refused, naming the column. An array the statement builds
  * of arrays (`array_agg` over an array column) is declared with a `[]` per level, and holds them.
  * Postgres's arrays are rectangular, so the depth of the first element at each level is every one's.
- * An element that is an array itself (a vector, a segment, a polygon, a multirange) is one level
- * more; a JSON element may be one at any depth, which its type holds whatever the dimensions around it.
+ * An element that is an array itself (a vector, a segment, a polygon, a multirange) is told from a
+ * level as a parameter tells it (`isLevel`); a JSON element may be one at any depth, which its type
+ * holds whatever the dimensions around it.
  * A whole array standing as an element (`{k}`) is held to its own kind's, and the array around it to
  * its own by the dimensions its text had (`recordDepth`).
  */
@@ -1208,8 +1220,8 @@ export function withinDimensions(v: unknown, kind: Kind, column: string): unknow
     each(v, declared);
     return v;
   }
-  let depth = isArrayValued(element) ? -1 : 0;
-  for (let level: unknown = v; Array.isArray(level); level = level.find((e) => e !== null)) depth++;
+  let depth = 0;
+  for (let level: unknown = v; Array.isArray(level) && (depth === 0 || isLevel(element, level)); level = level.find((e) => e !== null)) depth++;
   if (depth <= declared) return v;
   throw tooDeep(column, depth, declared);
 }

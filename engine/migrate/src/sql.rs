@@ -392,7 +392,7 @@ macro_rules! re {
 }
 
 re!(TRANSACTION_CONTROL, r"^(BEGIN|START TRANSACTION|COMMIT|END|ROLLBACK|SAVEPOINT|RELEASE|ABORT|SET TRANSACTION)\b");
-re!(PG_ALONE, r"^(CREATE (UNIQUE )?INDEX CONCURRENTLY|DROP INDEX CONCURRENTLY|REINDEX\b.*\bCONCURRENTLY|VACUUM|ALTER SYSTEM|CREATE DATABASE|DROP DATABASE|CREATE TABLESPACE|DROP TABLESPACE|CLUSTER$|REINDEX (SYSTEM|DATABASE))");
+re!(PG_ALONE, r"^(CREATE (UNIQUE )?INDEX CONCURRENTLY|DROP INDEX CONCURRENTLY|REINDEX\b.*\bCONCURRENTLY|VACUUM|ALTER SYSTEM|CREATE DATABASE|DROP DATABASE|CREATE TABLESPACE|DROP TABLESPACE|REINDEX (SYSTEM|DATABASE))");
 re!(SQLITE_ALONE, r"^(VACUUM|ATTACH|DETACH)\b");
 re!(PG_DETACH, r"^ALTER TABLE\b.*\bDETACH PARTITION\b.*\bCONCURRENTLY\b");
 re!(PG_BUILDS_INDEX, r"^CREATE (UNIQUE )?INDEX CONCURRENTLY\b");
@@ -435,6 +435,51 @@ fn sets_server(statement: &Statement) -> bool {
     false
 }
 
+/// Whether a Postgres CLUSTER or REPACK refuses a transaction block: one of every table, with no
+/// table named, or one whose last CONCURRENTLY or ANALYZE turns it on, as `defGetBoolean` reads the
+/// value. One of a partitioned table refuses it too, which the statement's text doesn't say.
+fn reorders_alone(tokens: &[Token]) -> bool {
+    let word = |i: usize| tokens.get(i).map(Token::upper).unwrap_or_default();
+    if !matches!(word(0).as_str(), "CLUSTER" | "REPACK") {
+        return false;
+    }
+    let mut i = 1;
+    let (mut concurrently, mut analyze) = (false, false);
+    if tokens.get(1).is_some_and(|t| t.text == "(") {
+        i = 2;
+        while i < tokens.len() && tokens[i].text != ")" {
+            // A name as Postgres folds it: a word lowercased, a quoted one as written.
+            let name = match tokens[i].kind {
+                TokenKind::Quoted => tokens[i].text.trim_matches('"').replace("\"\"", "\""),
+                _ => tokens[i].text.to_ascii_lowercase(),
+            };
+            i += 1;
+            let start = i;
+            while i < tokens.len() && tokens[i].text != "," && tokens[i].text != ")" {
+                i += 1;
+            }
+            let value: String = tokens[start..i]
+                .iter()
+                .filter(|t| t.text != "+")
+                .map(|t| t.text.strip_prefix(['E', 'e']).filter(|_| t.kind == TokenKind::Str).unwrap_or(&t.text).trim_matches(['\'', '"']).to_ascii_lowercase())
+                .collect();
+            let enabled = !matches!(value.as_str(), "f" | "fa" | "fal" | "fals" | "false" | "n" | "no" | "of" | "off" | "0");
+            match name.as_str() {
+                "concurrently" => concurrently = enabled,
+                "analyze" | "analyse" => analyze = enabled,
+                _ => {}
+            }
+            if tokens.get(i).is_some_and(|t| t.text == ",") {
+                i += 1;
+            }
+        }
+        i += 1;
+    } else if word(1) == "VERBOSE" {
+        i = 2;
+    }
+    concurrently || analyze || tokens.get(i).is_none_or(|t| t.upper() == "USING")
+}
+
 /// How the statement runs on the dialect: inside the file's transaction, or not.
 pub fn kind_of(statement: &Statement, dialect: Dialect) -> Kind {
     let h = head(statement, 6);
@@ -443,7 +488,7 @@ pub fn kind_of(statement: &Statement, dialect: Dialect) -> Kind {
     }
     match dialect {
         Dialect::Postgres => {
-            if PG_ALONE.is_match(&h) || PG_DETACH.is_match(&head(statement, statement.tokens.len())) {
+            if PG_ALONE.is_match(&h) || PG_DETACH.is_match(&head(statement, statement.tokens.len())) || reorders_alone(&statement.tokens) {
                 Kind::Alone
             } else {
                 Kind::Transactional
@@ -835,6 +880,18 @@ mod tests {
             assert!(!builds_index_alone(sql, p), "{sql}");
         }
         assert!(!builds_index_alone("create index users_h on users (handle)", Dialect::Mysql));
+    }
+
+    #[test]
+    fn what_postgres_runs_only_outside_a_transaction_runs_alone() {
+        let kind = |sql: &str| kind_of(&split_statements(sql, Dialect::Postgres)[0], Dialect::Postgres);
+        // Postgres 19's REPACK of every table, or with CONCURRENTLY or ANALYZE, refuses a transaction block, as CLUSTER of every table does.
+        for sql in ["repack", "repack (verbose)", "repack using index", "repack (verbose) using index", "repack (concurrently) t", "repack (analyze, verbose) t using index", "repack (analyse) t", "repack (verbose, analyze on) t", "repack (\"analyze\") t", "repack (analyze false, analyse) t", "cluster", "cluster (verbose)", "cluster verbose", "vacuum t"] {
+            assert_eq!(kind(sql), Kind::Alone, "{sql}");
+        }
+        for sql in ["repack t", "repack (verbose) t using index t_pkey", "repack (analyze false) t", "repack (concurrently off, verbose) t", "repack (analyze \"off\") t", "repack (analyze E'false') t", "repack (analyze +0) t", "repack (analyze true, analyse false) t", "cluster t using t_pkey", "cluster (verbose) t", "cluster verbose t", "cluster t_pkey on t", "repack \"Orders\""] {
+            assert_eq!(kind(sql), Kind::Transactional, "{sql}");
+        }
     }
 
     fn texts(sql: &str, d: Dialect) -> Vec<String> {

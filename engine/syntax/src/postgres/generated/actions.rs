@@ -62,34 +62,69 @@ out = V::Null;
 }
 Ok(out)
 }
-fn a136(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a137(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::Null;
 
 Ok(out)
 }
-fn a137(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a138(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = std::mem::take(&mut y[0]);
 
 Ok(out)
 }
-fn a141(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a142(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::Int(1);
 
 Ok(out)
 }
-fn a142(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a143(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::Int(0);
 
 Ok(out)
 }
-fn a146(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a149(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = std::mem::take(&mut y[1]);
+
+Ok(out)
+}
+fn a151(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = h::list_make1(&y[0])?;
+
+Ok(out)
+}
+fn a152(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = h::lappend(&y[0], &y[2])?;
+
+Ok(out)
+}
+fn a153(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = h::makeDefElem(&y[0], &y[1], &V::Int(l[0] as i64))?;
+
+Ok(out)
+}
+fn a155(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = V::s("analyze");
+
+Ok(out)
+}
+fn a156(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = V::s("format");
+
+Ok(out)
+}
+fn a157(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = h::makeString(&y[0])?;
+
+Ok(out)
+}
+fn a160(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CallStmt);
 v_n.set(f::F_funccall, y[1].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a147(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a161(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CreateRoleStmt);
 v_n.set(f::F_stmt_type, V::Int(0));
@@ -98,62 +133,62 @@ v_n.set(f::F_options, y[4].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a151(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a165(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::lappend(&y[0], &y[1])?;
 
 Ok(out)
 }
-fn a155(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a169(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("password"), &h::makeString(&y[1])?, &V::Int(l[0] as i64))?;
 out.clone().set(f::F_arg_location, V::Int(l[1] as i64));
 Ok(out)
 }
-fn a156(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a170(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("password"), &h::makeParamRef(&y[1], &V::Int(l[1] as i64))?, &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a157(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a171(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("password"), &V::Null, &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a158(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a172(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("password"), &h::makeString(&y[2])?, &V::Int(l[0] as i64))?;
 out.clone().set(f::F_arg_location, V::Int(l[2] as i64));
 Ok(out)
 }
-fn a159(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a173(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("password"), &h::makeParamRef(&y[2], &V::Int(l[2] as i64))?, &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a160(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a174(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 return Err(h::message("UNENCRYPTED PASSWORD is no longer supported", &[]));
 Ok(out)
 }
-fn a161(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a175(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("inherit"), &h::makeBoolean(&V::Int(1))?, &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a162(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a176(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("connectionlimit"), &h::makeInteger(&y[2])?, &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a163(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a177(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("validUntil"), &h::makeString(&y[2])?, &V::Int(l[0] as i64))?;
 out.clone().set(f::F_arg_location, V::Int(l[2] as i64));
 Ok(out)
 }
-fn a164(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a178(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("rolemembers"), &y[1], &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a165(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a179(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 if h::strcmp(&y[0], &V::s("superuser"))?.eq(&V::Int(0)).truthy() {
 out = h::makeDefElem(&V::s("superuser"), &h::makeBoolean(&V::Int(1))?, &V::Int(l[0] as i64))?;
@@ -210,22 +245,22 @@ return Err(h::message("unrecognized role option \"%s\"", &[y[0].clone()]));
 }
 Ok(out)
 }
-fn a167(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a181(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("sysid"), &h::makeInteger(&y[1])?, &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a168(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a182(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("adminmembers"), &y[1], &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a170(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a184(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("addroleto"), &y[2], &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a172(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a186(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CreateRoleStmt);
 v_n.set(f::F_stmt_type, V::Int(1));
@@ -234,7 +269,7 @@ v_n.set(f::F_options, y[4].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a173(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a187(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterRoleStmt);
 v_n.set(f::F_role, y[2].clone());
@@ -243,12 +278,12 @@ v_n.set(f::F_options, y[4].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a176(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a190(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = std::mem::take(&mut y[2]);
 
 Ok(out)
 }
-fn a177(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a191(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterRoleSetStmt);
 v_n.set(f::F_role, y[2].clone());
@@ -257,7 +292,7 @@ v_n.set(f::F_setstmt, y[4].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a178(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a192(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterRoleSetStmt);
 v_n.set(f::F_role, V::Null);
@@ -266,7 +301,7 @@ v_n.set(f::F_setstmt, y[4].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a181(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a195(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_DropRoleStmt);
 v_n.set(f::F_missing_ok, V::Int(0));
@@ -274,7 +309,7 @@ v_n.set(f::F_roles, y[2].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a182(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a196(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_DropRoleStmt);
 v_n.set(f::F_missing_ok, V::Int(1));
@@ -282,7 +317,7 @@ v_n.set(f::F_roles, y[4].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a184(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a198(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_DropRoleStmt);
 v_n.set(f::F_roles, y[4].clone());
@@ -290,7 +325,7 @@ v_n.set(f::F_missing_ok, V::Int(1));
 out = v_n.clone();
 Ok(out)
 }
-fn a187(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a201(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CreateRoleStmt);
 v_n.set(f::F_stmt_type, V::Int(2));
@@ -299,7 +334,7 @@ v_n.set(f::F_options, y[4].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a188(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a202(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterRoleStmt);
 v_n.set(f::F_role, y[2].clone());
@@ -308,12 +343,12 @@ v_n.set(f::F_options, h::list_make1(&h::makeDefElem(&V::s("rolemembers"), &y[5],
 out = v_n.clone();
 Ok(out)
 }
-fn a190(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a204(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::Int(1).neg();
 
 Ok(out)
 }
-fn a191(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a205(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CreateSchemaStmt);
 v_n.set(f::F_schemaname, y[2].clone());
@@ -323,7 +358,7 @@ v_n.set(f::F_if_not_exists, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a192(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a206(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CreateSchemaStmt);
 v_n.set(f::F_schemaname, y[2].clone());
@@ -333,7 +368,7 @@ v_n.set(f::F_if_not_exists, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a193(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a207(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CreateSchemaStmt);
 v_n.set(f::F_schemaname, y[5].clone());
@@ -346,7 +381,7 @@ v_n.set(f::F_if_not_exists, V::Int(1));
 out = v_n.clone();
 Ok(out)
 }
-fn a194(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a208(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CreateSchemaStmt);
 v_n.set(f::F_schemaname, y[5].clone());
@@ -359,28 +394,28 @@ v_n.set(f::F_if_not_exists, V::Int(1));
 out = v_n.clone();
 Ok(out)
 }
-fn a203(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a217(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = y[1].clone();
 v_n.set(f::F_is_local, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a204(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a218(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = y[2].clone();
 v_n.set(f::F_is_local, V::Int(1));
 out = v_n.clone();
 Ok(out)
 }
-fn a205(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a219(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = y[2].clone();
 v_n.set(f::F_is_local, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a206(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a220(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_VariableSetStmt);
 v_n.set(f::F_kind, V::Int(3));
@@ -391,7 +426,7 @@ v_n.set(f::F_location, V::Int(1).neg());
 out = v_n.clone();
 Ok(out)
 }
-fn a207(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a221(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_VariableSetStmt);
 v_n.set(f::F_kind, V::Int(3));
@@ -402,7 +437,7 @@ v_n.set(f::F_location, V::Int(1).neg());
 out = v_n.clone();
 Ok(out)
 }
-fn a209(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a223(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_VariableSetStmt);
 v_n.set(f::F_kind, V::Int(0));
@@ -412,7 +447,17 @@ v_n.set(f::F_location, V::Int(l[2] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a211(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a225(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = y.first().cloned().unwrap_or(V::Null);
+let mut v_n = V::node(t::T_VariableSetStmt);
+v_n.set(f::F_kind, V::Int(0));
+v_n.set(f::F_name, y[0].clone());
+v_n.set(f::F_args, h::list_make1(&h::makeNullAConst(&V::Int(l[2] as i64))?)?);
+v_n.set(f::F_location, V::Int(l[2] as i64));
+out = v_n.clone();
+Ok(out)
+}
+fn a227(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_VariableSetStmt);
 v_n.set(f::F_kind, V::Int(1));
@@ -421,7 +466,7 @@ v_n.set(f::F_location, V::Int(1).neg());
 out = v_n.clone();
 Ok(out)
 }
-fn a214(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a230(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_VariableSetStmt);
 v_n.set(f::F_kind, V::Int(2));
@@ -430,7 +475,7 @@ v_n.set(f::F_location, V::Int(1).neg());
 out = v_n.clone();
 Ok(out)
 }
-fn a215(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a231(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_VariableSetStmt);
 v_n.set(f::F_kind, V::Int(0));
@@ -445,13 +490,13 @@ v_n.set(f::F_kind, V::Int(1));
 out = v_n.clone();
 Ok(out)
 }
-fn a216(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a232(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 return Err(h::message("current database cannot be changed", &[]));
 out = V::Null;
 Ok(out)
 }
-fn a217(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a233(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_VariableSetStmt);
 v_n.set(f::F_kind, V::Int(0));
@@ -461,7 +506,7 @@ v_n.set(f::F_location, V::Int(l[1] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a218(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a234(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_VariableSetStmt);
 v_n.set(f::F_kind, V::Int(0));
@@ -470,7 +515,7 @@ v_n.set(f::F_args, h::list_make1(&h::makeParamRef(&y[1], &V::Int(l[1] as i64))?)
 out = v_n.clone();
 Ok(out)
 }
-fn a219(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a235(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_VariableSetStmt);
 v_n.set(f::F_kind, V::Int(0));
@@ -484,7 +529,7 @@ v_n.set(f::F_kind, V::Int(1));
 out = v_n.clone();
 Ok(out)
 }
-fn a220(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a236(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_VariableSetStmt);
 v_n.set(f::F_kind, V::Int(0));
@@ -494,7 +539,7 @@ v_n.set(f::F_location, V::Int(l[1] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a221(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a237(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_VariableSetStmt);
 v_n.set(f::F_kind, V::Int(0));
@@ -503,7 +548,7 @@ v_n.set(f::F_args, h::list_make1(&h::makeParamRef(&y[1], &V::Int(l[1] as i64))?)
 out = v_n.clone();
 Ok(out)
 }
-fn a222(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a238(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_VariableSetStmt);
 v_n.set(f::F_kind, V::Int(0));
@@ -513,7 +558,7 @@ v_n.set(f::F_location, V::Int(l[2] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a223(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a239(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_VariableSetStmt);
 v_n.set(f::F_kind, V::Int(0));
@@ -522,7 +567,7 @@ v_n.set(f::F_args, h::list_make1(&h::makeParamRef(&y[2], &V::Int(l[2] as i64))?)
 out = v_n.clone();
 Ok(out)
 }
-fn a224(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a240(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_VariableSetStmt);
 v_n.set(f::F_kind, V::Int(1));
@@ -531,7 +576,7 @@ v_n.set(f::F_location, V::Int(1).neg());
 out = v_n.clone();
 Ok(out)
 }
-fn a225(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a241(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_VariableSetStmt);
 v_n.set(f::F_kind, V::Int(0));
@@ -542,7 +587,7 @@ v_n.set(f::F_location, V::Int(1).neg());
 out = v_n.clone();
 Ok(out)
 }
-fn a226(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a242(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_VariableSetStmt);
 v_n.set(f::F_kind, V::Int(3));
@@ -552,82 +597,72 @@ v_n.set(f::F_location, V::Int(l[2] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a227(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a243(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::NameListToString(&y[0])?;
 
 Ok(out)
 }
-fn a228(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a244(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::list_make1(&h::makeString(&y[0])?)?;
 
 Ok(out)
 }
-fn a229(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a245(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::lappend(&y[0], &h::makeString(&y[2])?)?;
 
 Ok(out)
 }
-fn a230(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = h::list_make1(&y[0])?;
-
-Ok(out)
-}
-fn a231(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = h::lappend(&y[0], &y[2])?;
-
-Ok(out)
-}
-fn a232(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a248(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeStringConst(&y[0], &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a233(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a249(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeAConst(&y[0], &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a234(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a250(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeParamRef(&y[0], &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a235(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a251(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::s("read uncommitted");
 
 Ok(out)
 }
-fn a236(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a252(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::s("read committed");
 
 Ok(out)
 }
-fn a237(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a253(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::s("repeatable read");
 
 Ok(out)
 }
-fn a238(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a254(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::s("serializable");
 
 Ok(out)
 }
-fn a239(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a255(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::s("true");
 
 Ok(out)
 }
-fn a240(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a256(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::s("false");
 
 Ok(out)
 }
-fn a241(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a257(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::s("on");
 
 Ok(out)
 }
-fn a246(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a262(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_t = y[0].clone();
 if y[2].ne(&V::Null).truthy() {
@@ -640,19 +675,14 @@ v_t.set(f::F_typmods, y[2].clone());
 out = h::makeStringConstCast(&y[1], &V::Int(l[1] as i64), &v_t)?;
 Ok(out)
 }
-fn a247(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a263(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_t = y[0].clone();
 v_t.set(f::F_typmods, h::list_make2(&h::makeIntConst(&V::Int(32767), &V::Int(1).neg())?, &h::makeIntConst(&y[2], &V::Int(l[2] as i64))?)?);
 out = h::makeStringConstCast(&y[4], &V::Int(l[4] as i64), &v_t)?;
 Ok(out)
 }
-fn a256(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = std::mem::take(&mut y[1]);
-
-Ok(out)
-}
-fn a258(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a274(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_VariableSetStmt);
 v_n.set(f::F_kind, V::Int(4));
@@ -661,7 +691,7 @@ v_n.set(f::F_location, V::Int(1).neg());
 out = v_n.clone();
 Ok(out)
 }
-fn a259(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a275(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_VariableSetStmt);
 v_n.set(f::F_kind, V::Int(4));
@@ -670,7 +700,7 @@ v_n.set(f::F_location, V::Int(1).neg());
 out = v_n.clone();
 Ok(out)
 }
-fn a260(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a276(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_VariableSetStmt);
 v_n.set(f::F_kind, V::Int(4));
@@ -679,7 +709,7 @@ v_n.set(f::F_location, V::Int(1).neg());
 out = v_n.clone();
 Ok(out)
 }
-fn a261(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a277(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_VariableSetStmt);
 v_n.set(f::F_kind, V::Int(4));
@@ -688,7 +718,7 @@ v_n.set(f::F_location, V::Int(1).neg());
 out = v_n.clone();
 Ok(out)
 }
-fn a262(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a278(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_VariableSetStmt);
 v_n.set(f::F_kind, V::Int(5));
@@ -696,42 +726,42 @@ v_n.set(f::F_location, V::Int(1).neg());
 out = v_n.clone();
 Ok(out)
 }
-fn a267(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a283(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_VariableShowStmt);
 v_n.set(f::F_name, y[1].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a268(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a284(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_VariableShowStmt);
 v_n.set(f::F_name, V::s("timezone"));
 out = v_n.clone();
 Ok(out)
 }
-fn a269(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a285(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_VariableShowStmt);
 v_n.set(f::F_name, V::s("transaction_isolation"));
 out = v_n.clone();
 Ok(out)
 }
-fn a270(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a286(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_VariableShowStmt);
 v_n.set(f::F_name, V::s("session_authorization"));
 out = v_n.clone();
 Ok(out)
 }
-fn a271(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a287(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_VariableShowStmt);
 v_n.set(f::F_name, V::s("all"));
 out = v_n.clone();
 Ok(out)
 }
-fn a272(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a288(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_ConstraintsSetStmt);
 v_n.set(f::F_constraints, y[2].clone());
@@ -739,103 +769,104 @@ v_n.set(f::F_deferred, y[3].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a277(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a293(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CheckPointStmt);
 out = v_n.clone();
+v_n.set(f::F_options, y[1].clone());
 Ok(out)
 }
-fn a278(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a294(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_DiscardStmt);
 v_n.set(f::F_target, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a279(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a295(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_DiscardStmt);
 v_n.set(f::F_target, V::Int(3));
 out = v_n.clone();
 Ok(out)
 }
-fn a281(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a297(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_DiscardStmt);
 v_n.set(f::F_target, V::Int(1));
 out = v_n.clone();
 Ok(out)
 }
-fn a282(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a298(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_DiscardStmt);
 v_n.set(f::F_target, V::Int(2));
 out = v_n.clone();
 Ok(out)
 }
-fn a283(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a299(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableStmt);
 v_n.set(f::F_relation, y[2].clone());
 v_n.set(f::F_cmds, y[3].clone());
-v_n.set(f::F_objtype, V::Int(41));
+v_n.set(f::F_objtype, V::Int(42));
 v_n.set(f::F_missing_ok, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a284(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a300(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableStmt);
 v_n.set(f::F_relation, y[4].clone());
 v_n.set(f::F_cmds, y[5].clone());
-v_n.set(f::F_objtype, V::Int(41));
+v_n.set(f::F_objtype, V::Int(42));
 v_n.set(f::F_missing_ok, V::Int(1));
 out = v_n.clone();
 Ok(out)
 }
-fn a285(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a301(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableStmt);
 v_n.set(f::F_relation, y[2].clone());
 v_n.set(f::F_cmds, h::list_make1(&y[3])?);
-v_n.set(f::F_objtype, V::Int(41));
+v_n.set(f::F_objtype, V::Int(42));
 v_n.set(f::F_missing_ok, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a286(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a302(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableStmt);
 v_n.set(f::F_relation, y[4].clone());
 v_n.set(f::F_cmds, h::list_make1(&y[5])?);
-v_n.set(f::F_objtype, V::Int(41));
+v_n.set(f::F_objtype, V::Int(42));
 v_n.set(f::F_missing_ok, V::Int(1));
 out = v_n.clone();
 Ok(out)
 }
-fn a287(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a303(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableMoveAllStmt);
 v_n.set(f::F_orig_tablespacename, y[5].clone());
-v_n.set(f::F_objtype, V::Int(41));
+v_n.set(f::F_objtype, V::Int(42));
 v_n.set(f::F_roles, V::Null);
 v_n.set(f::F_new_tablespacename, y[8].clone());
 v_n.set(f::F_nowait, y[9].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a288(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a304(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableMoveAllStmt);
 v_n.set(f::F_orig_tablespacename, y[5].clone());
-v_n.set(f::F_objtype, V::Int(41));
+v_n.set(f::F_objtype, V::Int(42));
 v_n.set(f::F_roles, y[8].clone());
 v_n.set(f::F_new_tablespacename, y[11].clone());
 v_n.set(f::F_nowait, y[12].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a289(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a305(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableStmt);
 v_n.set(f::F_relation, y[2].clone());
@@ -845,7 +876,7 @@ v_n.set(f::F_missing_ok, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a290(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a306(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableStmt);
 v_n.set(f::F_relation, y[4].clone());
@@ -855,7 +886,7 @@ v_n.set(f::F_missing_ok, V::Int(1));
 out = v_n.clone();
 Ok(out)
 }
-fn a291(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a307(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableStmt);
 v_n.set(f::F_relation, y[2].clone());
@@ -865,7 +896,7 @@ v_n.set(f::F_missing_ok, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a292(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a308(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableMoveAllStmt);
 v_n.set(f::F_orig_tablespacename, y[5].clone());
@@ -876,7 +907,7 @@ v_n.set(f::F_nowait, y[9].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a293(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a309(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableMoveAllStmt);
 v_n.set(f::F_orig_tablespacename, y[5].clone());
@@ -887,47 +918,47 @@ v_n.set(f::F_nowait, y[12].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a294(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a310(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableStmt);
 v_n.set(f::F_relation, y[2].clone());
 v_n.set(f::F_cmds, y[3].clone());
-v_n.set(f::F_objtype, V::Int(37));
+v_n.set(f::F_objtype, V::Int(38));
 v_n.set(f::F_missing_ok, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a295(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a311(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableStmt);
 v_n.set(f::F_relation, y[4].clone());
 v_n.set(f::F_cmds, y[5].clone());
-v_n.set(f::F_objtype, V::Int(37));
+v_n.set(f::F_objtype, V::Int(38));
 v_n.set(f::F_missing_ok, V::Int(1));
 out = v_n.clone();
 Ok(out)
 }
-fn a296(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a312(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableStmt);
 v_n.set(f::F_relation, y[2].clone());
 v_n.set(f::F_cmds, y[3].clone());
-v_n.set(f::F_objtype, V::Int(51));
+v_n.set(f::F_objtype, V::Int(52));
 v_n.set(f::F_missing_ok, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a297(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a313(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableStmt);
 v_n.set(f::F_relation, y[4].clone());
 v_n.set(f::F_cmds, y[5].clone());
-v_n.set(f::F_objtype, V::Int(51));
+v_n.set(f::F_objtype, V::Int(52));
 v_n.set(f::F_missing_ok, V::Int(1));
 out = v_n.clone();
 Ok(out)
 }
-fn a298(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a314(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableStmt);
 v_n.set(f::F_relation, y[3].clone());
@@ -937,7 +968,7 @@ v_n.set(f::F_missing_ok, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a299(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a315(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableStmt);
 v_n.set(f::F_relation, y[5].clone());
@@ -947,7 +978,7 @@ v_n.set(f::F_missing_ok, V::Int(1));
 out = v_n.clone();
 Ok(out)
 }
-fn a300(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a316(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableMoveAllStmt);
 v_n.set(f::F_orig_tablespacename, y[6].clone());
@@ -958,7 +989,7 @@ v_n.set(f::F_nowait, y[10].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a301(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a317(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableMoveAllStmt);
 v_n.set(f::F_orig_tablespacename, y[6].clone());
@@ -969,7 +1000,7 @@ v_n.set(f::F_nowait, y[13].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a302(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a318(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableStmt);
 v_n.set(f::F_relation, y[3].clone());
@@ -979,7 +1010,7 @@ v_n.set(f::F_missing_ok, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a303(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a319(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableStmt);
 v_n.set(f::F_relation, y[5].clone());
@@ -989,7 +1020,7 @@ v_n.set(f::F_missing_ok, V::Int(1));
 out = v_n.clone();
 Ok(out)
 }
-fn a306(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a322(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableCmd);
 let mut v_cmd = V::node(t::T_PartitionCmd);
@@ -1001,7 +1032,7 @@ v_n.set(f::F_def, v_cmd.clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a307(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a323(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableCmd);
 let mut v_cmd = V::node(t::T_PartitionCmd);
@@ -1013,7 +1044,7 @@ v_n.set(f::F_def, v_cmd.clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a308(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a324(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableCmd);
 let mut v_cmd = V::node(t::T_PartitionCmd);
@@ -1025,7 +1056,7 @@ v_n.set(f::F_def, v_cmd.clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a309(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a325(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableCmd);
 let mut v_cmd = V::node(t::T_PartitionCmd);
@@ -1037,7 +1068,7 @@ v_n.set(f::F_def, v_cmd.clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a310(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a326(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableCmd);
 v_n.set(f::F_subtype, V::Int(0));
@@ -1046,7 +1077,7 @@ v_n.set(f::F_missing_ok, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a311(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a327(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableCmd);
 v_n.set(f::F_subtype, V::Int(0));
@@ -1055,7 +1086,7 @@ v_n.set(f::F_missing_ok, V::Int(1));
 out = v_n.clone();
 Ok(out)
 }
-fn a312(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a328(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableCmd);
 v_n.set(f::F_subtype, V::Int(0));
@@ -1064,7 +1095,7 @@ v_n.set(f::F_missing_ok, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a313(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a329(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableCmd);
 v_n.set(f::F_subtype, V::Int(0));
@@ -1073,7 +1104,7 @@ v_n.set(f::F_missing_ok, V::Int(1));
 out = v_n.clone();
 Ok(out)
 }
-fn a314(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a330(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableCmd);
 v_n.set(f::F_subtype, V::Int(2));
@@ -1082,7 +1113,7 @@ v_n.set(f::F_def, y[3].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a315(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a331(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableCmd);
 v_n.set(f::F_subtype, V::Int(4));
@@ -1090,7 +1121,7 @@ v_n.set(f::F_name, y[2].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a316(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a332(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableCmd);
 v_n.set(f::F_subtype, V::Int(5));
@@ -1098,7 +1129,7 @@ v_n.set(f::F_name, y[2].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a317(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a333(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableCmd);
 v_n.set(f::F_subtype, V::Int(6));
@@ -1107,7 +1138,7 @@ v_n.set(f::F_def, y[7].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a318(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a334(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableCmd);
 v_n.set(f::F_subtype, V::Int(7));
@@ -1115,7 +1146,7 @@ v_n.set(f::F_name, y[2].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a319(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a335(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableCmd);
 v_n.set(f::F_subtype, V::Int(7));
@@ -1124,7 +1155,7 @@ v_n.set(f::F_missing_ok, V::Int(1));
 out = v_n.clone();
 Ok(out)
 }
-fn a320(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a336(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableCmd);
 v_n.set(f::F_subtype, V::Int(8));
@@ -1133,7 +1164,7 @@ v_n.set(f::F_def, y[5].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a321(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a337(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableCmd);
 if V::b(y[2].le(&V::Int(0)).truthy() || y[2].gt(&V::Int(32767)).truthy()).truthy() {
@@ -1145,7 +1176,7 @@ v_n.set(f::F_def, y[5].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a322(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a338(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableCmd);
 v_n.set(f::F_subtype, V::Int(9));
@@ -1154,7 +1185,7 @@ v_n.set(f::F_def, y[4].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a323(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a339(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableCmd);
 v_n.set(f::F_subtype, V::Int(10));
@@ -1163,7 +1194,7 @@ v_n.set(f::F_def, y[4].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a324(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a340(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableCmd);
 v_n.set(f::F_subtype, V::Int(11));
@@ -1172,7 +1203,7 @@ v_n.set(f::F_def, h::makeString(&y[4])?);
 out = v_n.clone();
 Ok(out)
 }
-fn a325(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a341(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableCmd);
 v_n.set(f::F_subtype, V::Int(12));
@@ -1181,7 +1212,7 @@ v_n.set(f::F_def, h::makeString(&y[4])?);
 out = v_n.clone();
 Ok(out)
 }
-fn a326(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a342(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableCmd);
 let mut v_c = V::node(t::T_Constraint);
@@ -1195,7 +1226,7 @@ v_n.set(f::F_def, v_c.clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a327(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a343(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableCmd);
 v_n.set(f::F_subtype, V::Int(63));
@@ -1204,7 +1235,7 @@ v_n.set(f::F_def, y[3].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a328(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a344(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableCmd);
 v_n.set(f::F_subtype, V::Int(64));
@@ -1213,7 +1244,7 @@ v_n.set(f::F_missing_ok, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a329(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a345(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableCmd);
 v_n.set(f::F_subtype, V::Int(64));
@@ -1222,7 +1253,7 @@ v_n.set(f::F_missing_ok, V::Int(1));
 out = v_n.clone();
 Ok(out)
 }
-fn a330(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a346(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableCmd);
 v_n.set(f::F_subtype, V::Int(13));
@@ -1232,7 +1263,7 @@ v_n.set(f::F_missing_ok, V::Int(1));
 out = v_n.clone();
 Ok(out)
 }
-fn a331(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a347(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableCmd);
 v_n.set(f::F_subtype, V::Int(13));
@@ -1242,7 +1273,7 @@ v_n.set(f::F_missing_ok, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a332(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a348(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableCmd);
 let mut v_def = V::node(t::T_ColumnDef);
@@ -1256,7 +1287,7 @@ v_def.set(f::F_location, V::Int(l[2] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a333(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a349(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableCmd);
 v_n.set(f::F_subtype, V::Int(25));
@@ -1265,7 +1296,7 @@ v_n.set(f::F_def, y[3].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a334(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a350(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableCmd);
 v_n.set(f::F_subtype, V::Int(16));
@@ -1273,7 +1304,7 @@ v_n.set(f::F_def, y[1].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a335(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a351(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableCmd);
 let mut v_c = V::node(t::T_ATAlterConstraint);
@@ -1296,7 +1327,7 @@ let _ = h::processCASbits(&y[3], &V::Int(l[3] as i64), &V::s("FOREIGN KEY"), &V:
 out = v_n.clone();
 Ok(out)
 }
-fn a336(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a352(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableCmd);
 let mut v_c = V::node(t::T_ATAlterConstraint);
@@ -1308,7 +1339,7 @@ v_c.set(f::F_noinherit, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a337(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a353(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableCmd);
 v_n.set(f::F_subtype, V::Int(20));
@@ -1316,7 +1347,7 @@ v_n.set(f::F_name, y[2].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a338(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a354(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableCmd);
 v_n.set(f::F_subtype, V::Int(22));
@@ -1326,7 +1357,7 @@ v_n.set(f::F_missing_ok, V::Int(1));
 out = v_n.clone();
 Ok(out)
 }
-fn a339(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a355(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableCmd);
 v_n.set(f::F_subtype, V::Int(22));
@@ -1336,14 +1367,14 @@ v_n.set(f::F_missing_ok, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a340(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a356(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableCmd);
 v_n.set(f::F_subtype, V::Int(31));
 out = v_n.clone();
 Ok(out)
 }
-fn a341(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a357(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableCmd);
 v_n.set(f::F_subtype, V::Int(27));
@@ -1351,7 +1382,7 @@ v_n.set(f::F_name, y[2].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a342(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a358(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableCmd);
 v_n.set(f::F_subtype, V::Int(28));
@@ -1359,21 +1390,21 @@ v_n.set(f::F_name, V::Null);
 out = v_n.clone();
 Ok(out)
 }
-fn a343(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a359(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableCmd);
 v_n.set(f::F_subtype, V::Int(29));
 out = v_n.clone();
 Ok(out)
 }
-fn a344(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a360(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableCmd);
 v_n.set(f::F_subtype, V::Int(30));
 out = v_n.clone();
 Ok(out)
 }
-fn a345(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a361(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableCmd);
 v_n.set(f::F_subtype, V::Int(37));
@@ -1381,7 +1412,7 @@ v_n.set(f::F_name, y[2].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a346(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a362(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableCmd);
 v_n.set(f::F_subtype, V::Int(38));
@@ -1389,7 +1420,7 @@ v_n.set(f::F_name, y[3].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a347(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a363(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableCmd);
 v_n.set(f::F_subtype, V::Int(39));
@@ -1397,21 +1428,21 @@ v_n.set(f::F_name, y[3].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a348(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a364(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableCmd);
 v_n.set(f::F_subtype, V::Int(41));
 out = v_n.clone();
 Ok(out)
 }
-fn a349(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a365(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableCmd);
 v_n.set(f::F_subtype, V::Int(43));
 out = v_n.clone();
 Ok(out)
 }
-fn a350(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a366(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableCmd);
 v_n.set(f::F_subtype, V::Int(40));
@@ -1419,21 +1450,21 @@ v_n.set(f::F_name, y[2].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a351(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a367(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableCmd);
 v_n.set(f::F_subtype, V::Int(42));
 out = v_n.clone();
 Ok(out)
 }
-fn a352(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a368(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableCmd);
 v_n.set(f::F_subtype, V::Int(44));
 out = v_n.clone();
 Ok(out)
 }
-fn a353(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a369(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableCmd);
 v_n.set(f::F_subtype, V::Int(45));
@@ -1441,7 +1472,7 @@ v_n.set(f::F_name, y[2].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a354(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a370(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableCmd);
 v_n.set(f::F_subtype, V::Int(46));
@@ -1449,7 +1480,7 @@ v_n.set(f::F_name, y[3].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a355(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a371(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableCmd);
 v_n.set(f::F_subtype, V::Int(47));
@@ -1457,7 +1488,7 @@ v_n.set(f::F_name, y[3].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a356(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a372(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableCmd);
 v_n.set(f::F_subtype, V::Int(48));
@@ -1465,7 +1496,7 @@ v_n.set(f::F_name, y[2].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a357(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a373(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableCmd);
 v_n.set(f::F_subtype, V::Int(49));
@@ -1473,7 +1504,7 @@ v_n.set(f::F_def, y[1].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a358(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a374(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableCmd);
 v_n.set(f::F_subtype, V::Int(50));
@@ -1481,7 +1512,7 @@ v_n.set(f::F_def, y[2].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a359(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a375(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableCmd);
 let mut v_def = h::makeTypeNameFromNameList(&y[1])?;
@@ -1491,14 +1522,14 @@ v_n.set(f::F_def, v_def.clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a360(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a376(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableCmd);
 v_n.set(f::F_subtype, V::Int(52));
 out = v_n.clone();
 Ok(out)
 }
-fn a361(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a377(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableCmd);
 v_n.set(f::F_subtype, V::Int(26));
@@ -1506,7 +1537,7 @@ v_n.set(f::F_newowner, y[2].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a362(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a378(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableCmd);
 v_n.set(f::F_subtype, V::Int(32));
@@ -1514,7 +1545,7 @@ v_n.set(f::F_name, y[3].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a363(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a379(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableCmd);
 v_n.set(f::F_subtype, V::Int(33));
@@ -1522,7 +1553,7 @@ v_n.set(f::F_name, y[2].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a364(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a380(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableCmd);
 v_n.set(f::F_subtype, V::Int(34));
@@ -1530,7 +1561,7 @@ v_n.set(f::F_def, y[1].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a365(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a381(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableCmd);
 v_n.set(f::F_subtype, V::Int(35));
@@ -1538,7 +1569,7 @@ v_n.set(f::F_def, y[1].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a366(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a382(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableCmd);
 v_n.set(f::F_subtype, V::Int(53));
@@ -1546,35 +1577,35 @@ v_n.set(f::F_def, y[2].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a367(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a383(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableCmd);
 v_n.set(f::F_subtype, V::Int(54));
 out = v_n.clone();
 Ok(out)
 }
-fn a368(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a384(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableCmd);
 v_n.set(f::F_subtype, V::Int(55));
 out = v_n.clone();
 Ok(out)
 }
-fn a369(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a385(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableCmd);
 v_n.set(f::F_subtype, V::Int(56));
 out = v_n.clone();
 Ok(out)
 }
-fn a370(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a386(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableCmd);
 v_n.set(f::F_subtype, V::Int(57));
 out = v_n.clone();
 Ok(out)
 }
-fn a371(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a387(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableCmd);
 v_n.set(f::F_subtype, V::Int(58));
@@ -1582,7 +1613,7 @@ v_n.set(f::F_def, y[0].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a374(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a390(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CollateClause);
 v_n.set(f::F_arg, V::Null);
@@ -1591,7 +1622,7 @@ v_n.set(f::F_location, V::Int(l[0] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a378(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a394(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_ReplicaIdentityStmt);
 v_n.set(f::F_identity_type, V::Int(110));
@@ -1599,7 +1630,7 @@ v_n.set(f::F_name, V::Null);
 out = v_n.clone();
 Ok(out)
 }
-fn a379(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a395(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_ReplicaIdentityStmt);
 v_n.set(f::F_identity_type, V::Int(102));
@@ -1607,7 +1638,7 @@ v_n.set(f::F_name, V::Null);
 out = v_n.clone();
 Ok(out)
 }
-fn a380(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a396(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_ReplicaIdentityStmt);
 v_n.set(f::F_identity_type, V::Int(100));
@@ -1615,7 +1646,7 @@ v_n.set(f::F_name, V::Null);
 out = v_n.clone();
 Ok(out)
 }
-fn a381(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a397(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_ReplicaIdentityStmt);
 v_n.set(f::F_identity_type, V::Int(105));
@@ -1623,37 +1654,37 @@ v_n.set(f::F_name, y[2].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a387(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a403(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&y[0], &y[2], &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a388(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a404(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&y[0], &V::Null, &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a389(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a405(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElemExtended(&y[0], &y[2], &y[4], &V::Int(0), &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a390(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a406(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElemExtended(&y[0], &y[2], &V::Null, &V::Int(0), &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a393(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a409(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("restart"), &V::Null, &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a394(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a410(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("restart"), &y[2], &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a395(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a411(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 if V::b(V::b(h::strcmp(&y[1].get(f::F_defname), &V::s("as"))?.eq(&V::Int(0)).truthy() || h::strcmp(&y[1].get(f::F_defname), &V::s("restart"))?.eq(&V::Int(0)).truthy()).truthy() || h::strcmp(&y[1].get(f::F_defname), &V::s("owned_by"))?.eq(&V::Int(0)).truthy()).truthy() {
 return Err(h::message("sequence option \"%s\" not supported here", &[y[1].get(f::F_defname)]));
@@ -1661,17 +1692,17 @@ return Err(h::message("sequence option \"%s\" not supported here", &[y[1].get(f:
 out = y[1].clone();
 Ok(out)
 }
-fn a396(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a412(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("generated"), &h::makeInteger(&y[2])?, &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a397(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a413(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeInteger(&y[0])?;
 
 Ok(out)
 }
-fn a401(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a417(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_lc = V::Null;
 let mut v_n = V::node(t::T_PartitionBoundSpec);
@@ -1706,7 +1737,7 @@ v_n.set(f::F_location, V::Int(l[2] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a402(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a418(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_PartitionBoundSpec);
 v_n.set(f::F_strategy, V::Int(108));
@@ -1716,7 +1747,7 @@ v_n.set(f::F_location, V::Int(l[2] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a403(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a419(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_PartitionBoundSpec);
 v_n.set(f::F_strategy, V::Int(114));
@@ -1727,7 +1758,7 @@ v_n.set(f::F_location, V::Int(l[2] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a404(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a420(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_PartitionBoundSpec);
 v_n.set(f::F_is_default, V::Int(1));
@@ -1735,21 +1766,21 @@ v_n.set(f::F_location, V::Int(l[0] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a405(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a421(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&y[0], &h::makeInteger(&y[1])?, &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a408(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a424(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableStmt);
 v_n.set(f::F_relation, h::makeRangeVarFromAnyName(&y[2], &V::Int(l[2] as i64), &V::Null)?);
 v_n.set(f::F_cmds, y[3].clone());
-v_n.set(f::F_objtype, V::Int(49));
+v_n.set(f::F_objtype, V::Int(50));
 out = v_n.clone();
 Ok(out)
 }
-fn a411(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a427(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableCmd);
 v_n.set(f::F_subtype, V::Int(0));
@@ -1758,7 +1789,7 @@ v_n.set(f::F_behavior, y[3].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a414(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a430(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableCmd);
 let mut v_def = V::node(t::T_ColumnDef);
@@ -1773,21 +1804,21 @@ v_def.set(f::F_location, V::Int(l[2] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a415(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a431(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_ClosePortalStmt);
 v_n.set(f::F_portalname, y[1].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a416(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a432(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_ClosePortalStmt);
 v_n.set(f::F_portalname, V::Null);
 out = v_n.clone();
 Ok(out)
 }
-fn a417(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a433(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CopyStmt);
 v_n.set(f::F_relation, y[2].clone());
@@ -1816,7 +1847,7 @@ v_n.set(f::F_options, h::list_concat(&v_n.get(f::F_options), &y[9])?);
 out = v_n.clone();
 Ok(out)
 }
-fn a418(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a434(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CopyStmt);
 v_n.set(f::F_relation, V::Null);
@@ -1832,107 +1863,107 @@ return Err(h::message("STDIN/STDOUT not allowed with PROGRAM", &[]));
 out = v_n.clone();
 Ok(out)
 }
-fn a430(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a446(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("format"), &h::makeString(&V::s("binary"))?, &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a431(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a447(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("freeze"), &h::makeBoolean(&V::Int(1))?, &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a432(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a448(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("delimiter"), &h::makeString(&y[2])?, &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a433(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a449(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("null"), &h::makeString(&y[2])?, &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a434(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a450(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("format"), &h::makeString(&V::s("csv"))?, &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a435(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a451(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = h::makeDefElem(&V::s("format"), &h::makeString(&V::s("json"))?, &V::Int(l[0] as i64))?;
+
+Ok(out)
+}
+fn a452(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("header"), &h::makeBoolean(&V::Int(1))?, &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a436(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a453(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("quote"), &h::makeString(&y[2])?, &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a437(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a454(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("escape"), &h::makeString(&y[2])?, &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a438(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a455(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("force_quote"), &y[2], &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a439(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a456(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("force_quote"), &V::node(t::T_A_Star), &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a440(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a457(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("force_not_null"), &y[3], &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a441(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a458(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("force_not_null"), &V::node(t::T_A_Star), &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a442(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a459(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("force_null"), &y[2], &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a443(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a460(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("force_null"), &V::node(t::T_A_Star), &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a444(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a461(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("encoding"), &h::makeString(&y[1])?, &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a447(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a464(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("delimiter"), &h::makeString(&y[2])?, &V::Int(l[1] as i64))?;
 
 Ok(out)
 }
-fn a453(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = h::makeDefElem(&y[0], &y[1], &V::Int(l[0] as i64))?;
+fn a471(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = h::makeDefElem(&V::s("format"), &y[1], &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a454(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = h::makeString(&y[0])?;
-
-Ok(out)
-}
-fn a456(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a474(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::node(t::T_A_Star);
 
 Ok(out)
 }
-fn a457(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a475(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeString(&V::s("default"))?;
 
 Ok(out)
 }
-fn a463(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a481(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CreateStmt);
 y[3].set(f::F_relpersistence, y[1].clone());
@@ -1950,7 +1981,7 @@ v_n.set(f::F_if_not_exists, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a464(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a482(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CreateStmt);
 y[6].set(f::F_relpersistence, y[1].clone());
@@ -1968,7 +1999,7 @@ v_n.set(f::F_if_not_exists, V::Int(1));
 out = v_n.clone();
 Ok(out)
 }
-fn a465(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a483(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CreateStmt);
 y[3].set(f::F_relpersistence, y[1].clone());
@@ -1987,7 +2018,7 @@ v_n.set(f::F_if_not_exists, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a466(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a484(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CreateStmt);
 y[6].set(f::F_relpersistence, y[1].clone());
@@ -2006,7 +2037,7 @@ v_n.set(f::F_if_not_exists, V::Int(1));
 out = v_n.clone();
 Ok(out)
 }
-fn a467(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a485(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CreateStmt);
 y[3].set(f::F_relpersistence, y[1].clone());
@@ -2025,7 +2056,7 @@ v_n.set(f::F_if_not_exists, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a468(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a486(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CreateStmt);
 y[6].set(f::F_relpersistence, y[1].clone());
@@ -2044,28 +2075,28 @@ v_n.set(f::F_if_not_exists, V::Int(1));
 out = v_n.clone();
 Ok(out)
 }
-fn a469(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a487(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::Int(116);
 
 Ok(out)
 }
-fn a473(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a491(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 
 out = V::Int(116);
 Ok(out)
 }
-fn a475(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a493(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::Int(117);
 
 Ok(out)
 }
-fn a476(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a494(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::Int(112);
 
 Ok(out)
 }
-fn a490(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a508(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_ColumnDef);
 v_n.set(f::F_colname, y[0].clone());
@@ -2086,7 +2117,7 @@ v_n.set(f::F_location, V::Int(l[0] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a491(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a509(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_ColumnDef);
 v_n.set(f::F_colname, y[0].clone());
@@ -2104,7 +2135,7 @@ v_n.set(f::F_location, V::Int(l[0] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a492(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a510(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_ColumnDef);
 v_n.set(f::F_colname, y[0].clone());
@@ -2122,12 +2153,12 @@ v_n.set(f::F_location, V::Int(l[0] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a494(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a512(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::s("default");
 
 Ok(out)
 }
-fn a503(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a521(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = y[2].clone();
 v_n.set(f::F_conname, y[1].clone());
@@ -2135,7 +2166,7 @@ v_n.set(f::F_location, V::Int(l[0] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a507(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a525(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_Constraint);
 v_n.set(f::F_contype, V::Int(1));
@@ -2147,7 +2178,7 @@ v_n.set(f::F_initially_valid, V::Int(1));
 out = v_n.clone();
 Ok(out)
 }
-fn a508(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a526(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_Constraint);
 v_n.set(f::F_contype, V::Int(0));
@@ -2155,7 +2186,7 @@ v_n.set(f::F_location, V::Int(l[0] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a509(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a527(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_Constraint);
 v_n.set(f::F_contype, V::Int(7));
@@ -2168,7 +2199,7 @@ v_n.set(f::F_indexspace, y[3].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a510(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a528(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_Constraint);
 v_n.set(f::F_contype, V::Int(6));
@@ -2180,7 +2211,7 @@ v_n.set(f::F_indexspace, y[3].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a511(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a529(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_Constraint);
 v_n.set(f::F_contype, V::Int(5));
@@ -2194,7 +2225,7 @@ v_n.set(f::F_initially_valid, V::Int(1));
 out = v_n.clone();
 Ok(out)
 }
-fn a512(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a530(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_Constraint);
 v_n.set(f::F_contype, V::Int(2));
@@ -2204,7 +2235,7 @@ v_n.set(f::F_cooked_expr, V::Null);
 out = v_n.clone();
 Ok(out)
 }
-fn a513(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a531(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_Constraint);
 v_n.set(f::F_contype, V::Int(3));
@@ -2214,7 +2245,7 @@ v_n.set(f::F_location, V::Int(l[0] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a514(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a532(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_Constraint);
 v_n.set(f::F_contype, V::Int(4));
@@ -2229,7 +2260,7 @@ return Err(h::message("for a generated column, GENERATED ALWAYS must be specifie
 out = v_n.clone();
 Ok(out)
 }
-fn a515(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a533(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_Constraint);
 v_n.set(f::F_contype, V::Int(9));
@@ -2247,27 +2278,27 @@ v_n.set(f::F_initially_valid, V::Int(1));
 out = v_n.clone();
 Ok(out)
 }
-fn a519(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a537(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::Int(97);
 
 Ok(out)
 }
-fn a520(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a538(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::Int(100);
 
 Ok(out)
 }
-fn a521(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a539(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::Int(115);
 
 Ok(out)
 }
-fn a522(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a540(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::Int(118);
 
 Ok(out)
 }
-fn a524(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a542(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_Constraint);
 v_n.set(f::F_contype, V::Int(10));
@@ -2275,7 +2306,7 @@ v_n.set(f::F_location, V::Int(l[0] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a525(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a543(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_Constraint);
 v_n.set(f::F_contype, V::Int(11));
@@ -2283,7 +2314,7 @@ v_n.set(f::F_location, V::Int(l[0] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a526(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a544(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_Constraint);
 v_n.set(f::F_contype, V::Int(12));
@@ -2291,7 +2322,7 @@ v_n.set(f::F_location, V::Int(l[0] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a527(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a545(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_Constraint);
 v_n.set(f::F_contype, V::Int(13));
@@ -2299,7 +2330,7 @@ v_n.set(f::F_location, V::Int(l[0] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a528(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a546(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_Constraint);
 v_n.set(f::F_contype, V::Int(14));
@@ -2307,7 +2338,7 @@ v_n.set(f::F_location, V::Int(l[0] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a529(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a547(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_Constraint);
 v_n.set(f::F_contype, V::Int(15));
@@ -2315,7 +2346,7 @@ v_n.set(f::F_location, V::Int(l[0] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a530(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a548(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_TableLikeClause);
 v_n.set(f::F_relation, y[1].clone());
@@ -2324,62 +2355,62 @@ v_n.set(f::F_relationOid, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a531(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a549(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y[0].or(&y[2]);
 
 Ok(out)
 }
-fn a532(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a550(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y[0].and(&y[2].not());
 
 Ok(out)
 }
-fn a535(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a553(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::Int(2);
 
 Ok(out)
 }
-fn a536(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a554(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::Int(4);
 
 Ok(out)
 }
-fn a537(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a555(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::Int(8);
 
 Ok(out)
 }
-fn a538(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a556(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::Int(32);
 
 Ok(out)
 }
-fn a539(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a557(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::Int(16);
 
 Ok(out)
 }
-fn a540(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a558(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::Int(64);
 
 Ok(out)
 }
-fn a541(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a559(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::Int(128);
 
 Ok(out)
 }
-fn a542(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a560(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::Int(256);
 
 Ok(out)
 }
-fn a543(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a561(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::Int(2147483647);
 
 Ok(out)
 }
-fn a546(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a564(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_Constraint);
 v_n.set(f::F_contype, V::Int(5));
@@ -2391,7 +2422,7 @@ v_n.set(f::F_initially_valid, V::b(!v_n.get(f::F_skip_validation).truthy()));
 out = v_n.clone();
 Ok(out)
 }
-fn a547(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a565(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_Constraint);
 v_n.set(f::F_contype, V::Int(1));
@@ -2402,7 +2433,7 @@ v_n.set(f::F_initially_valid, V::b(!v_n.get(f::F_skip_validation).truthy()));
 out = v_n.clone();
 Ok(out)
 }
-fn a548(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a566(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_Constraint);
 v_n.set(f::F_contype, V::Int(7));
@@ -2418,7 +2449,7 @@ let _ = h::processCASbits(&y[9], &V::Int(l[9] as i64), &V::s("UNIQUE"), &V::plac
 out = v_n.clone();
 Ok(out)
 }
-fn a549(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a567(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_Constraint);
 v_n.set(f::F_contype, V::Int(7));
@@ -2432,7 +2463,7 @@ let _ = h::processCASbits(&y[2], &V::Int(l[2] as i64), &V::s("UNIQUE"), &V::plac
 out = v_n.clone();
 Ok(out)
 }
-fn a550(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a568(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_Constraint);
 v_n.set(f::F_contype, V::Int(6));
@@ -2447,7 +2478,7 @@ let _ = h::processCASbits(&y[9], &V::Int(l[9] as i64), &V::s("PRIMARY KEY"), &V:
 out = v_n.clone();
 Ok(out)
 }
-fn a551(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a569(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_Constraint);
 v_n.set(f::F_contype, V::Int(6));
@@ -2461,7 +2492,7 @@ let _ = h::processCASbits(&y[3], &V::Int(l[3] as i64), &V::s("PRIMARY KEY"), &V:
 out = v_n.clone();
 Ok(out)
 }
-fn a552(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a570(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_Constraint);
 v_n.set(f::F_contype, V::Int(8));
@@ -2477,7 +2508,7 @@ let _ = h::processCASbits(&y[9], &V::Int(l[9] as i64), &V::s("EXCLUDE"), &V::pla
 out = v_n.clone();
 Ok(out)
 }
-fn a553(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a571(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_Constraint);
 v_n.set(f::F_contype, V::Int(9));
@@ -2502,7 +2533,7 @@ v_n.set(f::F_initially_valid, V::b(!v_n.get(f::F_skip_validation).truthy()));
 out = v_n.clone();
 Ok(out)
 }
-fn a556(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a574(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_Constraint);
 v_n.set(f::F_contype, V::Int(5));
@@ -2515,7 +2546,7 @@ v_n.set(f::F_initially_valid, V::b(!v_n.get(f::F_skip_validation).truthy()));
 out = v_n.clone();
 Ok(out)
 }
-fn a557(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a575(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_Constraint);
 v_n.set(f::F_contype, V::Int(1));
@@ -2526,38 +2557,38 @@ v_n.set(f::F_initially_valid, V::Int(1));
 out = v_n.clone();
 Ok(out)
 }
-fn a568(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a586(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::list_make2(&y[1], &y[2])?;
 
 Ok(out)
 }
-fn a569(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a587(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::list_make2(&V::Null, &V::Null)?;
 
 Ok(out)
 }
-fn a573(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a591(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::Int(102);
 
 Ok(out)
 }
-fn a574(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a592(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 return Err(h::message("MATCH PARTIAL not yet implemented", &[]));
 out = V::Int(112);
 Ok(out)
 }
-fn a579(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a597(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::list_make2(&y[0], &y[2])?;
 
 Ok(out)
 }
-fn a580(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a598(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::list_make2(&y[0], &y[4])?;
 
 Ok(out)
 }
-fn a583(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a601(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_KeyActions);
 v_n.set(f::F_updateAction, y[0].clone());
@@ -2567,7 +2598,7 @@ v_n.get(f::F_deleteAction).set(f::F_cols, V::Null);
 out = v_n.clone();
 Ok(out)
 }
-fn a584(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a602(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_KeyActions);
 v_n.set(f::F_updateAction, V::node(t::T_KeyAction));
@@ -2577,7 +2608,7 @@ v_n.set(f::F_deleteAction, y[0].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a585(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a603(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_KeyActions);
 v_n.set(f::F_updateAction, y[0].clone());
@@ -2585,7 +2616,7 @@ v_n.set(f::F_deleteAction, y[1].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a586(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a604(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_KeyActions);
 v_n.set(f::F_updateAction, y[1].clone());
@@ -2593,7 +2624,7 @@ v_n.set(f::F_deleteAction, y[0].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a587(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a605(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_KeyActions);
 v_n.set(f::F_updateAction, V::node(t::T_KeyAction));
@@ -2605,7 +2636,7 @@ v_n.get(f::F_deleteAction).set(f::F_cols, V::Null);
 out = v_n.clone();
 Ok(out)
 }
-fn a588(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a606(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 if y[2].get(f::F_cols).truthy() {
 return Err(h::message("a column list with %s is only supported for ON DELETE actions", &[(if y[2].get(f::F_action).eq(&V::Int(110)).truthy() { V::s("SET NULL") } else { V::s("SET DEFAULT") })]));
@@ -2613,7 +2644,7 @@ return Err(h::message("a column list with %s is only supported for ON DELETE act
 out = y[2].clone();
 Ok(out)
 }
-fn a590(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a608(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_KeyAction);
 v_n.set(f::F_action, V::Int(97));
@@ -2621,7 +2652,7 @@ v_n.set(f::F_cols, V::Null);
 out = v_n.clone();
 Ok(out)
 }
-fn a591(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a609(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_KeyAction);
 v_n.set(f::F_action, V::Int(114));
@@ -2629,7 +2660,7 @@ v_n.set(f::F_cols, V::Null);
 out = v_n.clone();
 Ok(out)
 }
-fn a592(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a610(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_KeyAction);
 v_n.set(f::F_action, V::Int(99));
@@ -2637,7 +2668,7 @@ v_n.set(f::F_cols, V::Null);
 out = v_n.clone();
 Ok(out)
 }
-fn a593(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a611(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_KeyAction);
 v_n.set(f::F_action, V::Int(110));
@@ -2645,7 +2676,7 @@ v_n.set(f::F_cols, y[2].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a594(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a612(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_KeyAction);
 v_n.set(f::F_action, V::Int(100));
@@ -2653,7 +2684,7 @@ v_n.set(f::F_cols, y[2].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a599(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a617(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_PartitionSpec);
 v_n.set(f::F_strategy, h::parsePartitionStrategy(&y[2], &V::Int(l[2] as i64), &V::Null)?);
@@ -2662,7 +2693,7 @@ v_n.set(f::F_location, V::Int(l[0] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a602(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a620(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_PartitionElem);
 v_n.set(f::F_name, y[0].clone());
@@ -2673,7 +2704,7 @@ v_n.set(f::F_location, V::Int(l[0] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a603(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a621(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_PartitionElem);
 v_n.set(f::F_name, V::Null);
@@ -2684,7 +2715,7 @@ v_n.set(f::F_location, V::Int(l[0] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a604(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a622(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_PartitionElem);
 v_n.set(f::F_name, V::Null);
@@ -2695,17 +2726,17 @@ v_n.set(f::F_location, V::Int(l[0] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a610(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a628(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::Int(3);
 
 Ok(out)
 }
-fn a616(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a634(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = std::mem::take(&mut y[3]);
 
 Ok(out)
 }
-fn a619(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a637(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CreateStatsStmt);
 v_n.set(f::F_defnames, y[2].clone());
@@ -2717,7 +2748,7 @@ v_n.set(f::F_if_not_exists, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a620(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a638(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CreateStatsStmt);
 v_n.set(f::F_defnames, y[5].clone());
@@ -2729,25 +2760,25 @@ v_n.set(f::F_if_not_exists, V::Int(1));
 out = v_n.clone();
 Ok(out)
 }
-fn a623(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a641(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::node(t::T_StatsElem);
 out.clone().set(f::F_name, std::mem::take(&mut y[0]));
 out.clone().set(f::F_expr, V::Null);
 Ok(out)
 }
-fn a624(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a642(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::node(t::T_StatsElem);
 out.clone().set(f::F_name, V::Null);
 out.clone().set(f::F_expr, std::mem::take(&mut y[0]));
 Ok(out)
 }
-fn a625(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a643(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::node(t::T_StatsElem);
 out.clone().set(f::F_name, V::Null);
 out.clone().set(f::F_expr, std::mem::take(&mut y[1]));
 Ok(out)
 }
-fn a626(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a644(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterStatsStmt);
 v_n.set(f::F_defnames, y[2].clone());
@@ -2756,7 +2787,7 @@ v_n.set(f::F_stxstattarget, y[5].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a627(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a645(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterStatsStmt);
 v_n.set(f::F_defnames, y[4].clone());
@@ -2765,12 +2796,12 @@ v_n.set(f::F_stxstattarget, y[7].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a628(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a646(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_ctas = V::node(t::T_CreateTableAsStmt);
 v_ctas.set(f::F_query, y[5].clone());
 v_ctas.set(f::F_into, y[3].clone());
-v_ctas.set(f::F_objtype, V::Int(41));
+v_ctas.set(f::F_objtype, V::Int(42));
 v_ctas.set(f::F_is_select_into, V::Int(0));
 v_ctas.set(f::F_if_not_exists, V::Int(0));
 y[3].get(f::F_rel).set(f::F_relpersistence, y[1].clone());
@@ -2778,12 +2809,12 @@ y[3].set(f::F_skipData, V::b(!y[6].truthy()));
 out = v_ctas.clone();
 Ok(out)
 }
-fn a629(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a647(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_ctas = V::node(t::T_CreateTableAsStmt);
 v_ctas.set(f::F_query, y[8].clone());
 v_ctas.set(f::F_into, y[6].clone());
-v_ctas.set(f::F_objtype, V::Int(41));
+v_ctas.set(f::F_objtype, V::Int(42));
 v_ctas.set(f::F_is_select_into, V::Int(0));
 v_ctas.set(f::F_if_not_exists, V::Int(1));
 y[6].get(f::F_rel).set(f::F_relpersistence, y[1].clone());
@@ -2791,7 +2822,7 @@ y[6].set(f::F_skipData, V::b(!y[9].truthy()));
 out = v_ctas.clone();
 Ok(out)
 }
-fn a630(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a648(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::node(t::T_IntoClause);
 out.clone().set(f::F_rel, std::mem::take(&mut y[0]));
 out.clone().set(f::F_colNames, std::mem::take(&mut y[1]));
@@ -2803,7 +2834,7 @@ out.clone().set(f::F_viewQuery, V::Null);
 out.clone().set(f::F_skipData, V::Int(0));
 Ok(out)
 }
-fn a634(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a652(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_ctas = V::node(t::T_CreateTableAsStmt);
 v_ctas.set(f::F_query, y[6].clone());
@@ -2816,7 +2847,7 @@ y[4].set(f::F_skipData, V::b(!y[7].truthy()));
 out = v_ctas.clone();
 Ok(out)
 }
-fn a635(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a653(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_ctas = V::node(t::T_CreateTableAsStmt);
 v_ctas.set(f::F_query, y[9].clone());
@@ -2829,7 +2860,7 @@ y[7].set(f::F_skipData, V::b(!y[10].truthy()));
 out = v_ctas.clone();
 Ok(out)
 }
-fn a636(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a654(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::node(t::T_IntoClause);
 out.clone().set(f::F_rel, std::mem::take(&mut y[0]));
 out.clone().set(f::F_colNames, std::mem::take(&mut y[1]));
@@ -2841,7 +2872,7 @@ out.clone().set(f::F_viewQuery, V::Null);
 out.clone().set(f::F_skipData, V::Int(0));
 Ok(out)
 }
-fn a639(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a657(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_RefreshMatViewStmt);
 v_n.set(f::F_concurrent, y[3].clone());
@@ -2850,7 +2881,7 @@ v_n.set(f::F_skipData, V::b(!y[5].truthy()));
 out = v_n.clone();
 Ok(out)
 }
-fn a640(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a658(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CreateSeqStmt);
 y[3].set(f::F_relpersistence, y[1].clone());
@@ -2861,7 +2892,7 @@ v_n.set(f::F_if_not_exists, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a641(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a659(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CreateSeqStmt);
 y[6].set(f::F_relpersistence, y[1].clone());
@@ -2872,7 +2903,7 @@ v_n.set(f::F_if_not_exists, V::Int(1));
 out = v_n.clone();
 Ok(out)
 }
-fn a642(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a660(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterSeqStmt);
 v_n.set(f::F_sequence, y[2].clone());
@@ -2881,7 +2912,7 @@ v_n.set(f::F_missing_ok, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a643(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a661(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterSeqStmt);
 v_n.set(f::F_sequence, y[4].clone());
@@ -2890,94 +2921,94 @@ v_n.set(f::F_missing_ok, V::Int(1));
 out = v_n.clone();
 Ok(out)
 }
-fn a650(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a668(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("as"), &y[1], &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a651(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a669(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("cache"), &y[1], &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a652(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a670(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("cycle"), &h::makeBoolean(&V::Int(1))?, &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a653(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a671(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("cycle"), &h::makeBoolean(&V::Int(0))?, &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a654(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a672(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("increment"), &y[2], &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a655(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a673(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("logged"), &V::Null, &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a656(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a674(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("maxvalue"), &y[1], &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a657(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a675(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("minvalue"), &y[1], &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a658(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a676(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("maxvalue"), &V::Null, &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a659(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a677(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("minvalue"), &V::Null, &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a660(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a678(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("owned_by"), &y[2], &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a661(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a679(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("sequence_name"), &y[2], &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a662(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a680(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("start"), &y[2], &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a665(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a683(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("unlogged"), &V::Null, &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a668(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a686(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeFloat(&y[0])?;
 
 Ok(out)
 }
-fn a669(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a687(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeFloat(&y[1])?;
 
 Ok(out)
 }
-fn a670(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a688(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_f = h::makeFloat(&y[1])?;
 let _ = h::doNegateFloat(&v_f)?;
 out = v_f.clone();
 Ok(out)
 }
-fn a674(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a692(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CreateExtensionStmt);
 v_n.set(f::F_if_not_exists, y[1].clone());
@@ -2986,7 +3017,7 @@ v_n.set(f::F_options, V::Null);
 out = v_n.clone();
 Ok(out)
 }
-fn a675(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a693(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CreatePLangStmt);
 v_n.set(f::F_replace, y[1].clone());
@@ -2998,12 +3029,12 @@ v_n.set(f::F_pltrusted, y[2].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a679(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a697(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::lcons(&h::makeString(&y[0])?, &y[1])?;
 
 Ok(out)
 }
-fn a688(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a706(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CreateTableSpaceStmt);
 v_n.set(f::F_tablespacename, y[2].clone());
@@ -3013,7 +3044,7 @@ v_n.set(f::F_options, y[6].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a691(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a709(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_DropTableSpaceStmt);
 v_n.set(f::F_tablespacename, y[2].clone());
@@ -3021,7 +3052,7 @@ v_n.set(f::F_missing_ok, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a692(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a710(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_DropTableSpaceStmt);
 v_n.set(f::F_tablespacename, y[4].clone());
@@ -3029,7 +3060,7 @@ v_n.set(f::F_missing_ok, V::Int(1));
 out = v_n.clone();
 Ok(out)
 }
-fn a693(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a711(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CreateExtensionStmt);
 v_n.set(f::F_extname, y[2].clone());
@@ -3038,7 +3069,7 @@ v_n.set(f::F_options, y[4].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a694(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a712(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CreateExtensionStmt);
 v_n.set(f::F_extname, y[5].clone());
@@ -3047,27 +3078,27 @@ v_n.set(f::F_options, y[7].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a697(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a715(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("schema"), &h::makeString(&y[1])?, &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a698(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a716(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("new_version"), &h::makeString(&y[1])?, &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a699(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a717(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 return Err(h::message("CREATE EXTENSION ... FROM is no longer supported", &[]));
 Ok(out)
 }
-fn a700(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a718(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("cascade"), &h::makeBoolean(&V::Int(1))?, &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a701(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a719(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterExtensionStmt);
 v_n.set(f::F_extname, y[2].clone());
@@ -3075,7 +3106,7 @@ v_n.set(f::F_options, y[4].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a705(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a723(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterExtensionContentsStmt);
 v_n.set(f::F_extname, y[2].clone());
@@ -3085,7 +3116,7 @@ v_n.set(f::F_object, h::makeString(&y[5])?);
 out = v_n.clone();
 Ok(out)
 }
-fn a706(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a724(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterExtensionContentsStmt);
 v_n.set(f::F_extname, y[2].clone());
@@ -3095,7 +3126,7 @@ v_n.set(f::F_object, y[5].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a707(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a725(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterExtensionContentsStmt);
 v_n.set(f::F_extname, y[2].clone());
@@ -3105,7 +3136,7 @@ v_n.set(f::F_object, y[5].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a708(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a726(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterExtensionContentsStmt);
 v_n.set(f::F_extname, y[2].clone());
@@ -3115,7 +3146,7 @@ v_n.set(f::F_object, h::list_make2(&y[6], &y[8])?);
 out = v_n.clone();
 Ok(out)
 }
-fn a709(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a727(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterExtensionContentsStmt);
 v_n.set(f::F_extname, y[2].clone());
@@ -3125,7 +3156,7 @@ v_n.set(f::F_object, y[5].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a710(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a728(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterExtensionContentsStmt);
 v_n.set(f::F_extname, y[2].clone());
@@ -3135,7 +3166,7 @@ v_n.set(f::F_object, y[5].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a711(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a729(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterExtensionContentsStmt);
 v_n.set(f::F_extname, y[2].clone());
@@ -3145,7 +3176,7 @@ v_n.set(f::F_object, y[5].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a712(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a730(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterExtensionContentsStmt);
 v_n.set(f::F_extname, y[2].clone());
@@ -3155,7 +3186,7 @@ v_n.set(f::F_object, h::lcons(&h::makeString(&y[8])?, &y[6])?);
 out = v_n.clone();
 Ok(out)
 }
-fn a713(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a731(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterExtensionContentsStmt);
 v_n.set(f::F_extname, y[2].clone());
@@ -3165,7 +3196,7 @@ v_n.set(f::F_object, h::lcons(&h::makeString(&y[8])?, &y[6])?);
 out = v_n.clone();
 Ok(out)
 }
-fn a714(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a732(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterExtensionContentsStmt);
 v_n.set(f::F_extname, y[2].clone());
@@ -3175,37 +3206,37 @@ v_n.set(f::F_object, y[5].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a715(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a733(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterExtensionContentsStmt);
 v_n.set(f::F_extname, y[2].clone());
 v_n.set(f::F_action, y[3].clone());
-v_n.set(f::F_objtype, V::Int(34));
+v_n.set(f::F_objtype, V::Int(35));
 v_n.set(f::F_object, y[5].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a716(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a734(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterExtensionContentsStmt);
 v_n.set(f::F_extname, y[2].clone());
 v_n.set(f::F_action, y[3].clone());
-v_n.set(f::F_objtype, V::Int(43));
+v_n.set(f::F_objtype, V::Int(44));
 v_n.set(f::F_object, h::list_make2(&y[6], &h::makeString(&y[8])?)?);
 out = v_n.clone();
 Ok(out)
 }
-fn a717(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a735(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterExtensionContentsStmt);
 v_n.set(f::F_extname, y[2].clone());
 v_n.set(f::F_action, y[3].clone());
-v_n.set(f::F_objtype, V::Int(49));
+v_n.set(f::F_objtype, V::Int(50));
 v_n.set(f::F_object, y[5].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a718(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a736(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CreateFdwStmt);
 v_n.set(f::F_fdwname, y[4].clone());
@@ -3214,27 +3245,37 @@ v_n.set(f::F_options, y[6].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a719(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a737(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("handler"), &y[1], &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a720(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a738(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("handler"), &V::Null, &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a721(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a739(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("validator"), &y[1], &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a722(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a740(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("validator"), &V::Null, &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a727(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a741(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = h::makeDefElem(&V::s("connection"), &y[1], &V::Int(l[0] as i64))?;
+
+Ok(out)
+}
+fn a742(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = h::makeDefElem(&V::s("connection"), &V::Null, &V::Int(l[0] as i64))?;
+
+Ok(out)
+}
+fn a747(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterFdwStmt);
 v_n.set(f::F_fdwname, y[4].clone());
@@ -3243,7 +3284,7 @@ v_n.set(f::F_options, y[6].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a728(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a748(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterFdwStmt);
 v_n.set(f::F_fdwname, y[4].clone());
@@ -3252,27 +3293,27 @@ v_n.set(f::F_options, V::Null);
 out = v_n.clone();
 Ok(out)
 }
-fn a737(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a757(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = std::mem::take(&mut y[1]);
 out.clone().set(f::F_defaction, V::Int(1));
 Ok(out)
 }
-fn a738(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a758(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = std::mem::take(&mut y[1]);
 out.clone().set(f::F_defaction, V::Int(2));
 Ok(out)
 }
-fn a739(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a759(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElemExtended(&V::Null, &y[1], &V::Null, &V::Int(3), &V::Int(l[1] as i64))?;
 
 Ok(out)
 }
-fn a740(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a760(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&y[0], &y[1], &V::Int(l[0] as i64))?;
 out.clone().set(f::F_arg_location, V::Int(l[1] as i64));
 Ok(out)
 }
-fn a743(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a763(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CreateForeignServerStmt);
 v_n.set(f::F_servername, y[2].clone());
@@ -3284,7 +3325,7 @@ v_n.set(f::F_if_not_exists, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a744(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a764(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CreateForeignServerStmt);
 v_n.set(f::F_servername, y[5].clone());
@@ -3296,7 +3337,7 @@ v_n.set(f::F_if_not_exists, V::Int(1));
 out = v_n.clone();
 Ok(out)
 }
-fn a751(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a771(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterForeignServerStmt);
 v_n.set(f::F_servername, y[2].clone());
@@ -3306,7 +3347,7 @@ v_n.set(f::F_has_version, V::Int(1));
 out = v_n.clone();
 Ok(out)
 }
-fn a752(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a772(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterForeignServerStmt);
 v_n.set(f::F_servername, y[2].clone());
@@ -3315,7 +3356,7 @@ v_n.set(f::F_has_version, V::Int(1));
 out = v_n.clone();
 Ok(out)
 }
-fn a753(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a773(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterForeignServerStmt);
 v_n.set(f::F_servername, y[2].clone());
@@ -3323,7 +3364,7 @@ v_n.set(f::F_options, y[3].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a754(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a774(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CreateForeignTableStmt);
 y[3].set(f::F_relpersistence, V::Int(112));
@@ -3341,7 +3382,7 @@ v_n.set(f::F_options, y[10].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a755(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a775(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CreateForeignTableStmt);
 y[6].set(f::F_relpersistence, V::Int(112));
@@ -3359,7 +3400,7 @@ v_n.set(f::F_options, y[13].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a756(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a776(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CreateForeignTableStmt);
 y[3].set(f::F_relpersistence, V::Int(112));
@@ -3378,7 +3419,7 @@ v_n.set(f::F_options, y[11].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a757(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a777(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CreateForeignTableStmt);
 y[6].set(f::F_relpersistence, V::Int(112));
@@ -3397,7 +3438,7 @@ v_n.set(f::F_options, y[14].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a758(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a778(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_ImportForeignSchemaStmt);
 v_n.set(f::F_server_name, y[7].clone());
@@ -3409,7 +3450,7 @@ v_n.set(f::F_options, y[10].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a761(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a781(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_ImportQual);
 v_n.set(f::F_type, y[0].clone());
@@ -3417,7 +3458,7 @@ v_n.set(f::F_table_names, y[2].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a762(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a782(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_ImportQual);
 v_n.set(f::F_type, V::Int(0));
@@ -3425,7 +3466,7 @@ v_n.set(f::F_table_names, V::Null);
 out = v_n.clone();
 Ok(out)
 }
-fn a763(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a783(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CreateUserMappingStmt);
 v_n.set(f::F_user, y[4].clone());
@@ -3435,7 +3476,7 @@ v_n.set(f::F_if_not_exists, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a764(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a784(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CreateUserMappingStmt);
 v_n.set(f::F_user, y[7].clone());
@@ -3445,12 +3486,12 @@ v_n.set(f::F_if_not_exists, V::Int(1));
 out = v_n.clone();
 Ok(out)
 }
-fn a766(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a786(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeRoleSpec(&V::Int(2), &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a767(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a787(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_DropUserMappingStmt);
 v_n.set(f::F_user, y[4].clone());
@@ -3459,7 +3500,7 @@ v_n.set(f::F_missing_ok, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a768(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a788(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_DropUserMappingStmt);
 v_n.set(f::F_user, y[6].clone());
@@ -3468,7 +3509,7 @@ v_n.set(f::F_missing_ok, V::Int(1));
 out = v_n.clone();
 Ok(out)
 }
-fn a769(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a789(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterUserMappingStmt);
 v_n.set(f::F_user, y[4].clone());
@@ -3477,7 +3518,7 @@ v_n.set(f::F_options, y[7].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a770(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a790(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CreatePolicyStmt);
 v_n.set(f::F_policy_name, y[2].clone());
@@ -3490,7 +3531,7 @@ v_n.set(f::F_with_check, y[9].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a771(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a791(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterPolicyStmt);
 v_n.set(f::F_policy_name, y[2].clone());
@@ -3501,12 +3542,12 @@ v_n.set(f::F_with_check, y[7].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a777(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a797(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::list_make1(&h::makeRoleSpec(&V::Int(4), &V::Int(1).neg())?)?;
 
 Ok(out)
 }
-fn a780(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a800(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 if h::strcmp(&y[1], &V::s("permissive"))?.eq(&V::Int(0)).truthy() {
 out = V::Int(1);
@@ -3519,32 +3560,32 @@ return Err(h::message("unrecognized row security option \"%s\"", &[y[1].clone()]
 }
 Ok(out)
 }
-fn a783(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a803(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::s("all");
 
 Ok(out)
 }
-fn a785(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a805(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::s("select");
 
 Ok(out)
 }
-fn a786(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a806(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::s("insert");
 
 Ok(out)
 }
-fn a787(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a807(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::s("update");
 
 Ok(out)
 }
-fn a788(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a808(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::s("delete");
 
 Ok(out)
 }
-fn a789(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a809(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CreateAmStmt);
 v_n.set(f::F_amname, y[3].clone());
@@ -3553,12 +3594,12 @@ v_n.set(f::F_amtype, y[5].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a790(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a810(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::Int(105);
 
 Ok(out)
 }
-fn a792(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a812(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CreateTrigStmt);
 v_n.set(f::F_replace, y[1].clone());
@@ -3579,9 +3620,20 @@ v_n.set(f::F_constrrel, V::Null);
 out = v_n.clone();
 Ok(out)
 }
-fn a793(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a813(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CreateTrigStmt);
+let v_dummy = V::node(0);
+v_dummy.set(0, V::Null);
+if y[10].and(&V::Int(16)).ne(&V::Int(0)).truthy() {
+return Err(h::message("constraint triggers cannot be marked %s", &[V::s("NOT VALID")]));
+}
+if y[10].and(&V::Int(32)).ne(&V::Int(0)).truthy() {
+return Err(h::message("constraint triggers cannot be marked %s", &[V::s("NO INHERIT")]));
+}
+if y[10].and(&V::Int(64)).ne(&V::Int(0)).truthy() {
+return Err(h::message("constraint triggers cannot be marked %s", &[V::s("NOT ENFORCED")]));
+}
 v_n.set(f::F_replace, y[1].clone());
 if v_n.get(f::F_replace).truthy() {
 return Err(h::message("CREATE OR REPLACE CONSTRAINT TRIGGER is not supported", &[]));
@@ -3597,12 +3649,12 @@ v_n.set(f::F_events, h::intVal(&h::linitial(&y[6]))?);
 v_n.set(f::F_columns, h::lsecond(&y[6]));
 v_n.set(f::F_whenClause, y[14].clone());
 v_n.set(f::F_transitionRels, V::Null);
-let _ = h::processCASbits(&y[10], &V::Int(l[10] as i64), &V::s("TRIGGER"), &V::place(&v_n, f::F_deferrable), &V::place(&v_n, f::F_initdeferred), &V::Null, &V::Null, &V::Null, &V::Null)?;
+let _ = h::processCASbits(&y[10], &V::Int(l[10] as i64), &V::s("TRIGGER"), &V::place(&v_n, f::F_deferrable), &V::place(&v_n, f::F_initdeferred), &V::place(&v_dummy, 0), &V::Null, &V::Null, &V::Null)?;
 v_n.set(f::F_constrrel, y[9].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a798(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a818(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_events1 = h::intVal(&h::linitial(&y[0]))?;
 let mut v_events2 = h::intVal(&h::linitial(&y[2]))?;
@@ -3614,32 +3666,32 @@ return Err(h::syntax(V::s("duplicate trigger events specified"), here));
 out = h::list_make2(&h::makeInteger(&v_events1.or(&v_events2))?, &h::list_concat(&v_columns1, &v_columns2)?)?;
 Ok(out)
 }
-fn a799(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a819(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::list_make2(&h::makeInteger(&V::Int(4))?, &V::Null)?;
 
 Ok(out)
 }
-fn a800(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a820(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::list_make2(&h::makeInteger(&V::Int(8))?, &V::Null)?;
 
 Ok(out)
 }
-fn a801(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a821(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::list_make2(&h::makeInteger(&V::Int(16))?, &V::Null)?;
 
 Ok(out)
 }
-fn a802(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a822(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::list_make2(&h::makeInteger(&V::Int(16))?, &y[2])?;
 
 Ok(out)
 }
-fn a803(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a823(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::list_make2(&h::makeInteger(&V::Int(32))?, &V::Null)?;
 
 Ok(out)
 }
-fn a808(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a828(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_TriggerTransition);
 v_n.set(f::F_name, y[3].clone());
@@ -3648,12 +3700,12 @@ v_n.set(f::F_isTable, y[1].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a827(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a847(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeString(&h::psprintf(&[V::s("%d"), std::mem::take(&mut y[0])])?)?;
 
 Ok(out)
 }
-fn a834(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a854(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_newspec = y[0].or(&y[1]);
 if v_newspec.and(&V::Int(1).or(&V::Int(8))).eq(&V::Int(1).or(&V::Int(8))).truthy() {
@@ -3665,7 +3717,7 @@ return Err(h::message("conflicting constraint properties", &[]));
 out = v_newspec.clone();
 Ok(out)
 }
-fn a843(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a863(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CreateEventTrigStmt);
 v_n.set(f::F_trigname, y[3].clone());
@@ -3675,7 +3727,7 @@ v_n.set(f::F_funcname, y[8].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a844(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a864(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CreateEventTrigStmt);
 v_n.set(f::F_trigname, y[3].clone());
@@ -3685,12 +3737,12 @@ v_n.set(f::F_funcname, y[10].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a847(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a867(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&y[0], &y[3], &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a850(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a870(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterEventTrigStmt);
 v_n.set(f::F_trigname, y[3].clone());
@@ -3698,33 +3750,33 @@ v_n.set(f::F_tgenabled, y[4].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a851(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a871(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::Int(79);
 
 Ok(out)
 }
-fn a852(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a872(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::Int(82);
 
 Ok(out)
 }
-fn a853(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a873(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::Int(65);
 
 Ok(out)
 }
-fn a854(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a874(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::Int(68);
 
 Ok(out)
 }
-fn a855(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a875(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 return Err(h::message("CREATE ASSERTION is not yet implemented", &[]));
 out = V::Null;
 Ok(out)
 }
-fn a856(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a876(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_DefineStmt);
 v_n.set(f::F_kind, V::Int(1));
@@ -3736,7 +3788,7 @@ v_n.set(f::F_definition, y[5].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a857(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a877(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_DefineStmt);
 v_n.set(f::F_kind, V::Int(1));
@@ -3748,7 +3800,7 @@ v_n.set(f::F_definition, y[4].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a858(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a878(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_DefineStmt);
 v_n.set(f::F_kind, V::Int(25));
@@ -3759,10 +3811,10 @@ v_n.set(f::F_definition, y[3].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a859(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a879(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_DefineStmt);
-v_n.set(f::F_kind, V::Int(49));
+v_n.set(f::F_kind, V::Int(50));
 v_n.set(f::F_oldstyle, V::Int(0));
 v_n.set(f::F_defnames, y[2].clone());
 v_n.set(f::F_args, V::Null);
@@ -3770,10 +3822,10 @@ v_n.set(f::F_definition, y[3].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a860(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a880(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_DefineStmt);
-v_n.set(f::F_kind, V::Int(49));
+v_n.set(f::F_kind, V::Int(50));
 v_n.set(f::F_oldstyle, V::Int(0));
 v_n.set(f::F_defnames, y[2].clone());
 v_n.set(f::F_args, V::Null);
@@ -3781,7 +3833,7 @@ v_n.set(f::F_definition, V::Null);
 out = v_n.clone();
 Ok(out)
 }
-fn a861(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a881(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CompositeTypeStmt);
 v_n.set(f::F_typevar, h::makeRangeVarFromAnyName(&y[2], &V::Int(l[2] as i64), &V::Null)?);
@@ -3789,7 +3841,7 @@ v_n.set(f::F_coldeflist, y[5].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a862(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a882(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CreateEnumStmt);
 v_n.set(f::F_typeName, y[2].clone());
@@ -3797,7 +3849,7 @@ v_n.set(f::F_vals, y[6].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a863(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a883(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CreateRangeStmt);
 v_n.set(f::F_typeName, y[2].clone());
@@ -3805,27 +3857,7 @@ v_n.set(f::F_params, y[5].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a864(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = y.first().cloned().unwrap_or(V::Null);
-let mut v_n = V::node(t::T_DefineStmt);
-v_n.set(f::F_kind, V::Int(47));
-v_n.set(f::F_args, V::Null);
-v_n.set(f::F_defnames, y[4].clone());
-v_n.set(f::F_definition, y[5].clone());
-out = v_n.clone();
-Ok(out)
-}
-fn a865(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = y.first().cloned().unwrap_or(V::Null);
-let mut v_n = V::node(t::T_DefineStmt);
-v_n.set(f::F_kind, V::Int(46));
-v_n.set(f::F_args, V::Null);
-v_n.set(f::F_defnames, y[4].clone());
-v_n.set(f::F_definition, y[5].clone());
-out = v_n.clone();
-Ok(out)
-}
-fn a866(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a884(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_DefineStmt);
 v_n.set(f::F_kind, V::Int(48));
@@ -3835,17 +3867,37 @@ v_n.set(f::F_definition, y[5].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a867(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a885(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_DefineStmt);
-v_n.set(f::F_kind, V::Int(45));
+v_n.set(f::F_kind, V::Int(47));
 v_n.set(f::F_args, V::Null);
 v_n.set(f::F_defnames, y[4].clone());
 v_n.set(f::F_definition, y[5].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a868(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a886(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = y.first().cloned().unwrap_or(V::Null);
+let mut v_n = V::node(t::T_DefineStmt);
+v_n.set(f::F_kind, V::Int(49));
+v_n.set(f::F_args, V::Null);
+v_n.set(f::F_defnames, y[4].clone());
+v_n.set(f::F_definition, y[5].clone());
+out = v_n.clone();
+Ok(out)
+}
+fn a887(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = y.first().cloned().unwrap_or(V::Null);
+let mut v_n = V::node(t::T_DefineStmt);
+v_n.set(f::F_kind, V::Int(46));
+v_n.set(f::F_args, V::Null);
+v_n.set(f::F_defnames, y[4].clone());
+v_n.set(f::F_definition, y[5].clone());
+out = v_n.clone();
+Ok(out)
+}
+fn a888(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_DefineStmt);
 v_n.set(f::F_kind, V::Int(7));
@@ -3855,7 +3907,7 @@ v_n.set(f::F_definition, y[3].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a869(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a889(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_DefineStmt);
 v_n.set(f::F_kind, V::Int(7));
@@ -3866,7 +3918,7 @@ v_n.set(f::F_if_not_exists, V::Int(1));
 out = v_n.clone();
 Ok(out)
 }
-fn a870(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a890(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_DefineStmt);
 v_n.set(f::F_kind, V::Int(7));
@@ -3876,7 +3928,7 @@ v_n.set(f::F_definition, h::list_make1(&h::makeDefElem(&V::s("from"), &y[4], &V:
 out = v_n.clone();
 Ok(out)
 }
-fn a871(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a891(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_DefineStmt);
 v_n.set(f::F_kind, V::Int(7));
@@ -3887,7 +3939,7 @@ v_n.set(f::F_if_not_exists, V::Int(1));
 out = v_n.clone();
 Ok(out)
 }
-fn a891(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a911(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterEnumStmt);
 v_n.set(f::F_typeName, y[2].clone());
@@ -3899,7 +3951,7 @@ v_n.set(f::F_skipIfNewValExists, y[5].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a892(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a912(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterEnumStmt);
 v_n.set(f::F_typeName, y[2].clone());
@@ -3911,7 +3963,7 @@ v_n.set(f::F_skipIfNewValExists, y[5].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a893(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a913(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterEnumStmt);
 v_n.set(f::F_typeName, y[2].clone());
@@ -3923,7 +3975,7 @@ v_n.set(f::F_skipIfNewValExists, y[5].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a894(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a914(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterEnumStmt);
 v_n.set(f::F_typeName, y[2].clone());
@@ -3935,12 +3987,12 @@ v_n.set(f::F_skipIfNewValExists, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a895(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a915(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 return Err(h::message("dropping an enum value is not implemented", &[]));
 Ok(out)
 }
-fn a898(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a918(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CreateOpClassStmt);
 v_n.set(f::F_opclassname, y[3].clone());
@@ -3952,7 +4004,7 @@ v_n.set(f::F_items, y[12].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a901(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a921(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CreateOpClassItem);
 let mut v_owa = V::node(t::T_ObjectWithArgs);
@@ -3965,7 +4017,7 @@ v_n.set(f::F_order_family, y[3].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a902(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a922(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CreateOpClassItem);
 v_n.set(f::F_itemtype, V::Int(1));
@@ -3975,7 +4027,7 @@ v_n.set(f::F_order_family, y[3].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a903(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a923(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CreateOpClassItem);
 v_n.set(f::F_itemtype, V::Int(2));
@@ -3984,7 +4036,7 @@ v_n.set(f::F_number, y[1].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a904(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a924(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CreateOpClassItem);
 v_n.set(f::F_itemtype, V::Int(2));
@@ -3994,7 +4046,7 @@ v_n.set(f::F_class_args, y[3].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a905(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a925(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CreateOpClassItem);
 v_n.set(f::F_itemtype, V::Int(3));
@@ -4002,7 +4054,7 @@ v_n.set(f::F_storedtype, y[1].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a913(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a933(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CreateOpFamilyStmt);
 v_n.set(f::F_opfamilyname, y[3].clone());
@@ -4010,7 +4062,7 @@ v_n.set(f::F_amname, y[5].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a914(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a934(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterOpFamilyStmt);
 v_n.set(f::F_opfamilyname, y[3].clone());
@@ -4020,7 +4072,7 @@ v_n.set(f::F_items, y[7].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a915(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a935(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterOpFamilyStmt);
 v_n.set(f::F_opfamilyname, y[3].clone());
@@ -4030,7 +4082,7 @@ v_n.set(f::F_items, y[7].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a918(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a938(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CreateOpClassItem);
 v_n.set(f::F_itemtype, V::Int(1));
@@ -4039,7 +4091,7 @@ v_n.set(f::F_class_args, y[3].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a919(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a939(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CreateOpClassItem);
 v_n.set(f::F_itemtype, V::Int(2));
@@ -4048,7 +4100,7 @@ v_n.set(f::F_class_args, y[3].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a920(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a940(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_DropStmt);
 v_n.set(f::F_objects, h::list_make1(&h::lcons(&h::makeString(&y[5])?, &y[3])?)?);
@@ -4059,7 +4111,7 @@ v_n.set(f::F_concurrent, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a921(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a941(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_DropStmt);
 v_n.set(f::F_objects, h::list_make1(&h::lcons(&h::makeString(&y[7])?, &y[5])?)?);
@@ -4070,7 +4122,7 @@ v_n.set(f::F_concurrent, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a922(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a942(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_DropStmt);
 v_n.set(f::F_objects, h::list_make1(&h::lcons(&h::makeString(&y[5])?, &y[3])?)?);
@@ -4081,7 +4133,7 @@ v_n.set(f::F_concurrent, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a923(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a943(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_DropStmt);
 v_n.set(f::F_objects, h::list_make1(&h::lcons(&h::makeString(&y[7])?, &y[5])?)?);
@@ -4092,7 +4144,7 @@ v_n.set(f::F_concurrent, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a924(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a944(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_DropOwnedStmt);
 v_n.set(f::F_roles, y[3].clone());
@@ -4100,7 +4152,7 @@ v_n.set(f::F_behavior, y[4].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a925(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a945(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_ReassignOwnedStmt);
 v_n.set(f::F_roles, y[3].clone());
@@ -4108,7 +4160,7 @@ v_n.set(f::F_newrole, y[5].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a926(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a946(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_DropStmt);
 v_n.set(f::F_removeType, y[1].clone());
@@ -4119,7 +4171,7 @@ v_n.set(f::F_concurrent, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a927(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a947(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_DropStmt);
 v_n.set(f::F_removeType, y[1].clone());
@@ -4130,7 +4182,7 @@ v_n.set(f::F_concurrent, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a930(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a950(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_DropStmt);
 v_n.set(f::F_removeType, y[1].clone());
@@ -4141,7 +4193,7 @@ v_n.set(f::F_concurrent, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a931(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a951(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_DropStmt);
 v_n.set(f::F_removeType, y[1].clone());
@@ -4152,10 +4204,10 @@ v_n.set(f::F_concurrent, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a932(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a952(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_DropStmt);
-v_n.set(f::F_removeType, V::Int(49));
+v_n.set(f::F_removeType, V::Int(50));
 v_n.set(f::F_missing_ok, V::Int(0));
 v_n.set(f::F_objects, y[2].clone());
 v_n.set(f::F_behavior, y[3].clone());
@@ -4163,10 +4215,10 @@ v_n.set(f::F_concurrent, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a933(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a953(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_DropStmt);
-v_n.set(f::F_removeType, V::Int(49));
+v_n.set(f::F_removeType, V::Int(50));
 v_n.set(f::F_missing_ok, V::Int(1));
 v_n.set(f::F_objects, y[4].clone());
 v_n.set(f::F_behavior, y[5].clone());
@@ -4174,7 +4226,7 @@ v_n.set(f::F_concurrent, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a934(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a954(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_DropStmt);
 v_n.set(f::F_removeType, V::Int(12));
@@ -4185,7 +4237,7 @@ v_n.set(f::F_concurrent, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a935(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a955(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_DropStmt);
 v_n.set(f::F_removeType, V::Int(12));
@@ -4196,7 +4248,7 @@ v_n.set(f::F_concurrent, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a936(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a956(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_DropStmt);
 v_n.set(f::F_removeType, V::Int(20));
@@ -4207,7 +4259,7 @@ v_n.set(f::F_concurrent, V::Int(1));
 out = v_n.clone();
 Ok(out)
 }
-fn a937(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a957(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_DropStmt);
 v_n.set(f::F_removeType, V::Int(20));
@@ -4218,137 +4270,137 @@ v_n.set(f::F_concurrent, V::Int(1));
 out = v_n.clone();
 Ok(out)
 }
-fn a938(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = V::Int(41);
-
-Ok(out)
-}
-fn a939(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = V::Int(37);
-
-Ok(out)
-}
-fn a940(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = V::Int(51);
-
-Ok(out)
-}
-fn a941(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = V::Int(23);
-
-Ok(out)
-}
-fn a942(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = V::Int(20);
-
-Ok(out)
-}
-fn a943(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = V::Int(18);
-
-Ok(out)
-}
-fn a944(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = V::Int(7);
-
-Ok(out)
-}
-fn a946(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = V::Int(39);
-
-Ok(out)
-}
-fn a947(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = V::Int(47);
-
-Ok(out)
-}
-fn a948(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = V::Int(46);
-
-Ok(out)
-}
-fn a949(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = V::Int(48);
-
-Ok(out)
-}
-fn a950(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = V::Int(45);
-
-Ok(out)
-}
-fn a952(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = V::Int(9);
-
-Ok(out)
-}
-fn a953(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = V::Int(33);
-
-Ok(out)
-}
-fn a954(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = V::Int(38);
-
-Ok(out)
-}
-fn a955(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a958(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::Int(42);
 
 Ok(out)
 }
-fn a957(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = V::Int(14);
-
-Ok(out)
-}
-fn a958(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = V::Int(15);
+fn a959(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = V::Int(38);
 
 Ok(out)
 }
 fn a960(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = V::Int(21);
+let mut out = V::Int(52);
 
 Ok(out)
 }
 fn a961(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = V::Int(30);
+let mut out = V::Int(23);
 
 Ok(out)
 }
 fn a962(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = V::Int(36);
+let mut out = V::Int(20);
 
 Ok(out)
 }
 fn a963(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = V::Int(17);
+let mut out = V::Int(18);
 
 Ok(out)
 }
 fn a964(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = V::Int(28);
-
-Ok(out)
-}
-fn a965(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = V::Int(35);
+let mut out = V::Int(7);
 
 Ok(out)
 }
 fn a966(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = V::Int(44);
+let mut out = V::Int(40);
 
 Ok(out)
 }
-fn a971(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = h::list_make1(&h::makeString(&y[1])?)?;
+fn a967(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = V::Int(48);
+
+Ok(out)
+}
+fn a968(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = V::Int(47);
+
+Ok(out)
+}
+fn a969(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = V::Int(49);
+
+Ok(out)
+}
+fn a970(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = V::Int(46);
+
+Ok(out)
+}
+fn a972(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = V::Int(9);
+
+Ok(out)
+}
+fn a973(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = V::Int(34);
+
+Ok(out)
+}
+fn a974(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = V::Int(39);
 
 Ok(out)
 }
 fn a975(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = V::Int(43);
+
+Ok(out)
+}
+fn a977(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = V::Int(14);
+
+Ok(out)
+}
+fn a978(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = V::Int(15);
+
+Ok(out)
+}
+fn a980(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = V::Int(21);
+
+Ok(out)
+}
+fn a981(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = V::Int(30);
+
+Ok(out)
+}
+fn a982(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = V::Int(37);
+
+Ok(out)
+}
+fn a983(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = V::Int(17);
+
+Ok(out)
+}
+fn a984(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = V::Int(28);
+
+Ok(out)
+}
+fn a985(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = V::Int(36);
+
+Ok(out)
+}
+fn a986(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = V::Int(45);
+
+Ok(out)
+}
+fn a991(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = h::list_make1(&h::makeString(&y[1])?)?;
+
+Ok(out)
+}
+fn a995(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_TruncateStmt);
 v_n.set(f::F_relations, y[2].clone());
@@ -4357,7 +4409,7 @@ v_n.set(f::F_behavior, y[4].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a979(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a999(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CommentStmt);
 v_n.set(f::F_objtype, y[2].clone());
@@ -4366,7 +4418,7 @@ v_n.set(f::F_comment, y[5].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a980(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1000(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CommentStmt);
 v_n.set(f::F_objtype, V::Int(6));
@@ -4375,7 +4427,7 @@ v_n.set(f::F_comment, y[5].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a981(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1001(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CommentStmt);
 v_n.set(f::F_objtype, y[2].clone());
@@ -4384,16 +4436,16 @@ v_n.set(f::F_comment, y[5].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a982(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1002(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CommentStmt);
-v_n.set(f::F_objtype, V::Int(49));
+v_n.set(f::F_objtype, V::Int(50));
 v_n.set(f::F_object, y[3].clone());
 v_n.set(f::F_comment, y[5].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a983(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1003(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CommentStmt);
 v_n.set(f::F_objtype, V::Int(12));
@@ -4402,7 +4454,7 @@ v_n.set(f::F_comment, y[5].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a984(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1004(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CommentStmt);
 v_n.set(f::F_objtype, V::Int(1));
@@ -4411,7 +4463,7 @@ v_n.set(f::F_comment, y[5].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a985(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1005(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CommentStmt);
 v_n.set(f::F_objtype, V::Int(19));
@@ -4420,7 +4472,7 @@ v_n.set(f::F_comment, y[5].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a986(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1006(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CommentStmt);
 v_n.set(f::F_objtype, V::Int(25));
@@ -4429,16 +4481,16 @@ v_n.set(f::F_comment, y[5].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a987(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1007(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CommentStmt);
-v_n.set(f::F_objtype, V::Int(40));
+v_n.set(f::F_objtype, V::Int(41));
 v_n.set(f::F_object, h::lappend(&y[5], &h::makeString(&y[3])?)?);
 v_n.set(f::F_comment, y[7].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a988(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1008(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CommentStmt);
 v_n.set(f::F_objtype, V::Int(13));
@@ -4447,7 +4499,7 @@ v_n.set(f::F_comment, y[8].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a989(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1009(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CommentStmt);
 v_n.set(f::F_objtype, y[2].clone());
@@ -4456,7 +4508,7 @@ v_n.set(f::F_comment, y[7].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a990(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1010(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CommentStmt);
 v_n.set(f::F_objtype, V::Int(29));
@@ -4465,25 +4517,25 @@ v_n.set(f::F_comment, y[5].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a991(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1011(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CommentStmt);
-v_n.set(f::F_objtype, V::Int(34));
+v_n.set(f::F_objtype, V::Int(35));
 v_n.set(f::F_object, y[3].clone());
 v_n.set(f::F_comment, y[5].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a992(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1012(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CommentStmt);
-v_n.set(f::F_objtype, V::Int(43));
+v_n.set(f::F_objtype, V::Int(44));
 v_n.set(f::F_object, h::list_make2(&y[4], &h::makeString(&y[6])?)?);
 v_n.set(f::F_comment, y[8].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a993(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1013(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CommentStmt);
 v_n.set(f::F_objtype, V::Int(24));
@@ -4492,7 +4544,7 @@ v_n.set(f::F_comment, y[8].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a994(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1014(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CommentStmt);
 v_n.set(f::F_objtype, V::Int(26));
@@ -4501,7 +4553,7 @@ v_n.set(f::F_comment, y[8].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a995(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1015(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CommentStmt);
 v_n.set(f::F_objtype, V::Int(22));
@@ -4510,7 +4562,7 @@ v_n.set(f::F_comment, y[6].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a996(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1016(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CommentStmt);
 v_n.set(f::F_objtype, V::Int(5));
@@ -4519,7 +4571,7 @@ v_n.set(f::F_comment, y[9].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a999(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1019(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_SecLabelStmt);
 v_n.set(f::F_provider, y[2].clone());
@@ -4529,7 +4581,7 @@ v_n.set(f::F_label, y[7].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1000(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1020(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_SecLabelStmt);
 v_n.set(f::F_provider, y[2].clone());
@@ -4539,7 +4591,7 @@ v_n.set(f::F_label, y[7].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1001(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1021(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_SecLabelStmt);
 v_n.set(f::F_provider, y[2].clone());
@@ -4549,17 +4601,17 @@ v_n.set(f::F_label, y[7].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1002(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1022(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_SecLabelStmt);
 v_n.set(f::F_provider, y[2].clone());
-v_n.set(f::F_objtype, V::Int(49));
+v_n.set(f::F_objtype, V::Int(50));
 v_n.set(f::F_object, y[5].clone());
 v_n.set(f::F_label, y[7].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1003(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1023(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_SecLabelStmt);
 v_n.set(f::F_provider, y[2].clone());
@@ -4569,7 +4621,7 @@ v_n.set(f::F_label, y[7].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1004(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1024(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_SecLabelStmt);
 v_n.set(f::F_provider, y[2].clone());
@@ -4579,7 +4631,7 @@ v_n.set(f::F_label, y[7].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1005(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1025(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_SecLabelStmt);
 v_n.set(f::F_provider, y[2].clone());
@@ -4589,7 +4641,7 @@ v_n.set(f::F_label, y[7].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1006(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1026(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_SecLabelStmt);
 v_n.set(f::F_provider, y[2].clone());
@@ -4599,7 +4651,7 @@ v_n.set(f::F_label, y[8].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1007(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1027(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_SecLabelStmt);
 v_n.set(f::F_provider, y[2].clone());
@@ -4609,157 +4661,207 @@ v_n.set(f::F_label, y[7].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1008(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1028(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_SecLabelStmt);
 v_n.set(f::F_provider, y[2].clone());
-v_n.set(f::F_objtype, V::Int(34));
+v_n.set(f::F_objtype, V::Int(35));
 v_n.set(f::F_object, y[5].clone());
 v_n.set(f::F_label, y[7].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1013(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1033(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = y[1].clone();
 v_n.set(f::F_ismove, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a1014(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1034(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = y[1].clone();
 v_n.set(f::F_ismove, V::Int(1));
 out = v_n.clone();
 Ok(out)
 }
-fn a1015(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1035(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_FetchStmt);
 v_n.set(f::F_portalname, y[0].clone());
 v_n.set(f::F_direction, V::Int(0));
 v_n.set(f::F_howMany, V::Int(1));
+v_n.set(f::F_location, V::Int(1).neg());
+v_n.set(f::F_direction_keyword, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a1016(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1036(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_FetchStmt);
 v_n.set(f::F_portalname, y[1].clone());
 v_n.set(f::F_direction, V::Int(0));
 v_n.set(f::F_howMany, V::Int(1));
+v_n.set(f::F_location, V::Int(1).neg());
+v_n.set(f::F_direction_keyword, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a1017(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = y.first().cloned().unwrap_or(V::Null);
-let mut v_n = V::node(t::T_FetchStmt);
-v_n.set(f::F_portalname, y[2].clone());
-v_n.set(f::F_direction, V::Int(0));
-v_n.set(f::F_howMany, V::Int(1));
-out = v_n.clone();
-Ok(out)
-}
-fn a1018(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = y.first().cloned().unwrap_or(V::Null);
-let mut v_n = V::node(t::T_FetchStmt);
-v_n.set(f::F_portalname, y[2].clone());
-v_n.set(f::F_direction, V::Int(1));
-v_n.set(f::F_howMany, V::Int(1));
-out = v_n.clone();
-Ok(out)
-}
-fn a1019(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = y.first().cloned().unwrap_or(V::Null);
-let mut v_n = V::node(t::T_FetchStmt);
-v_n.set(f::F_portalname, y[2].clone());
-v_n.set(f::F_direction, V::Int(2));
-v_n.set(f::F_howMany, V::Int(1));
-out = v_n.clone();
-Ok(out)
-}
-fn a1020(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = y.first().cloned().unwrap_or(V::Null);
-let mut v_n = V::node(t::T_FetchStmt);
-v_n.set(f::F_portalname, y[2].clone());
-v_n.set(f::F_direction, V::Int(2));
-v_n.set(f::F_howMany, V::Int(1).neg());
-out = v_n.clone();
-Ok(out)
-}
-fn a1021(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = y.first().cloned().unwrap_or(V::Null);
-let mut v_n = V::node(t::T_FetchStmt);
-v_n.set(f::F_portalname, y[3].clone());
-v_n.set(f::F_direction, V::Int(2));
-v_n.set(f::F_howMany, y[1].clone());
-out = v_n.clone();
-Ok(out)
-}
-fn a1022(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = y.first().cloned().unwrap_or(V::Null);
-let mut v_n = V::node(t::T_FetchStmt);
-v_n.set(f::F_portalname, y[3].clone());
-v_n.set(f::F_direction, V::Int(3));
-v_n.set(f::F_howMany, y[1].clone());
-out = v_n.clone();
-Ok(out)
-}
-fn a1023(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1037(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_FetchStmt);
 v_n.set(f::F_portalname, y[2].clone());
 v_n.set(f::F_direction, V::Int(0));
 v_n.set(f::F_howMany, y[0].clone());
+v_n.set(f::F_location, V::Int(l[0] as i64));
+v_n.set(f::F_direction_keyword, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a1024(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1038(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = y.first().cloned().unwrap_or(V::Null);
+let mut v_n = V::node(t::T_FetchStmt);
+v_n.set(f::F_portalname, y[2].clone());
+v_n.set(f::F_direction, V::Int(0));
+v_n.set(f::F_howMany, V::Int(1));
+v_n.set(f::F_location, V::Int(1).neg());
+v_n.set(f::F_direction_keyword, V::Int(1));
+out = v_n.clone();
+Ok(out)
+}
+fn a1039(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = y.first().cloned().unwrap_or(V::Null);
+let mut v_n = V::node(t::T_FetchStmt);
+v_n.set(f::F_portalname, y[2].clone());
+v_n.set(f::F_direction, V::Int(1));
+v_n.set(f::F_howMany, V::Int(1));
+v_n.set(f::F_location, V::Int(1).neg());
+v_n.set(f::F_direction_keyword, V::Int(2));
+out = v_n.clone();
+Ok(out)
+}
+fn a1040(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = y.first().cloned().unwrap_or(V::Null);
+let mut v_n = V::node(t::T_FetchStmt);
+v_n.set(f::F_portalname, y[2].clone());
+v_n.set(f::F_direction, V::Int(2));
+v_n.set(f::F_howMany, V::Int(1));
+v_n.set(f::F_location, V::Int(1).neg());
+v_n.set(f::F_direction_keyword, V::Int(3));
+out = v_n.clone();
+Ok(out)
+}
+fn a1041(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = y.first().cloned().unwrap_or(V::Null);
+let mut v_n = V::node(t::T_FetchStmt);
+v_n.set(f::F_portalname, y[2].clone());
+v_n.set(f::F_direction, V::Int(2));
+v_n.set(f::F_howMany, V::Int(1).neg());
+v_n.set(f::F_location, V::Int(1).neg());
+v_n.set(f::F_direction_keyword, V::Int(4));
+out = v_n.clone();
+Ok(out)
+}
+fn a1042(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = y.first().cloned().unwrap_or(V::Null);
+let mut v_n = V::node(t::T_FetchStmt);
+v_n.set(f::F_portalname, y[3].clone());
+v_n.set(f::F_direction, V::Int(2));
+v_n.set(f::F_howMany, y[1].clone());
+v_n.set(f::F_location, V::Int(l[1] as i64));
+v_n.set(f::F_direction_keyword, V::Int(5));
+out = v_n.clone();
+Ok(out)
+}
+fn a1043(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = y.first().cloned().unwrap_or(V::Null);
+let mut v_n = V::node(t::T_FetchStmt);
+v_n.set(f::F_portalname, y[3].clone());
+v_n.set(f::F_direction, V::Int(3));
+v_n.set(f::F_howMany, y[1].clone());
+v_n.set(f::F_location, V::Int(l[1] as i64));
+v_n.set(f::F_direction_keyword, V::Int(6));
+out = v_n.clone();
+Ok(out)
+}
+fn a1044(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_FetchStmt);
 v_n.set(f::F_portalname, y[2].clone());
 v_n.set(f::F_direction, V::Int(0));
 v_n.set(f::F_howMany, V::Int(9223372036854775807));
+v_n.set(f::F_location, V::Int(1).neg());
+v_n.set(f::F_direction_keyword, V::Int(7));
 out = v_n.clone();
 Ok(out)
 }
-fn a1026(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1045(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = y.first().cloned().unwrap_or(V::Null);
+let mut v_n = V::node(t::T_FetchStmt);
+v_n.set(f::F_portalname, y[2].clone());
+v_n.set(f::F_direction, V::Int(0));
+v_n.set(f::F_howMany, V::Int(1));
+v_n.set(f::F_location, V::Int(1).neg());
+v_n.set(f::F_direction_keyword, V::Int(8));
+out = v_n.clone();
+Ok(out)
+}
+fn a1046(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_FetchStmt);
 v_n.set(f::F_portalname, y[3].clone());
 v_n.set(f::F_direction, V::Int(0));
 v_n.set(f::F_howMany, y[1].clone());
+v_n.set(f::F_location, V::Int(l[1] as i64));
+v_n.set(f::F_direction_keyword, V::Int(8));
 out = v_n.clone();
 Ok(out)
 }
-fn a1027(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1047(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_FetchStmt);
 v_n.set(f::F_portalname, y[3].clone());
 v_n.set(f::F_direction, V::Int(0));
 v_n.set(f::F_howMany, V::Int(9223372036854775807));
+v_n.set(f::F_location, V::Int(1).neg());
+v_n.set(f::F_direction_keyword, V::Int(9));
 out = v_n.clone();
 Ok(out)
 }
-fn a1029(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1048(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = y.first().cloned().unwrap_or(V::Null);
+let mut v_n = V::node(t::T_FetchStmt);
+v_n.set(f::F_portalname, y[2].clone());
+v_n.set(f::F_direction, V::Int(1));
+v_n.set(f::F_howMany, V::Int(1));
+v_n.set(f::F_location, V::Int(1).neg());
+v_n.set(f::F_direction_keyword, V::Int(10));
+out = v_n.clone();
+Ok(out)
+}
+fn a1049(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_FetchStmt);
 v_n.set(f::F_portalname, y[3].clone());
 v_n.set(f::F_direction, V::Int(1));
 v_n.set(f::F_howMany, y[1].clone());
+v_n.set(f::F_location, V::Int(l[1] as i64));
+v_n.set(f::F_direction_keyword, V::Int(10));
 out = v_n.clone();
 Ok(out)
 }
-fn a1030(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1050(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_FetchStmt);
 v_n.set(f::F_portalname, y[3].clone());
 v_n.set(f::F_direction, V::Int(1));
 v_n.set(f::F_howMany, V::Int(9223372036854775807));
+v_n.set(f::F_location, V::Int(1).neg());
+v_n.set(f::F_direction_keyword, V::Int(11));
 out = v_n.clone();
 Ok(out)
 }
-fn a1035(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1055(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_GrantStmt);
 v_n.set(f::F_is_grant, V::Int(1));
@@ -4773,7 +4875,7 @@ v_n.set(f::F_grantor, y[7].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1036(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1056(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_GrantStmt);
 v_n.set(f::F_is_grant, V::Int(0));
@@ -4788,7 +4890,7 @@ v_n.set(f::F_behavior, y[7].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1037(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1057(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_GrantStmt);
 v_n.set(f::F_is_grant, V::Int(0));
@@ -4803,7 +4905,7 @@ v_n.set(f::F_behavior, y[10].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1041(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1061(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AccessPriv);
 v_n.set(f::F_priv_name, V::Null);
@@ -4811,7 +4913,7 @@ v_n.set(f::F_cols, y[2].clone());
 out = h::list_make1(&v_n)?;
 Ok(out)
 }
-fn a1042(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1062(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AccessPriv);
 v_n.set(f::F_priv_name, V::Null);
@@ -4819,7 +4921,7 @@ v_n.set(f::F_cols, y[3].clone());
 out = h::list_make1(&v_n)?;
 Ok(out)
 }
-fn a1045(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1065(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AccessPriv);
 v_n.set(f::F_priv_name, y[0].clone());
@@ -4827,7 +4929,7 @@ v_n.set(f::F_cols, y[1].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1048(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1068(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AccessPriv);
 v_n.set(f::F_priv_name, V::s("alter system"));
@@ -4835,133 +4937,16 @@ v_n.set(f::F_cols, V::Null);
 out = v_n.clone();
 Ok(out)
 }
-fn a1053(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1073(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_PrivTarget);
 v_n.set(f::F_targtype, V::Int(0));
-v_n.set(f::F_objtype, V::Int(41));
+v_n.set(f::F_objtype, V::Int(42));
 v_n.set(f::F_objs, y[0].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1054(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = y.first().cloned().unwrap_or(V::Null);
-let mut v_n = V::node(t::T_PrivTarget);
-v_n.set(f::F_targtype, V::Int(0));
-v_n.set(f::F_objtype, V::Int(41));
-v_n.set(f::F_objs, y[1].clone());
-out = v_n.clone();
-Ok(out)
-}
-fn a1055(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = y.first().cloned().unwrap_or(V::Null);
-let mut v_n = V::node(t::T_PrivTarget);
-v_n.set(f::F_targtype, V::Int(0));
-v_n.set(f::F_objtype, V::Int(37));
-v_n.set(f::F_objs, y[1].clone());
-out = v_n.clone();
-Ok(out)
-}
-fn a1056(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = y.first().cloned().unwrap_or(V::Null);
-let mut v_n = V::node(t::T_PrivTarget);
-v_n.set(f::F_targtype, V::Int(0));
-v_n.set(f::F_objtype, V::Int(16));
-v_n.set(f::F_objs, y[3].clone());
-out = v_n.clone();
-Ok(out)
-}
-fn a1057(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = y.first().cloned().unwrap_or(V::Null);
-let mut v_n = V::node(t::T_PrivTarget);
-v_n.set(f::F_targtype, V::Int(0));
-v_n.set(f::F_objtype, V::Int(17));
-v_n.set(f::F_objs, y[2].clone());
-out = v_n.clone();
-Ok(out)
-}
-fn a1058(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = y.first().cloned().unwrap_or(V::Null);
-let mut v_n = V::node(t::T_PrivTarget);
-v_n.set(f::F_targtype, V::Int(0));
-v_n.set(f::F_objtype, V::Int(19));
-v_n.set(f::F_objs, y[1].clone());
-out = v_n.clone();
-Ok(out)
-}
-fn a1059(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = y.first().cloned().unwrap_or(V::Null);
-let mut v_n = V::node(t::T_PrivTarget);
-v_n.set(f::F_targtype, V::Int(0));
-v_n.set(f::F_objtype, V::Int(29));
-v_n.set(f::F_objs, y[1].clone());
-out = v_n.clone();
-Ok(out)
-}
-fn a1060(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = y.first().cloned().unwrap_or(V::Null);
-let mut v_n = V::node(t::T_PrivTarget);
-v_n.set(f::F_targtype, V::Int(0));
-v_n.set(f::F_objtype, V::Int(34));
-v_n.set(f::F_objs, y[1].clone());
-out = v_n.clone();
-Ok(out)
-}
-fn a1061(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = y.first().cloned().unwrap_or(V::Null);
-let mut v_n = V::node(t::T_PrivTarget);
-v_n.set(f::F_targtype, V::Int(0));
-v_n.set(f::F_objtype, V::Int(9));
-v_n.set(f::F_objs, y[1].clone());
-out = v_n.clone();
-Ok(out)
-}
-fn a1062(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = y.first().cloned().unwrap_or(V::Null);
-let mut v_n = V::node(t::T_PrivTarget);
-v_n.set(f::F_targtype, V::Int(0));
-v_n.set(f::F_objtype, V::Int(12));
-v_n.set(f::F_objs, y[1].clone());
-out = v_n.clone();
-Ok(out)
-}
-fn a1063(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = y.first().cloned().unwrap_or(V::Null);
-let mut v_n = V::node(t::T_PrivTarget);
-v_n.set(f::F_targtype, V::Int(0));
-v_n.set(f::F_objtype, V::Int(21));
-v_n.set(f::F_objs, y[1].clone());
-out = v_n.clone();
-Ok(out)
-}
-fn a1064(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = y.first().cloned().unwrap_or(V::Null);
-let mut v_n = V::node(t::T_PrivTarget);
-v_n.set(f::F_targtype, V::Int(0));
-v_n.set(f::F_objtype, V::Int(22));
-v_n.set(f::F_objs, y[2].clone());
-out = v_n.clone();
-Ok(out)
-}
-fn a1065(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = y.first().cloned().unwrap_or(V::Null);
-let mut v_n = V::node(t::T_PrivTarget);
-v_n.set(f::F_targtype, V::Int(0));
-v_n.set(f::F_objtype, V::Int(27));
-v_n.set(f::F_objs, y[1].clone());
-out = v_n.clone();
-Ok(out)
-}
-fn a1066(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = y.first().cloned().unwrap_or(V::Null);
-let mut v_n = V::node(t::T_PrivTarget);
-v_n.set(f::F_targtype, V::Int(0));
-v_n.set(f::F_objtype, V::Int(36));
-v_n.set(f::F_objs, y[1].clone());
-out = v_n.clone();
-Ok(out)
-}
-fn a1067(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1074(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_PrivTarget);
 v_n.set(f::F_targtype, V::Int(0));
@@ -4970,34 +4955,151 @@ v_n.set(f::F_objs, y[1].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1068(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1075(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_PrivTarget);
 v_n.set(f::F_targtype, V::Int(0));
-v_n.set(f::F_objtype, V::Int(49));
+v_n.set(f::F_objtype, V::Int(38));
 v_n.set(f::F_objs, y[1].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1069(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1076(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_PrivTarget);
-v_n.set(f::F_targtype, V::Int(1));
-v_n.set(f::F_objtype, V::Int(41));
-v_n.set(f::F_objs, y[4].clone());
+v_n.set(f::F_targtype, V::Int(0));
+v_n.set(f::F_objtype, V::Int(16));
+v_n.set(f::F_objs, y[3].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1070(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1077(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_PrivTarget);
-v_n.set(f::F_targtype, V::Int(1));
+v_n.set(f::F_targtype, V::Int(0));
+v_n.set(f::F_objtype, V::Int(17));
+v_n.set(f::F_objs, y[2].clone());
+out = v_n.clone();
+Ok(out)
+}
+fn a1078(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = y.first().cloned().unwrap_or(V::Null);
+let mut v_n = V::node(t::T_PrivTarget);
+v_n.set(f::F_targtype, V::Int(0));
+v_n.set(f::F_objtype, V::Int(19));
+v_n.set(f::F_objs, y[1].clone());
+out = v_n.clone();
+Ok(out)
+}
+fn a1079(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = y.first().cloned().unwrap_or(V::Null);
+let mut v_n = V::node(t::T_PrivTarget);
+v_n.set(f::F_targtype, V::Int(0));
+v_n.set(f::F_objtype, V::Int(29));
+v_n.set(f::F_objs, y[1].clone());
+out = v_n.clone();
+Ok(out)
+}
+fn a1080(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = y.first().cloned().unwrap_or(V::Null);
+let mut v_n = V::node(t::T_PrivTarget);
+v_n.set(f::F_targtype, V::Int(0));
+v_n.set(f::F_objtype, V::Int(35));
+v_n.set(f::F_objs, y[1].clone());
+out = v_n.clone();
+Ok(out)
+}
+fn a1081(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = y.first().cloned().unwrap_or(V::Null);
+let mut v_n = V::node(t::T_PrivTarget);
+v_n.set(f::F_targtype, V::Int(0));
+v_n.set(f::F_objtype, V::Int(9));
+v_n.set(f::F_objs, y[1].clone());
+out = v_n.clone();
+Ok(out)
+}
+fn a1082(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = y.first().cloned().unwrap_or(V::Null);
+let mut v_n = V::node(t::T_PrivTarget);
+v_n.set(f::F_targtype, V::Int(0));
+v_n.set(f::F_objtype, V::Int(12));
+v_n.set(f::F_objs, y[1].clone());
+out = v_n.clone();
+Ok(out)
+}
+fn a1083(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = y.first().cloned().unwrap_or(V::Null);
+let mut v_n = V::node(t::T_PrivTarget);
+v_n.set(f::F_targtype, V::Int(0));
+v_n.set(f::F_objtype, V::Int(21));
+v_n.set(f::F_objs, y[1].clone());
+out = v_n.clone();
+Ok(out)
+}
+fn a1084(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = y.first().cloned().unwrap_or(V::Null);
+let mut v_n = V::node(t::T_PrivTarget);
+v_n.set(f::F_targtype, V::Int(0));
+v_n.set(f::F_objtype, V::Int(22));
+v_n.set(f::F_objs, y[2].clone());
+out = v_n.clone();
+Ok(out)
+}
+fn a1085(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = y.first().cloned().unwrap_or(V::Null);
+let mut v_n = V::node(t::T_PrivTarget);
+v_n.set(f::F_targtype, V::Int(0));
+v_n.set(f::F_objtype, V::Int(27));
+v_n.set(f::F_objs, y[1].clone());
+out = v_n.clone();
+Ok(out)
+}
+fn a1086(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = y.first().cloned().unwrap_or(V::Null);
+let mut v_n = V::node(t::T_PrivTarget);
+v_n.set(f::F_targtype, V::Int(0));
 v_n.set(f::F_objtype, V::Int(37));
+v_n.set(f::F_objs, y[1].clone());
+out = v_n.clone();
+Ok(out)
+}
+fn a1087(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = y.first().cloned().unwrap_or(V::Null);
+let mut v_n = V::node(t::T_PrivTarget);
+v_n.set(f::F_targtype, V::Int(0));
+v_n.set(f::F_objtype, V::Int(43));
+v_n.set(f::F_objs, y[1].clone());
+out = v_n.clone();
+Ok(out)
+}
+fn a1088(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = y.first().cloned().unwrap_or(V::Null);
+let mut v_n = V::node(t::T_PrivTarget);
+v_n.set(f::F_targtype, V::Int(0));
+v_n.set(f::F_objtype, V::Int(50));
+v_n.set(f::F_objs, y[1].clone());
+out = v_n.clone();
+Ok(out)
+}
+fn a1089(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = y.first().cloned().unwrap_or(V::Null);
+let mut v_n = V::node(t::T_PrivTarget);
+v_n.set(f::F_targtype, V::Int(1));
+v_n.set(f::F_objtype, V::Int(42));
 v_n.set(f::F_objs, y[4].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1071(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1090(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = y.first().cloned().unwrap_or(V::Null);
+let mut v_n = V::node(t::T_PrivTarget);
+v_n.set(f::F_targtype, V::Int(1));
+v_n.set(f::F_objtype, V::Int(38));
+v_n.set(f::F_objs, y[4].clone());
+out = v_n.clone();
+Ok(out)
+}
+fn a1091(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_PrivTarget);
 v_n.set(f::F_targtype, V::Int(1));
@@ -5006,7 +5108,7 @@ v_n.set(f::F_objs, y[4].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1072(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1092(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_PrivTarget);
 v_n.set(f::F_targtype, V::Int(1));
@@ -5015,16 +5117,16 @@ v_n.set(f::F_objs, y[4].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1073(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1093(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_PrivTarget);
 v_n.set(f::F_targtype, V::Int(1));
-v_n.set(f::F_objtype, V::Int(34));
+v_n.set(f::F_objtype, V::Int(35));
 v_n.set(f::F_objs, y[4].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1080(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1100(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_GrantRoleStmt);
 v_n.set(f::F_is_grant, V::Int(1));
@@ -5035,7 +5137,7 @@ v_n.set(f::F_grantor, y[4].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1081(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1101(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_GrantRoleStmt);
 v_n.set(f::F_is_grant, V::Int(1));
@@ -5046,7 +5148,7 @@ v_n.set(f::F_grantor, y[6].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1082(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1102(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_GrantRoleStmt);
 v_n.set(f::F_is_grant, V::Int(0));
@@ -5058,7 +5160,7 @@ v_n.set(f::F_behavior, y[5].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1083(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1103(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_GrantRoleStmt);
 let mut v_opt = V::Null;
@@ -5072,17 +5174,17 @@ v_n.set(f::F_behavior, y[8].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1087(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1107(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeBoolean(&V::Int(1))?;
 
 Ok(out)
 }
-fn a1089(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1109(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeBoolean(&V::Int(0))?;
 
 Ok(out)
 }
-fn a1092(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1112(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterDefaultPrivilegesStmt);
 v_n.set(f::F_options, y[3].clone());
@@ -5090,17 +5192,17 @@ v_n.set(f::F_action, y[4].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1095(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1115(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("schemas"), &y[2], &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a1096(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1116(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("roles"), &y[2], &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a1098(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1118(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_GrantStmt);
 v_n.set(f::F_is_grant, V::Int(1));
@@ -5113,7 +5215,7 @@ v_n.set(f::F_grant_option, y[6].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1099(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1119(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_GrantStmt);
 v_n.set(f::F_is_grant, V::Int(0));
@@ -5127,7 +5229,7 @@ v_n.set(f::F_behavior, y[6].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1100(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1120(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_GrantStmt);
 v_n.set(f::F_is_grant, V::Int(0));
@@ -5141,22 +5243,22 @@ v_n.set(f::F_behavior, y[9].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1102(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1122(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::Int(19);
 
 Ok(out)
 }
-fn a1105(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = V::Int(49);
+fn a1125(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = V::Int(50);
 
 Ok(out)
 }
-fn a1107(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1127(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::Int(22);
 
 Ok(out)
 }
-fn a1108(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1128(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_IndexStmt);
 v_n.set(f::F_unique, y[1].clone());
@@ -5186,7 +5288,7 @@ v_n.set(f::F_reset_default_tblspc, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a1109(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1129(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_IndexStmt);
 v_n.set(f::F_unique, y[1].clone());
@@ -5216,12 +5318,12 @@ v_n.set(f::F_reset_default_tblspc, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a1113(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1133(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::s("btree");
 
 Ok(out)
 }
-fn a1116(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1136(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::node(t::T_IndexElem);
 out.clone().set(f::F_name, V::Null);
 out.clone().set(f::F_expr, V::Null);
@@ -5233,7 +5335,7 @@ out.clone().set(f::F_ordering, std::mem::take(&mut y[2]));
 out.clone().set(f::F_nulls_ordering, std::mem::take(&mut y[3]));
 Ok(out)
 }
-fn a1117(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1137(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::node(t::T_IndexElem);
 out.clone().set(f::F_name, V::Null);
 out.clone().set(f::F_expr, V::Null);
@@ -5245,22 +5347,25 @@ out.clone().set(f::F_ordering, std::mem::take(&mut y[3]));
 out.clone().set(f::F_nulls_ordering, std::mem::take(&mut y[4]));
 Ok(out)
 }
-fn a1118(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1138(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = std::mem::take(&mut y[1]);
 out.clone().set(f::F_name, std::mem::take(&mut y[0]));
+out.clone().set(f::F_location, V::Int(l[0] as i64));
 Ok(out)
 }
-fn a1119(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1139(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = std::mem::take(&mut y[1]);
 out.clone().set(f::F_expr, std::mem::take(&mut y[0]));
+out.clone().set(f::F_location, V::Int(l[0] as i64));
 Ok(out)
 }
-fn a1120(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1140(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = std::mem::take(&mut y[3]);
 out.clone().set(f::F_expr, std::mem::take(&mut y[1]));
+out.clone().set(f::F_location, V::Int(l[0] as i64));
 Ok(out)
 }
-fn a1133(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1153(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CreateFunctionStmt);
 v_n.set(f::F_is_procedure, V::Int(0));
@@ -5273,7 +5378,7 @@ v_n.set(f::F_sql_body, y[8].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1134(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1154(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CreateFunctionStmt);
 v_n.set(f::F_is_procedure, V::Int(0));
@@ -5287,7 +5392,7 @@ v_n.set(f::F_sql_body, y[11].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1135(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1155(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CreateFunctionStmt);
 v_n.set(f::F_is_procedure, V::Int(0));
@@ -5300,7 +5405,7 @@ v_n.set(f::F_sql_body, y[6].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1136(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1156(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CreateFunctionStmt);
 v_n.set(f::F_is_procedure, V::Int(1));
@@ -5313,7 +5418,7 @@ v_n.set(f::F_sql_body, y[6].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1145(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1165(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_ObjectWithArgs);
 v_n.set(f::F_objname, y[0].clone());
@@ -5322,7 +5427,7 @@ v_n.set(f::F_objfuncargs, y[1].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1146(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1166(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_ObjectWithArgs);
 v_n.set(f::F_objname, h::list_make1(&h::makeString(&y[0])?)?);
@@ -5330,7 +5435,7 @@ v_n.set(f::F_args_unspecified, V::Int(1));
 out = v_n.clone();
 Ok(out)
 }
-fn a1148(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1168(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_ObjectWithArgs);
 v_n.set(f::F_objname, h::check_func_name(&h::lcons(&h::makeString(&y[0])?, &y[1])?, &V::Null)?);
@@ -5338,7 +5443,7 @@ v_n.set(f::F_args_unspecified, V::Int(1));
 out = v_n.clone();
 Ok(out)
 }
-fn a1153(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1173(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_FunctionParameter);
 v_n.set(f::F_name, y[1].clone());
@@ -5349,7 +5454,7 @@ v_n.set(f::F_location, V::Int(l[0] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a1154(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1174(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_FunctionParameter);
 v_n.set(f::F_name, y[0].clone());
@@ -5360,7 +5465,7 @@ v_n.set(f::F_location, V::Int(l[0] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a1155(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1175(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_FunctionParameter);
 v_n.set(f::F_name, y[0].clone());
@@ -5371,7 +5476,7 @@ v_n.set(f::F_location, V::Int(l[0] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a1156(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1176(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_FunctionParameter);
 v_n.set(f::F_name, V::Null);
@@ -5382,7 +5487,7 @@ v_n.set(f::F_location, V::Int(l[0] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a1157(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1177(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_FunctionParameter);
 v_n.set(f::F_name, V::Null);
@@ -5393,35 +5498,35 @@ v_n.set(f::F_location, V::Int(l[0] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a1159(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1179(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::Int(111);
 
 Ok(out)
 }
-fn a1160(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1180(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::Int(98);
 
 Ok(out)
 }
-fn a1166(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1186(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeTypeNameFromNameList(&h::lcons(&h::makeString(&y[0])?, &y[1])?)?;
 out.clone().set(f::F_pct_type, V::Int(1));
 out.clone().set(f::F_location, V::Int(l[0] as i64));
 Ok(out)
 }
-fn a1167(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1187(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeTypeNameFromNameList(&h::lcons(&h::makeString(&y[1])?, &y[2])?)?;
 out.clone().set(f::F_pct_type, V::Int(1));
 out.clone().set(f::F_setof, V::Int(1));
 out.clone().set(f::F_location, V::Int(l[1] as i64));
 Ok(out)
 }
-fn a1169(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1189(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = std::mem::take(&mut y[0]);
 out.clone().set(f::F_defexpr, std::mem::take(&mut y[2]));
 Ok(out)
 }
-fn a1171(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1191(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 if V::b(!V::b(V::b(y[0].get(f::F_mode).eq(&V::Int(100)).truthy() || y[0].get(f::F_mode).eq(&V::Int(105)).truthy()).truthy() || y[0].get(f::F_mode).eq(&V::Int(118)).truthy()).truthy()).truthy() {
 return Err(h::message("aggregates cannot have output arguments", &[]));
@@ -5429,27 +5534,27 @@ return Err(h::message("aggregates cannot have output arguments", &[]));
 out = y[0].clone();
 Ok(out)
 }
-fn a1172(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1192(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::list_make2(&V::Null, &h::makeInteger(&V::Int(1).neg())?)?;
 
 Ok(out)
 }
-fn a1173(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1193(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::list_make2(&y[1], &h::makeInteger(&V::Int(1).neg())?)?;
 
 Ok(out)
 }
-fn a1174(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1194(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::list_make2(&y[3], &h::makeInteger(&V::Int(0))?)?;
 
 Ok(out)
 }
-fn a1175(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1195(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeOrderedSetArgs(&y[1], &y[4], &V::Null)?;
 
 Ok(out)
 }
-fn a1178(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1198(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_ObjectWithArgs);
 v_n.set(f::F_objname, y[0].clone());
@@ -5458,119 +5563,119 @@ v_n.set(f::F_objfuncargs, h::linitial(&y[1]));
 out = v_n.clone();
 Ok(out)
 }
-fn a1185(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1205(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("strict"), &h::makeBoolean(&V::Int(0))?, &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a1186(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1206(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("strict"), &h::makeBoolean(&V::Int(1))?, &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a1188(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1208(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("volatility"), &h::makeString(&V::s("immutable"))?, &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a1189(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1209(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("volatility"), &h::makeString(&V::s("stable"))?, &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a1190(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1210(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("volatility"), &h::makeString(&V::s("volatile"))?, &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a1191(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1211(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("security"), &h::makeBoolean(&V::Int(1))?, &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a1192(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1212(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("security"), &h::makeBoolean(&V::Int(0))?, &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a1195(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1215(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("leakproof"), &h::makeBoolean(&V::Int(1))?, &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a1196(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1216(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("leakproof"), &h::makeBoolean(&V::Int(0))?, &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a1197(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1217(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("cost"), &y[1], &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a1198(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1218(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("rows"), &y[1], &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a1199(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1219(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("support"), &y[1], &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a1200(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1220(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("set"), &y[0], &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a1201(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1221(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("parallel"), &h::makeString(&y[1])?, &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a1202(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1222(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("as"), &y[1], &V::Int(l[0] as i64))?;
 out.clone().set(f::F_arg_location, V::Int(l[1] as i64));
 Ok(out)
 }
-fn a1203(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1223(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("language"), &h::makeString(&y[1])?, &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a1204(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1224(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("language"), &h::makeString(&y[1])?, &V::Int(l[0] as i64))?;
 out.clone().set(f::F_arg_location, V::Int(l[1] as i64));
 Ok(out)
 }
-fn a1205(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1225(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("transform"), &y[1], &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a1206(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1226(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("window"), &h::makeBoolean(&V::Int(1))?, &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a1209(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1229(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::list_make2(&h::makeString(&y[0])?, &h::makeString(&y[2])?)?;
 
 Ok(out)
 }
-fn a1210(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1230(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_r = V::node(t::T_ReturnStmt);
 v_r.set(f::F_returnval, y[1].clone());
 out = v_r.clone();
 Ok(out)
 }
-fn a1212(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1232(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::list_make1(&y[2])?;
 
 Ok(out)
 }
-fn a1214(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1234(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 if y[1].ne(&V::Null).truthy() {
 out = h::lappend(&y[0], &y[1])?;
@@ -5579,12 +5684,12 @@ out = y[0].clone();
 }
 Ok(out)
 }
-fn a1219(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1239(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::lappend(&y[0], &y[4])?;
 
 Ok(out)
 }
-fn a1222(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1242(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_FunctionParameter);
 v_n.set(f::F_name, y[0].clone());
@@ -5595,7 +5700,7 @@ v_n.set(f::F_location, V::Int(l[0] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a1225(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1245(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterFunctionStmt);
 v_n.set(f::F_objtype, V::Int(19));
@@ -5604,7 +5709,7 @@ v_n.set(f::F_actions, y[3].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1226(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1246(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterFunctionStmt);
 v_n.set(f::F_objtype, V::Int(29));
@@ -5613,16 +5718,16 @@ v_n.set(f::F_actions, y[3].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1227(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1247(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterFunctionStmt);
-v_n.set(f::F_objtype, V::Int(34));
+v_n.set(f::F_objtype, V::Int(35));
 v_n.set(f::F_func, y[2].clone());
 v_n.set(f::F_actions, y[3].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1232(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1252(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_DropStmt);
 v_n.set(f::F_removeType, V::Int(19));
@@ -5633,7 +5738,7 @@ v_n.set(f::F_concurrent, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a1233(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1253(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_DropStmt);
 v_n.set(f::F_removeType, V::Int(19));
@@ -5644,7 +5749,7 @@ v_n.set(f::F_concurrent, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a1234(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1254(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_DropStmt);
 v_n.set(f::F_removeType, V::Int(29));
@@ -5655,7 +5760,7 @@ v_n.set(f::F_concurrent, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a1235(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1255(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_DropStmt);
 v_n.set(f::F_removeType, V::Int(29));
@@ -5666,10 +5771,10 @@ v_n.set(f::F_concurrent, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a1236(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1256(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_DropStmt);
-v_n.set(f::F_removeType, V::Int(34));
+v_n.set(f::F_removeType, V::Int(35));
 v_n.set(f::F_objects, y[2].clone());
 v_n.set(f::F_behavior, y[3].clone());
 v_n.set(f::F_missing_ok, V::Int(0));
@@ -5677,10 +5782,10 @@ v_n.set(f::F_concurrent, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a1237(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1257(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_DropStmt);
-v_n.set(f::F_removeType, V::Int(34));
+v_n.set(f::F_removeType, V::Int(35));
 v_n.set(f::F_objects, y[4].clone());
 v_n.set(f::F_behavior, y[5].clone());
 v_n.set(f::F_missing_ok, V::Int(1));
@@ -5688,7 +5793,7 @@ v_n.set(f::F_concurrent, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a1238(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1258(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_DropStmt);
 v_n.set(f::F_removeType, V::Int(1));
@@ -5699,7 +5804,7 @@ v_n.set(f::F_concurrent, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a1239(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1259(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_DropStmt);
 v_n.set(f::F_removeType, V::Int(1));
@@ -5710,7 +5815,7 @@ v_n.set(f::F_concurrent, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a1240(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1260(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_DropStmt);
 v_n.set(f::F_removeType, V::Int(25));
@@ -5721,7 +5826,7 @@ v_n.set(f::F_concurrent, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a1241(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1261(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_DropStmt);
 v_n.set(f::F_removeType, V::Int(25));
@@ -5732,32 +5837,32 @@ v_n.set(f::F_concurrent, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a1242(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1262(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 return Err(h::message("missing argument", &[]));
 Ok(out)
 }
-fn a1243(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1263(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::list_make2(&y[1], &y[3])?;
 
 Ok(out)
 }
-fn a1244(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1264(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::list_make2(&V::Null, &y[3])?;
 
 Ok(out)
 }
-fn a1245(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1265(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::list_make2(&y[1], &V::Null)?;
 
 Ok(out)
 }
-fn a1247(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1267(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::lcons(&h::makeString(&y[0])?, &y[2])?;
 
 Ok(out)
 }
-fn a1250(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1270(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_ObjectWithArgs);
 v_n.set(f::F_objname, y[0].clone());
@@ -5765,19 +5870,19 @@ v_n.set(f::F_objargs, y[1].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1251(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1271(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_DoStmt);
 v_n.set(f::F_args, y[1].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1254(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1274(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("as"), &h::makeString(&y[0])?, &V::Int(l[0] as i64))?;
 out.clone().set(f::F_arg_location, V::Int(l[0] as i64));
 Ok(out)
 }
-fn a1257(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1277(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CreateCastStmt);
 v_n.set(f::F_sourcetype, y[3].clone());
@@ -5788,7 +5893,7 @@ v_n.set(f::F_inout, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a1258(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1278(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CreateCastStmt);
 v_n.set(f::F_sourcetype, y[3].clone());
@@ -5799,7 +5904,7 @@ v_n.set(f::F_inout, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a1259(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1279(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CreateCastStmt);
 v_n.set(f::F_sourcetype, y[3].clone());
@@ -5810,7 +5915,7 @@ v_n.set(f::F_inout, V::Int(1));
 out = v_n.clone();
 Ok(out)
 }
-fn a1263(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1283(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_DropStmt);
 v_n.set(f::F_removeType, V::Int(5));
@@ -5821,7 +5926,7 @@ v_n.set(f::F_concurrent, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a1266(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1286(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CreateTransformStmt);
 v_n.set(f::F_replace, y[1].clone());
@@ -5832,37 +5937,37 @@ v_n.set(f::F_tosql, h::lsecond(&y[8]));
 out = v_n.clone();
 Ok(out)
 }
-fn a1267(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1287(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::list_make2(&y[4], &y[10])?;
 
 Ok(out)
 }
-fn a1268(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1288(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::list_make2(&y[10], &y[4])?;
 
 Ok(out)
 }
-fn a1269(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1289(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::list_make2(&y[4], &V::Null)?;
 
 Ok(out)
 }
-fn a1270(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1290(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::list_make2(&V::Null, &y[4])?;
 
 Ok(out)
 }
-fn a1271(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1291(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_DropStmt);
-v_n.set(f::F_removeType, V::Int(43));
+v_n.set(f::F_removeType, V::Int(44));
 v_n.set(f::F_objects, h::list_make1(&h::list_make2(&y[4], &h::makeString(&y[6])?)?)?);
 v_n.set(f::F_behavior, y[7].clone());
 v_n.set(f::F_missing_ok, y[2].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1272(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1292(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_ReindexStmt);
 v_n.set(f::F_kind, y[2].clone());
@@ -5875,7 +5980,7 @@ v_n.set(f::F_params, h::lappend(&v_n.get(f::F_params), &h::makeDefElem(&V::s("co
 out = v_n.clone();
 Ok(out)
 }
-fn a1273(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1293(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_ReindexStmt);
 v_n.set(f::F_kind, V::Int(2));
@@ -5888,7 +5993,7 @@ v_n.set(f::F_params, h::lappend(&v_n.get(f::F_params), &h::makeDefElem(&V::s("co
 out = v_n.clone();
 Ok(out)
 }
-fn a1274(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1294(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_ReindexStmt);
 v_n.set(f::F_kind, y[2].clone());
@@ -5901,7 +6006,7 @@ v_n.set(f::F_params, h::lappend(&v_n.get(f::F_params), &h::makeDefElem(&V::s("co
 out = v_n.clone();
 Ok(out)
 }
-fn a1281(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1299(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableSpaceOptionsStmt);
 v_n.set(f::F_tablespacename, y[2].clone());
@@ -5910,7 +6015,7 @@ v_n.set(f::F_isReset, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a1282(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1300(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTableSpaceOptionsStmt);
 v_n.set(f::F_tablespacename, y[2].clone());
@@ -5919,7 +6024,7 @@ v_n.set(f::F_isReset, V::Int(1));
 out = v_n.clone();
 Ok(out)
 }
-fn a1283(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1301(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_RenameStmt);
 v_n.set(f::F_renameType, V::Int(1));
@@ -5929,7 +6034,7 @@ v_n.set(f::F_missing_ok, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a1284(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1302(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_RenameStmt);
 v_n.set(f::F_renameType, V::Int(7));
@@ -5939,7 +6044,7 @@ v_n.set(f::F_missing_ok, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a1285(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1303(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_RenameStmt);
 v_n.set(f::F_renameType, V::Int(8));
@@ -5949,7 +6054,7 @@ v_n.set(f::F_missing_ok, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a1286(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1304(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_RenameStmt);
 v_n.set(f::F_renameType, V::Int(9));
@@ -5959,7 +6064,7 @@ v_n.set(f::F_missing_ok, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a1287(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1305(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_RenameStmt);
 v_n.set(f::F_renameType, V::Int(12));
@@ -5969,7 +6074,7 @@ v_n.set(f::F_missing_ok, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a1288(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1306(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_RenameStmt);
 v_n.set(f::F_renameType, V::Int(13));
@@ -5979,7 +6084,7 @@ v_n.set(f::F_newname, y[7].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1289(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1307(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_RenameStmt);
 v_n.set(f::F_renameType, V::Int(16));
@@ -5989,7 +6094,7 @@ v_n.set(f::F_missing_ok, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a1290(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1308(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_RenameStmt);
 v_n.set(f::F_renameType, V::Int(19));
@@ -5999,17 +6104,17 @@ v_n.set(f::F_missing_ok, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a1291(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1309(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_RenameStmt);
-v_n.set(f::F_renameType, V::Int(33));
+v_n.set(f::F_renameType, V::Int(34));
 v_n.set(f::F_subname, y[2].clone());
 v_n.set(f::F_newname, y[5].clone());
 v_n.set(f::F_missing_ok, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a1292(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1310(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_RenameStmt);
 v_n.set(f::F_renameType, V::Int(21));
@@ -6019,7 +6124,7 @@ v_n.set(f::F_missing_ok, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a1293(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1311(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_RenameStmt);
 v_n.set(f::F_renameType, V::Int(24));
@@ -6029,7 +6134,7 @@ v_n.set(f::F_missing_ok, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a1294(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1312(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_RenameStmt);
 v_n.set(f::F_renameType, V::Int(26));
@@ -6039,7 +6144,7 @@ v_n.set(f::F_missing_ok, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a1295(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1313(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_RenameStmt);
 v_n.set(f::F_renameType, V::Int(28));
@@ -6050,7 +6155,7 @@ v_n.set(f::F_missing_ok, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a1296(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1314(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_RenameStmt);
 v_n.set(f::F_renameType, V::Int(28));
@@ -6061,7 +6166,7 @@ v_n.set(f::F_missing_ok, V::Int(1));
 out = v_n.clone();
 Ok(out)
 }
-fn a1297(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1315(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_RenameStmt);
 v_n.set(f::F_renameType, V::Int(29));
@@ -6071,7 +6176,7 @@ v_n.set(f::F_missing_ok, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a1298(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1316(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_RenameStmt);
 v_n.set(f::F_renameType, V::Int(30));
@@ -6081,27 +6186,27 @@ v_n.set(f::F_missing_ok, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a1299(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1317(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_RenameStmt);
-v_n.set(f::F_renameType, V::Int(34));
+v_n.set(f::F_renameType, V::Int(35));
 v_n.set(f::F_object, y[2].clone());
 v_n.set(f::F_newname, y[5].clone());
 v_n.set(f::F_missing_ok, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a1300(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1318(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_RenameStmt);
-v_n.set(f::F_renameType, V::Int(36));
+v_n.set(f::F_renameType, V::Int(37));
 v_n.set(f::F_subname, y[2].clone());
 v_n.set(f::F_newname, y[5].clone());
 v_n.set(f::F_missing_ok, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a1301(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1319(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_RenameStmt);
 v_n.set(f::F_renameType, V::Int(17));
@@ -6111,227 +6216,23 @@ v_n.set(f::F_missing_ok, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a1302(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1320(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_RenameStmt);
-v_n.set(f::F_renameType, V::Int(38));
+v_n.set(f::F_renameType, V::Int(39));
 v_n.set(f::F_object, h::makeString(&y[2])?);
 v_n.set(f::F_newname, y[5].clone());
 v_n.set(f::F_missing_ok, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a1303(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = y.first().cloned().unwrap_or(V::Null);
-let mut v_n = V::node(t::T_RenameStmt);
-v_n.set(f::F_renameType, V::Int(41));
-v_n.set(f::F_relation, y[2].clone());
-v_n.set(f::F_subname, V::Null);
-v_n.set(f::F_newname, y[5].clone());
-v_n.set(f::F_missing_ok, V::Int(0));
-out = v_n.clone();
-Ok(out)
-}
-fn a1304(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = y.first().cloned().unwrap_or(V::Null);
-let mut v_n = V::node(t::T_RenameStmt);
-v_n.set(f::F_renameType, V::Int(41));
-v_n.set(f::F_relation, y[4].clone());
-v_n.set(f::F_subname, V::Null);
-v_n.set(f::F_newname, y[7].clone());
-v_n.set(f::F_missing_ok, V::Int(1));
-out = v_n.clone();
-Ok(out)
-}
-fn a1305(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = y.first().cloned().unwrap_or(V::Null);
-let mut v_n = V::node(t::T_RenameStmt);
-v_n.set(f::F_renameType, V::Int(37));
-v_n.set(f::F_relation, y[2].clone());
-v_n.set(f::F_subname, V::Null);
-v_n.set(f::F_newname, y[5].clone());
-v_n.set(f::F_missing_ok, V::Int(0));
-out = v_n.clone();
-Ok(out)
-}
-fn a1306(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = y.first().cloned().unwrap_or(V::Null);
-let mut v_n = V::node(t::T_RenameStmt);
-v_n.set(f::F_renameType, V::Int(37));
-v_n.set(f::F_relation, y[4].clone());
-v_n.set(f::F_subname, V::Null);
-v_n.set(f::F_newname, y[7].clone());
-v_n.set(f::F_missing_ok, V::Int(1));
-out = v_n.clone();
-Ok(out)
-}
-fn a1307(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = y.first().cloned().unwrap_or(V::Null);
-let mut v_n = V::node(t::T_RenameStmt);
-v_n.set(f::F_renameType, V::Int(51));
-v_n.set(f::F_relation, y[2].clone());
-v_n.set(f::F_subname, V::Null);
-v_n.set(f::F_newname, y[5].clone());
-v_n.set(f::F_missing_ok, V::Int(0));
-out = v_n.clone();
-Ok(out)
-}
-fn a1308(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = y.first().cloned().unwrap_or(V::Null);
-let mut v_n = V::node(t::T_RenameStmt);
-v_n.set(f::F_renameType, V::Int(51));
-v_n.set(f::F_relation, y[4].clone());
-v_n.set(f::F_subname, V::Null);
-v_n.set(f::F_newname, y[7].clone());
-v_n.set(f::F_missing_ok, V::Int(1));
-out = v_n.clone();
-Ok(out)
-}
-fn a1309(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = y.first().cloned().unwrap_or(V::Null);
-let mut v_n = V::node(t::T_RenameStmt);
-v_n.set(f::F_renameType, V::Int(23));
-v_n.set(f::F_relation, y[3].clone());
-v_n.set(f::F_subname, V::Null);
-v_n.set(f::F_newname, y[6].clone());
-v_n.set(f::F_missing_ok, V::Int(0));
-out = v_n.clone();
-Ok(out)
-}
-fn a1310(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = y.first().cloned().unwrap_or(V::Null);
-let mut v_n = V::node(t::T_RenameStmt);
-v_n.set(f::F_renameType, V::Int(23));
-v_n.set(f::F_relation, y[5].clone());
-v_n.set(f::F_subname, V::Null);
-v_n.set(f::F_newname, y[8].clone());
-v_n.set(f::F_missing_ok, V::Int(1));
-out = v_n.clone();
-Ok(out)
-}
-fn a1311(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = y.first().cloned().unwrap_or(V::Null);
-let mut v_n = V::node(t::T_RenameStmt);
-v_n.set(f::F_renameType, V::Int(20));
-v_n.set(f::F_relation, y[2].clone());
-v_n.set(f::F_subname, V::Null);
-v_n.set(f::F_newname, y[5].clone());
-v_n.set(f::F_missing_ok, V::Int(0));
-out = v_n.clone();
-Ok(out)
-}
-fn a1312(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = y.first().cloned().unwrap_or(V::Null);
-let mut v_n = V::node(t::T_RenameStmt);
-v_n.set(f::F_renameType, V::Int(20));
-v_n.set(f::F_relation, y[4].clone());
-v_n.set(f::F_subname, V::Null);
-v_n.set(f::F_newname, y[7].clone());
-v_n.set(f::F_missing_ok, V::Int(1));
-out = v_n.clone();
-Ok(out)
-}
-fn a1313(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = y.first().cloned().unwrap_or(V::Null);
-let mut v_n = V::node(t::T_RenameStmt);
-v_n.set(f::F_renameType, V::Int(18));
-v_n.set(f::F_relation, y[3].clone());
-v_n.set(f::F_subname, V::Null);
-v_n.set(f::F_newname, y[6].clone());
-v_n.set(f::F_missing_ok, V::Int(0));
-out = v_n.clone();
-Ok(out)
-}
-fn a1314(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = y.first().cloned().unwrap_or(V::Null);
-let mut v_n = V::node(t::T_RenameStmt);
-v_n.set(f::F_renameType, V::Int(18));
-v_n.set(f::F_relation, y[5].clone());
-v_n.set(f::F_subname, V::Null);
-v_n.set(f::F_newname, y[8].clone());
-v_n.set(f::F_missing_ok, V::Int(1));
-out = v_n.clone();
-Ok(out)
-}
-fn a1315(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = y.first().cloned().unwrap_or(V::Null);
-let mut v_n = V::node(t::T_RenameStmt);
-v_n.set(f::F_renameType, V::Int(6));
-v_n.set(f::F_relationType, V::Int(41));
-v_n.set(f::F_relation, y[2].clone());
-v_n.set(f::F_subname, y[5].clone());
-v_n.set(f::F_newname, y[7].clone());
-v_n.set(f::F_missing_ok, V::Int(0));
-out = v_n.clone();
-Ok(out)
-}
-fn a1316(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = y.first().cloned().unwrap_or(V::Null);
-let mut v_n = V::node(t::T_RenameStmt);
-v_n.set(f::F_renameType, V::Int(6));
-v_n.set(f::F_relationType, V::Int(41));
-v_n.set(f::F_relation, y[4].clone());
-v_n.set(f::F_subname, y[7].clone());
-v_n.set(f::F_newname, y[9].clone());
-v_n.set(f::F_missing_ok, V::Int(1));
-out = v_n.clone();
-Ok(out)
-}
-fn a1317(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = y.first().cloned().unwrap_or(V::Null);
-let mut v_n = V::node(t::T_RenameStmt);
-v_n.set(f::F_renameType, V::Int(6));
-v_n.set(f::F_relationType, V::Int(51));
-v_n.set(f::F_relation, y[2].clone());
-v_n.set(f::F_subname, y[5].clone());
-v_n.set(f::F_newname, y[7].clone());
-v_n.set(f::F_missing_ok, V::Int(0));
-out = v_n.clone();
-Ok(out)
-}
-fn a1318(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = y.first().cloned().unwrap_or(V::Null);
-let mut v_n = V::node(t::T_RenameStmt);
-v_n.set(f::F_renameType, V::Int(6));
-v_n.set(f::F_relationType, V::Int(51));
-v_n.set(f::F_relation, y[4].clone());
-v_n.set(f::F_subname, y[7].clone());
-v_n.set(f::F_newname, y[9].clone());
-v_n.set(f::F_missing_ok, V::Int(1));
-out = v_n.clone();
-Ok(out)
-}
-fn a1319(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = y.first().cloned().unwrap_or(V::Null);
-let mut v_n = V::node(t::T_RenameStmt);
-v_n.set(f::F_renameType, V::Int(6));
-v_n.set(f::F_relationType, V::Int(23));
-v_n.set(f::F_relation, y[3].clone());
-v_n.set(f::F_subname, y[6].clone());
-v_n.set(f::F_newname, y[8].clone());
-v_n.set(f::F_missing_ok, V::Int(0));
-out = v_n.clone();
-Ok(out)
-}
-fn a1320(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = y.first().cloned().unwrap_or(V::Null);
-let mut v_n = V::node(t::T_RenameStmt);
-v_n.set(f::F_renameType, V::Int(6));
-v_n.set(f::F_relationType, V::Int(23));
-v_n.set(f::F_relation, y[5].clone());
-v_n.set(f::F_subname, y[8].clone());
-v_n.set(f::F_newname, y[10].clone());
-v_n.set(f::F_missing_ok, V::Int(1));
-out = v_n.clone();
-Ok(out)
-}
 fn a1321(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_RenameStmt);
-v_n.set(f::F_renameType, V::Int(40));
+v_n.set(f::F_renameType, V::Int(42));
 v_n.set(f::F_relation, y[2].clone());
-v_n.set(f::F_subname, y[5].clone());
-v_n.set(f::F_newname, y[7].clone());
+v_n.set(f::F_subname, V::Null);
+v_n.set(f::F_newname, y[5].clone());
 v_n.set(f::F_missing_ok, V::Int(0));
 out = v_n.clone();
 Ok(out)
@@ -6339,7 +6240,141 @@ Ok(out)
 fn a1322(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_RenameStmt);
-v_n.set(f::F_renameType, V::Int(40));
+v_n.set(f::F_renameType, V::Int(42));
+v_n.set(f::F_relation, y[4].clone());
+v_n.set(f::F_subname, V::Null);
+v_n.set(f::F_newname, y[7].clone());
+v_n.set(f::F_missing_ok, V::Int(1));
+out = v_n.clone();
+Ok(out)
+}
+fn a1323(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = y.first().cloned().unwrap_or(V::Null);
+let mut v_n = V::node(t::T_RenameStmt);
+v_n.set(f::F_renameType, V::Int(38));
+v_n.set(f::F_relation, y[2].clone());
+v_n.set(f::F_subname, V::Null);
+v_n.set(f::F_newname, y[5].clone());
+v_n.set(f::F_missing_ok, V::Int(0));
+out = v_n.clone();
+Ok(out)
+}
+fn a1324(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = y.first().cloned().unwrap_or(V::Null);
+let mut v_n = V::node(t::T_RenameStmt);
+v_n.set(f::F_renameType, V::Int(38));
+v_n.set(f::F_relation, y[4].clone());
+v_n.set(f::F_subname, V::Null);
+v_n.set(f::F_newname, y[7].clone());
+v_n.set(f::F_missing_ok, V::Int(1));
+out = v_n.clone();
+Ok(out)
+}
+fn a1325(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = y.first().cloned().unwrap_or(V::Null);
+let mut v_n = V::node(t::T_RenameStmt);
+v_n.set(f::F_renameType, V::Int(52));
+v_n.set(f::F_relation, y[2].clone());
+v_n.set(f::F_subname, V::Null);
+v_n.set(f::F_newname, y[5].clone());
+v_n.set(f::F_missing_ok, V::Int(0));
+out = v_n.clone();
+Ok(out)
+}
+fn a1326(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = y.first().cloned().unwrap_or(V::Null);
+let mut v_n = V::node(t::T_RenameStmt);
+v_n.set(f::F_renameType, V::Int(52));
+v_n.set(f::F_relation, y[4].clone());
+v_n.set(f::F_subname, V::Null);
+v_n.set(f::F_newname, y[7].clone());
+v_n.set(f::F_missing_ok, V::Int(1));
+out = v_n.clone();
+Ok(out)
+}
+fn a1327(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = y.first().cloned().unwrap_or(V::Null);
+let mut v_n = V::node(t::T_RenameStmt);
+v_n.set(f::F_renameType, V::Int(23));
+v_n.set(f::F_relation, y[3].clone());
+v_n.set(f::F_subname, V::Null);
+v_n.set(f::F_newname, y[6].clone());
+v_n.set(f::F_missing_ok, V::Int(0));
+out = v_n.clone();
+Ok(out)
+}
+fn a1328(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = y.first().cloned().unwrap_or(V::Null);
+let mut v_n = V::node(t::T_RenameStmt);
+v_n.set(f::F_renameType, V::Int(23));
+v_n.set(f::F_relation, y[5].clone());
+v_n.set(f::F_subname, V::Null);
+v_n.set(f::F_newname, y[8].clone());
+v_n.set(f::F_missing_ok, V::Int(1));
+out = v_n.clone();
+Ok(out)
+}
+fn a1329(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = y.first().cloned().unwrap_or(V::Null);
+let mut v_n = V::node(t::T_RenameStmt);
+v_n.set(f::F_renameType, V::Int(20));
+v_n.set(f::F_relation, y[2].clone());
+v_n.set(f::F_subname, V::Null);
+v_n.set(f::F_newname, y[5].clone());
+v_n.set(f::F_missing_ok, V::Int(0));
+out = v_n.clone();
+Ok(out)
+}
+fn a1330(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = y.first().cloned().unwrap_or(V::Null);
+let mut v_n = V::node(t::T_RenameStmt);
+v_n.set(f::F_renameType, V::Int(20));
+v_n.set(f::F_relation, y[4].clone());
+v_n.set(f::F_subname, V::Null);
+v_n.set(f::F_newname, y[7].clone());
+v_n.set(f::F_missing_ok, V::Int(1));
+out = v_n.clone();
+Ok(out)
+}
+fn a1331(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = y.first().cloned().unwrap_or(V::Null);
+let mut v_n = V::node(t::T_RenameStmt);
+v_n.set(f::F_renameType, V::Int(18));
+v_n.set(f::F_relation, y[3].clone());
+v_n.set(f::F_subname, V::Null);
+v_n.set(f::F_newname, y[6].clone());
+v_n.set(f::F_missing_ok, V::Int(0));
+out = v_n.clone();
+Ok(out)
+}
+fn a1332(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = y.first().cloned().unwrap_or(V::Null);
+let mut v_n = V::node(t::T_RenameStmt);
+v_n.set(f::F_renameType, V::Int(18));
+v_n.set(f::F_relation, y[5].clone());
+v_n.set(f::F_subname, V::Null);
+v_n.set(f::F_newname, y[8].clone());
+v_n.set(f::F_missing_ok, V::Int(1));
+out = v_n.clone();
+Ok(out)
+}
+fn a1333(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = y.first().cloned().unwrap_or(V::Null);
+let mut v_n = V::node(t::T_RenameStmt);
+v_n.set(f::F_renameType, V::Int(6));
+v_n.set(f::F_relationType, V::Int(42));
+v_n.set(f::F_relation, y[2].clone());
+v_n.set(f::F_subname, y[5].clone());
+v_n.set(f::F_newname, y[7].clone());
+v_n.set(f::F_missing_ok, V::Int(0));
+out = v_n.clone();
+Ok(out)
+}
+fn a1334(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = y.first().cloned().unwrap_or(V::Null);
+let mut v_n = V::node(t::T_RenameStmt);
+v_n.set(f::F_renameType, V::Int(6));
+v_n.set(f::F_relationType, V::Int(42));
 v_n.set(f::F_relation, y[4].clone());
 v_n.set(f::F_subname, y[7].clone());
 v_n.set(f::F_newname, y[9].clone());
@@ -6347,7 +6382,77 @@ v_n.set(f::F_missing_ok, V::Int(1));
 out = v_n.clone();
 Ok(out)
 }
-fn a1323(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1335(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = y.first().cloned().unwrap_or(V::Null);
+let mut v_n = V::node(t::T_RenameStmt);
+v_n.set(f::F_renameType, V::Int(6));
+v_n.set(f::F_relationType, V::Int(52));
+v_n.set(f::F_relation, y[2].clone());
+v_n.set(f::F_subname, y[5].clone());
+v_n.set(f::F_newname, y[7].clone());
+v_n.set(f::F_missing_ok, V::Int(0));
+out = v_n.clone();
+Ok(out)
+}
+fn a1336(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = y.first().cloned().unwrap_or(V::Null);
+let mut v_n = V::node(t::T_RenameStmt);
+v_n.set(f::F_renameType, V::Int(6));
+v_n.set(f::F_relationType, V::Int(52));
+v_n.set(f::F_relation, y[4].clone());
+v_n.set(f::F_subname, y[7].clone());
+v_n.set(f::F_newname, y[9].clone());
+v_n.set(f::F_missing_ok, V::Int(1));
+out = v_n.clone();
+Ok(out)
+}
+fn a1337(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = y.first().cloned().unwrap_or(V::Null);
+let mut v_n = V::node(t::T_RenameStmt);
+v_n.set(f::F_renameType, V::Int(6));
+v_n.set(f::F_relationType, V::Int(23));
+v_n.set(f::F_relation, y[3].clone());
+v_n.set(f::F_subname, y[6].clone());
+v_n.set(f::F_newname, y[8].clone());
+v_n.set(f::F_missing_ok, V::Int(0));
+out = v_n.clone();
+Ok(out)
+}
+fn a1338(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = y.first().cloned().unwrap_or(V::Null);
+let mut v_n = V::node(t::T_RenameStmt);
+v_n.set(f::F_renameType, V::Int(6));
+v_n.set(f::F_relationType, V::Int(23));
+v_n.set(f::F_relation, y[5].clone());
+v_n.set(f::F_subname, y[8].clone());
+v_n.set(f::F_newname, y[10].clone());
+v_n.set(f::F_missing_ok, V::Int(1));
+out = v_n.clone();
+Ok(out)
+}
+fn a1339(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = y.first().cloned().unwrap_or(V::Null);
+let mut v_n = V::node(t::T_RenameStmt);
+v_n.set(f::F_renameType, V::Int(41));
+v_n.set(f::F_relation, y[2].clone());
+v_n.set(f::F_subname, y[5].clone());
+v_n.set(f::F_newname, y[7].clone());
+v_n.set(f::F_missing_ok, V::Int(0));
+out = v_n.clone();
+Ok(out)
+}
+fn a1340(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = y.first().cloned().unwrap_or(V::Null);
+let mut v_n = V::node(t::T_RenameStmt);
+v_n.set(f::F_renameType, V::Int(41));
+v_n.set(f::F_relation, y[4].clone());
+v_n.set(f::F_subname, y[7].clone());
+v_n.set(f::F_newname, y[9].clone());
+v_n.set(f::F_missing_ok, V::Int(1));
+out = v_n.clone();
+Ok(out)
+}
+fn a1341(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_RenameStmt);
 v_n.set(f::F_renameType, V::Int(6));
@@ -6359,7 +6464,7 @@ v_n.set(f::F_missing_ok, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a1324(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1342(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_RenameStmt);
 v_n.set(f::F_renameType, V::Int(6));
@@ -6371,10 +6476,10 @@ v_n.set(f::F_missing_ok, V::Int(1));
 out = v_n.clone();
 Ok(out)
 }
-fn a1325(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1343(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_RenameStmt);
-v_n.set(f::F_renameType, V::Int(35));
+v_n.set(f::F_renameType, V::Int(36));
 v_n.set(f::F_relation, y[4].clone());
 v_n.set(f::F_subname, y[2].clone());
 v_n.set(f::F_newname, y[7].clone());
@@ -6382,10 +6487,10 @@ v_n.set(f::F_missing_ok, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a1326(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1344(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_RenameStmt);
-v_n.set(f::F_renameType, V::Int(44));
+v_n.set(f::F_renameType, V::Int(45));
 v_n.set(f::F_relation, y[4].clone());
 v_n.set(f::F_subname, y[2].clone());
 v_n.set(f::F_newname, y[7].clone());
@@ -6393,7 +6498,7 @@ v_n.set(f::F_missing_ok, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a1327(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1345(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_RenameStmt);
 v_n.set(f::F_renameType, V::Int(14));
@@ -6402,47 +6507,27 @@ v_n.set(f::F_newname, y[6].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1330(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1348(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_RenameStmt);
-v_n.set(f::F_renameType, V::Int(42));
+v_n.set(f::F_renameType, V::Int(43));
 v_n.set(f::F_subname, y[2].clone());
 v_n.set(f::F_newname, y[5].clone());
 v_n.set(f::F_missing_ok, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a1331(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1349(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_RenameStmt);
-v_n.set(f::F_renameType, V::Int(39));
+v_n.set(f::F_renameType, V::Int(40));
 v_n.set(f::F_object, y[2].clone());
 v_n.set(f::F_newname, y[5].clone());
 v_n.set(f::F_missing_ok, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a1332(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = y.first().cloned().unwrap_or(V::Null);
-let mut v_n = V::node(t::T_RenameStmt);
-v_n.set(f::F_renameType, V::Int(47));
-v_n.set(f::F_object, y[4].clone());
-v_n.set(f::F_newname, y[7].clone());
-v_n.set(f::F_missing_ok, V::Int(0));
-out = v_n.clone();
-Ok(out)
-}
-fn a1333(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = y.first().cloned().unwrap_or(V::Null);
-let mut v_n = V::node(t::T_RenameStmt);
-v_n.set(f::F_renameType, V::Int(46));
-v_n.set(f::F_object, y[4].clone());
-v_n.set(f::F_newname, y[7].clone());
-v_n.set(f::F_missing_ok, V::Int(0));
-out = v_n.clone();
-Ok(out)
-}
-fn a1334(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1350(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_RenameStmt);
 v_n.set(f::F_renameType, V::Int(48));
@@ -6452,31 +6537,51 @@ v_n.set(f::F_missing_ok, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a1335(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1351(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_RenameStmt);
-v_n.set(f::F_renameType, V::Int(45));
+v_n.set(f::F_renameType, V::Int(47));
 v_n.set(f::F_object, y[4].clone());
 v_n.set(f::F_newname, y[7].clone());
 v_n.set(f::F_missing_ok, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a1336(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1352(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_RenameStmt);
 v_n.set(f::F_renameType, V::Int(49));
+v_n.set(f::F_object, y[4].clone());
+v_n.set(f::F_newname, y[7].clone());
+v_n.set(f::F_missing_ok, V::Int(0));
+out = v_n.clone();
+Ok(out)
+}
+fn a1353(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = y.first().cloned().unwrap_or(V::Null);
+let mut v_n = V::node(t::T_RenameStmt);
+v_n.set(f::F_renameType, V::Int(46));
+v_n.set(f::F_object, y[4].clone());
+v_n.set(f::F_newname, y[7].clone());
+v_n.set(f::F_missing_ok, V::Int(0));
+out = v_n.clone();
+Ok(out)
+}
+fn a1354(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = y.first().cloned().unwrap_or(V::Null);
+let mut v_n = V::node(t::T_RenameStmt);
+v_n.set(f::F_renameType, V::Int(50));
 v_n.set(f::F_object, y[2].clone());
 v_n.set(f::F_newname, y[5].clone());
 v_n.set(f::F_missing_ok, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a1337(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1355(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_RenameStmt);
 v_n.set(f::F_renameType, V::Int(4));
-v_n.set(f::F_relationType, V::Int(49));
+v_n.set(f::F_relationType, V::Int(50));
 v_n.set(f::F_relation, h::makeRangeVarFromAnyName(&y[2], &V::Int(l[2] as i64), &V::Null)?);
 v_n.set(f::F_subname, y[5].clone());
 v_n.set(f::F_newname, y[7].clone());
@@ -6485,7 +6590,7 @@ v_n.set(f::F_missing_ok, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a1342(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1360(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterObjectDependsStmt);
 v_n.set(f::F_objectType, V::Int(19));
@@ -6495,7 +6600,7 @@ v_n.set(f::F_remove, y[3].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1343(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1361(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterObjectDependsStmt);
 v_n.set(f::F_objectType, V::Int(29));
@@ -6505,20 +6610,20 @@ v_n.set(f::F_remove, y[3].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1344(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1362(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterObjectDependsStmt);
-v_n.set(f::F_objectType, V::Int(34));
+v_n.set(f::F_objectType, V::Int(35));
 v_n.set(f::F_object, y[2].clone());
 v_n.set(f::F_extname, h::makeString(&y[7])?);
 v_n.set(f::F_remove, y[3].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1345(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1363(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterObjectDependsStmt);
-v_n.set(f::F_objectType, V::Int(44));
+v_n.set(f::F_objectType, V::Int(45));
 v_n.set(f::F_relation, y[4].clone());
 v_n.set(f::F_object, h::list_make1(&h::makeString(&y[2])?)?);
 v_n.set(f::F_extname, h::makeString(&y[9])?);
@@ -6526,7 +6631,7 @@ v_n.set(f::F_remove, y[5].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1346(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1364(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterObjectDependsStmt);
 v_n.set(f::F_objectType, V::Int(23));
@@ -6536,7 +6641,7 @@ v_n.set(f::F_remove, y[4].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1347(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1365(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterObjectDependsStmt);
 v_n.set(f::F_objectType, V::Int(20));
@@ -6546,7 +6651,7 @@ v_n.set(f::F_remove, y[3].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1350(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1368(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterObjectSchemaStmt);
 v_n.set(f::F_objectType, V::Int(1));
@@ -6556,7 +6661,7 @@ v_n.set(f::F_missing_ok, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a1351(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1369(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterObjectSchemaStmt);
 v_n.set(f::F_objectType, V::Int(7));
@@ -6566,7 +6671,7 @@ v_n.set(f::F_missing_ok, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a1352(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1370(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterObjectSchemaStmt);
 v_n.set(f::F_objectType, V::Int(8));
@@ -6576,7 +6681,7 @@ v_n.set(f::F_missing_ok, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a1353(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1371(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterObjectSchemaStmt);
 v_n.set(f::F_objectType, V::Int(12));
@@ -6586,7 +6691,7 @@ v_n.set(f::F_missing_ok, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a1354(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1372(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterObjectSchemaStmt);
 v_n.set(f::F_objectType, V::Int(15));
@@ -6596,7 +6701,7 @@ v_n.set(f::F_missing_ok, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a1355(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1373(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterObjectSchemaStmt);
 v_n.set(f::F_objectType, V::Int(19));
@@ -6606,7 +6711,7 @@ v_n.set(f::F_missing_ok, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a1356(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1374(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterObjectSchemaStmt);
 v_n.set(f::F_objectType, V::Int(25));
@@ -6616,7 +6721,7 @@ v_n.set(f::F_missing_ok, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a1357(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1375(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterObjectSchemaStmt);
 v_n.set(f::F_objectType, V::Int(24));
@@ -6626,7 +6731,7 @@ v_n.set(f::F_missing_ok, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a1358(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1376(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterObjectSchemaStmt);
 v_n.set(f::F_objectType, V::Int(26));
@@ -6636,7 +6741,7 @@ v_n.set(f::F_missing_ok, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a1359(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1377(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterObjectSchemaStmt);
 v_n.set(f::F_objectType, V::Int(29));
@@ -6646,67 +6751,47 @@ v_n.set(f::F_missing_ok, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a1360(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1378(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterObjectSchemaStmt);
-v_n.set(f::F_objectType, V::Int(34));
+v_n.set(f::F_objectType, V::Int(35));
 v_n.set(f::F_object, y[2].clone());
 v_n.set(f::F_newschema, y[5].clone());
 v_n.set(f::F_missing_ok, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a1361(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1379(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterObjectSchemaStmt);
-v_n.set(f::F_objectType, V::Int(41));
+v_n.set(f::F_objectType, V::Int(42));
 v_n.set(f::F_relation, y[2].clone());
 v_n.set(f::F_newschema, y[5].clone());
 v_n.set(f::F_missing_ok, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a1362(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1380(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterObjectSchemaStmt);
-v_n.set(f::F_objectType, V::Int(41));
+v_n.set(f::F_objectType, V::Int(42));
 v_n.set(f::F_relation, y[4].clone());
 v_n.set(f::F_newschema, y[7].clone());
 v_n.set(f::F_missing_ok, V::Int(1));
 out = v_n.clone();
 Ok(out)
 }
-fn a1363(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1381(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterObjectSchemaStmt);
-v_n.set(f::F_objectType, V::Int(39));
+v_n.set(f::F_objectType, V::Int(40));
 v_n.set(f::F_object, y[2].clone());
 v_n.set(f::F_newschema, y[5].clone());
 v_n.set(f::F_missing_ok, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a1364(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = y.first().cloned().unwrap_or(V::Null);
-let mut v_n = V::node(t::T_AlterObjectSchemaStmt);
-v_n.set(f::F_objectType, V::Int(47));
-v_n.set(f::F_object, y[4].clone());
-v_n.set(f::F_newschema, y[7].clone());
-v_n.set(f::F_missing_ok, V::Int(0));
-out = v_n.clone();
-Ok(out)
-}
-fn a1365(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = y.first().cloned().unwrap_or(V::Null);
-let mut v_n = V::node(t::T_AlterObjectSchemaStmt);
-v_n.set(f::F_objectType, V::Int(46));
-v_n.set(f::F_object, y[4].clone());
-v_n.set(f::F_newschema, y[7].clone());
-v_n.set(f::F_missing_ok, V::Int(0));
-out = v_n.clone();
-Ok(out)
-}
-fn a1366(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1382(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterObjectSchemaStmt);
 v_n.set(f::F_objectType, V::Int(48));
@@ -6716,107 +6801,127 @@ v_n.set(f::F_missing_ok, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a1367(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1383(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterObjectSchemaStmt);
-v_n.set(f::F_objectType, V::Int(45));
+v_n.set(f::F_objectType, V::Int(47));
 v_n.set(f::F_object, y[4].clone());
 v_n.set(f::F_newschema, y[7].clone());
 v_n.set(f::F_missing_ok, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a1368(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = y.first().cloned().unwrap_or(V::Null);
-let mut v_n = V::node(t::T_AlterObjectSchemaStmt);
-v_n.set(f::F_objectType, V::Int(37));
-v_n.set(f::F_relation, y[2].clone());
-v_n.set(f::F_newschema, y[5].clone());
-v_n.set(f::F_missing_ok, V::Int(0));
-out = v_n.clone();
-Ok(out)
-}
-fn a1369(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = y.first().cloned().unwrap_or(V::Null);
-let mut v_n = V::node(t::T_AlterObjectSchemaStmt);
-v_n.set(f::F_objectType, V::Int(37));
-v_n.set(f::F_relation, y[4].clone());
-v_n.set(f::F_newschema, y[7].clone());
-v_n.set(f::F_missing_ok, V::Int(1));
-out = v_n.clone();
-Ok(out)
-}
-fn a1370(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = y.first().cloned().unwrap_or(V::Null);
-let mut v_n = V::node(t::T_AlterObjectSchemaStmt);
-v_n.set(f::F_objectType, V::Int(51));
-v_n.set(f::F_relation, y[2].clone());
-v_n.set(f::F_newschema, y[5].clone());
-v_n.set(f::F_missing_ok, V::Int(0));
-out = v_n.clone();
-Ok(out)
-}
-fn a1371(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = y.first().cloned().unwrap_or(V::Null);
-let mut v_n = V::node(t::T_AlterObjectSchemaStmt);
-v_n.set(f::F_objectType, V::Int(51));
-v_n.set(f::F_relation, y[4].clone());
-v_n.set(f::F_newschema, y[7].clone());
-v_n.set(f::F_missing_ok, V::Int(1));
-out = v_n.clone();
-Ok(out)
-}
-fn a1372(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = y.first().cloned().unwrap_or(V::Null);
-let mut v_n = V::node(t::T_AlterObjectSchemaStmt);
-v_n.set(f::F_objectType, V::Int(23));
-v_n.set(f::F_relation, y[3].clone());
-v_n.set(f::F_newschema, y[6].clone());
-v_n.set(f::F_missing_ok, V::Int(0));
-out = v_n.clone();
-Ok(out)
-}
-fn a1373(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = y.first().cloned().unwrap_or(V::Null);
-let mut v_n = V::node(t::T_AlterObjectSchemaStmt);
-v_n.set(f::F_objectType, V::Int(23));
-v_n.set(f::F_relation, y[5].clone());
-v_n.set(f::F_newschema, y[8].clone());
-v_n.set(f::F_missing_ok, V::Int(1));
-out = v_n.clone();
-Ok(out)
-}
-fn a1374(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = y.first().cloned().unwrap_or(V::Null);
-let mut v_n = V::node(t::T_AlterObjectSchemaStmt);
-v_n.set(f::F_objectType, V::Int(18));
-v_n.set(f::F_relation, y[3].clone());
-v_n.set(f::F_newschema, y[6].clone());
-v_n.set(f::F_missing_ok, V::Int(0));
-out = v_n.clone();
-Ok(out)
-}
-fn a1375(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = y.first().cloned().unwrap_or(V::Null);
-let mut v_n = V::node(t::T_AlterObjectSchemaStmt);
-v_n.set(f::F_objectType, V::Int(18));
-v_n.set(f::F_relation, y[5].clone());
-v_n.set(f::F_newschema, y[8].clone());
-v_n.set(f::F_missing_ok, V::Int(1));
-out = v_n.clone();
-Ok(out)
-}
-fn a1376(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1384(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterObjectSchemaStmt);
 v_n.set(f::F_objectType, V::Int(49));
+v_n.set(f::F_object, y[4].clone());
+v_n.set(f::F_newschema, y[7].clone());
+v_n.set(f::F_missing_ok, V::Int(0));
+out = v_n.clone();
+Ok(out)
+}
+fn a1385(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = y.first().cloned().unwrap_or(V::Null);
+let mut v_n = V::node(t::T_AlterObjectSchemaStmt);
+v_n.set(f::F_objectType, V::Int(46));
+v_n.set(f::F_object, y[4].clone());
+v_n.set(f::F_newschema, y[7].clone());
+v_n.set(f::F_missing_ok, V::Int(0));
+out = v_n.clone();
+Ok(out)
+}
+fn a1386(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = y.first().cloned().unwrap_or(V::Null);
+let mut v_n = V::node(t::T_AlterObjectSchemaStmt);
+v_n.set(f::F_objectType, V::Int(38));
+v_n.set(f::F_relation, y[2].clone());
+v_n.set(f::F_newschema, y[5].clone());
+v_n.set(f::F_missing_ok, V::Int(0));
+out = v_n.clone();
+Ok(out)
+}
+fn a1387(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = y.first().cloned().unwrap_or(V::Null);
+let mut v_n = V::node(t::T_AlterObjectSchemaStmt);
+v_n.set(f::F_objectType, V::Int(38));
+v_n.set(f::F_relation, y[4].clone());
+v_n.set(f::F_newschema, y[7].clone());
+v_n.set(f::F_missing_ok, V::Int(1));
+out = v_n.clone();
+Ok(out)
+}
+fn a1388(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = y.first().cloned().unwrap_or(V::Null);
+let mut v_n = V::node(t::T_AlterObjectSchemaStmt);
+v_n.set(f::F_objectType, V::Int(52));
+v_n.set(f::F_relation, y[2].clone());
+v_n.set(f::F_newschema, y[5].clone());
+v_n.set(f::F_missing_ok, V::Int(0));
+out = v_n.clone();
+Ok(out)
+}
+fn a1389(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = y.first().cloned().unwrap_or(V::Null);
+let mut v_n = V::node(t::T_AlterObjectSchemaStmt);
+v_n.set(f::F_objectType, V::Int(52));
+v_n.set(f::F_relation, y[4].clone());
+v_n.set(f::F_newschema, y[7].clone());
+v_n.set(f::F_missing_ok, V::Int(1));
+out = v_n.clone();
+Ok(out)
+}
+fn a1390(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = y.first().cloned().unwrap_or(V::Null);
+let mut v_n = V::node(t::T_AlterObjectSchemaStmt);
+v_n.set(f::F_objectType, V::Int(23));
+v_n.set(f::F_relation, y[3].clone());
+v_n.set(f::F_newschema, y[6].clone());
+v_n.set(f::F_missing_ok, V::Int(0));
+out = v_n.clone();
+Ok(out)
+}
+fn a1391(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = y.first().cloned().unwrap_or(V::Null);
+let mut v_n = V::node(t::T_AlterObjectSchemaStmt);
+v_n.set(f::F_objectType, V::Int(23));
+v_n.set(f::F_relation, y[5].clone());
+v_n.set(f::F_newschema, y[8].clone());
+v_n.set(f::F_missing_ok, V::Int(1));
+out = v_n.clone();
+Ok(out)
+}
+fn a1392(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = y.first().cloned().unwrap_or(V::Null);
+let mut v_n = V::node(t::T_AlterObjectSchemaStmt);
+v_n.set(f::F_objectType, V::Int(18));
+v_n.set(f::F_relation, y[3].clone());
+v_n.set(f::F_newschema, y[6].clone());
+v_n.set(f::F_missing_ok, V::Int(0));
+out = v_n.clone();
+Ok(out)
+}
+fn a1393(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = y.first().cloned().unwrap_or(V::Null);
+let mut v_n = V::node(t::T_AlterObjectSchemaStmt);
+v_n.set(f::F_objectType, V::Int(18));
+v_n.set(f::F_relation, y[5].clone());
+v_n.set(f::F_newschema, y[8].clone());
+v_n.set(f::F_missing_ok, V::Int(1));
+out = v_n.clone();
+Ok(out)
+}
+fn a1394(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = y.first().cloned().unwrap_or(V::Null);
+let mut v_n = V::node(t::T_AlterObjectSchemaStmt);
+v_n.set(f::F_objectType, V::Int(50));
 v_n.set(f::F_object, y[2].clone());
 v_n.set(f::F_newschema, y[5].clone());
 v_n.set(f::F_missing_ok, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a1377(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1395(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterOperatorStmt);
 v_n.set(f::F_opername, y[2].clone());
@@ -6824,7 +6929,7 @@ v_n.set(f::F_options, y[5].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1388(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1406(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTypeStmt);
 v_n.set(f::F_typeName, y[2].clone());
@@ -6832,7 +6937,7 @@ v_n.set(f::F_options, y[5].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1389(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1407(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterOwnerStmt);
 v_n.set(f::F_objectType, V::Int(1));
@@ -6841,7 +6946,7 @@ v_n.set(f::F_newowner, y[5].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1390(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1408(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterOwnerStmt);
 v_n.set(f::F_objectType, V::Int(7));
@@ -6850,7 +6955,7 @@ v_n.set(f::F_newowner, y[5].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1391(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1409(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterOwnerStmt);
 v_n.set(f::F_objectType, V::Int(8));
@@ -6859,7 +6964,7 @@ v_n.set(f::F_newowner, y[5].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1392(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1410(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterOwnerStmt);
 v_n.set(f::F_objectType, V::Int(9));
@@ -6868,7 +6973,7 @@ v_n.set(f::F_newowner, y[5].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1393(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1411(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterOwnerStmt);
 v_n.set(f::F_objectType, V::Int(12));
@@ -6877,7 +6982,7 @@ v_n.set(f::F_newowner, y[5].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1394(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1412(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterOwnerStmt);
 v_n.set(f::F_objectType, V::Int(19));
@@ -6886,7 +6991,7 @@ v_n.set(f::F_newowner, y[5].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1395(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1413(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterOwnerStmt);
 v_n.set(f::F_objectType, V::Int(21));
@@ -6895,7 +7000,7 @@ v_n.set(f::F_newowner, y[6].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1396(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1414(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterOwnerStmt);
 v_n.set(f::F_objectType, V::Int(22));
@@ -6904,7 +7009,7 @@ v_n.set(f::F_newowner, y[6].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1397(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1415(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterOwnerStmt);
 v_n.set(f::F_objectType, V::Int(25));
@@ -6913,7 +7018,7 @@ v_n.set(f::F_newowner, y[5].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1398(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1416(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterOwnerStmt);
 v_n.set(f::F_objectType, V::Int(24));
@@ -6922,7 +7027,7 @@ v_n.set(f::F_newowner, y[8].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1399(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1417(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterOwnerStmt);
 v_n.set(f::F_objectType, V::Int(26));
@@ -6931,7 +7036,7 @@ v_n.set(f::F_newowner, y[8].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1400(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1418(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterOwnerStmt);
 v_n.set(f::F_objectType, V::Int(29));
@@ -6940,52 +7045,61 @@ v_n.set(f::F_newowner, y[5].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1401(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1419(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterOwnerStmt);
-v_n.set(f::F_objectType, V::Int(34));
+v_n.set(f::F_objectType, V::Int(35));
 v_n.set(f::F_object, y[2].clone());
 v_n.set(f::F_newowner, y[5].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1402(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1420(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterOwnerStmt);
-v_n.set(f::F_objectType, V::Int(36));
+v_n.set(f::F_objectType, V::Int(37));
 v_n.set(f::F_object, h::makeString(&y[2])?);
 v_n.set(f::F_newowner, y[5].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1403(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1421(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterOwnerStmt);
-v_n.set(f::F_objectType, V::Int(49));
+v_n.set(f::F_objectType, V::Int(50));
 v_n.set(f::F_object, y[2].clone());
 v_n.set(f::F_newowner, y[5].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1404(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1422(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterOwnerStmt);
-v_n.set(f::F_objectType, V::Int(42));
+v_n.set(f::F_objectType, V::Int(43));
 v_n.set(f::F_object, h::makeString(&y[2])?);
 v_n.set(f::F_newowner, y[5].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1405(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1423(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterOwnerStmt);
-v_n.set(f::F_objectType, V::Int(39));
+v_n.set(f::F_objectType, V::Int(40));
 v_n.set(f::F_object, y[2].clone());
 v_n.set(f::F_newowner, y[5].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1406(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1424(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = y.first().cloned().unwrap_or(V::Null);
+let mut v_n = V::node(t::T_AlterOwnerStmt);
+v_n.set(f::F_objectType, V::Int(47));
+v_n.set(f::F_object, y[4].clone());
+v_n.set(f::F_newowner, y[7].clone());
+out = v_n.clone();
+Ok(out)
+}
+fn a1425(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterOwnerStmt);
 v_n.set(f::F_objectType, V::Int(46));
@@ -6994,16 +7108,7 @@ v_n.set(f::F_newowner, y[7].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1407(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = y.first().cloned().unwrap_or(V::Null);
-let mut v_n = V::node(t::T_AlterOwnerStmt);
-v_n.set(f::F_objectType, V::Int(45));
-v_n.set(f::F_object, y[4].clone());
-v_n.set(f::F_newowner, y[7].clone());
-out = v_n.clone();
-Ok(out)
-}
-fn a1408(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1426(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterOwnerStmt);
 v_n.set(f::F_objectType, V::Int(16));
@@ -7012,7 +7117,7 @@ v_n.set(f::F_newowner, y[7].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1409(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1427(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterOwnerStmt);
 v_n.set(f::F_objectType, V::Int(17));
@@ -7021,7 +7126,7 @@ v_n.set(f::F_newowner, y[5].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1410(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1428(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterOwnerStmt);
 v_n.set(f::F_objectType, V::Int(14));
@@ -7030,7 +7135,7 @@ v_n.set(f::F_newowner, y[6].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1411(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1429(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterOwnerStmt);
 v_n.set(f::F_objectType, V::Int(30));
@@ -7039,16 +7144,16 @@ v_n.set(f::F_newowner, y[5].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1412(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1430(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterOwnerStmt);
-v_n.set(f::F_objectType, V::Int(38));
+v_n.set(f::F_objectType, V::Int(39));
 v_n.set(f::F_object, h::makeString(&y[2])?);
 v_n.set(f::F_newowner, y[5].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1413(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1431(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CreatePublicationStmt);
 v_n.set(f::F_pubname, y[2].clone());
@@ -7056,16 +7161,16 @@ v_n.set(f::F_options, y[3].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1414(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1432(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CreatePublicationStmt);
 v_n.set(f::F_pubname, y[2].clone());
-v_n.set(f::F_options, y[6].clone());
-v_n.set(f::F_for_all_tables, V::Int(1));
+let _ = h::preprocess_pub_all_objtype_list(&y[4], &V::place(&v_n, f::F_pubobjects), &V::place(&v_n, f::F_for_all_tables), &V::place(&v_n, f::F_for_all_sequences), &V::Null)?;
+v_n.set(f::F_options, y[5].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1415(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1433(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CreatePublicationStmt);
 v_n.set(f::F_pubname, y[2].clone());
@@ -7075,7 +7180,7 @@ let _ = h::preprocess_pubobj_list(&v_n.get(f::F_pubobjects), &V::Null)?;
 out = v_n.clone();
 Ok(out)
 }
-fn a1416(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1434(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::node(t::T_PublicationObjSpec);
 out.clone().set(f::F_pubobjtype, V::Int(0));
 out.clone().set(f::F_pubtable, V::node(t::T_PublicationTable));
@@ -7084,22 +7189,22 @@ out.clone().get(f::F_pubtable).set(f::F_columns, std::mem::take(&mut y[2]));
 out.clone().get(f::F_pubtable).set(f::F_whereClause, std::mem::take(&mut y[3]));
 Ok(out)
 }
-fn a1417(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1435(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::node(t::T_PublicationObjSpec);
-out.clone().set(f::F_pubobjtype, V::Int(1));
+out.clone().set(f::F_pubobjtype, V::Int(2));
 out.clone().set(f::F_name, std::mem::take(&mut y[3]));
 out.clone().set(f::F_location, V::Int(l[3] as i64));
 Ok(out)
 }
-fn a1418(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1436(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::node(t::T_PublicationObjSpec);
-out.clone().set(f::F_pubobjtype, V::Int(2));
+out.clone().set(f::F_pubobjtype, V::Int(3));
 out.clone().set(f::F_location, V::Int(l[3] as i64));
 Ok(out)
 }
-fn a1419(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1437(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::node(t::T_PublicationObjSpec);
-out.clone().set(f::F_pubobjtype, V::Int(3));
+out.clone().set(f::F_pubobjtype, V::Int(4));
 if V::b(y[1].truthy() || y[2].truthy()).truthy() {
 out.clone().set(f::F_pubtable, V::node(t::T_PublicationTable));
 out.clone().get(f::F_pubtable).set(f::F_relation, h::makeRangeVar(&V::Null, &y[0], &V::Int(l[0] as i64))?);
@@ -7111,9 +7216,9 @@ out.clone().set(f::F_name, y[0].clone());
 out.clone().set(f::F_location, V::Int(l[0] as i64));
 Ok(out)
 }
-fn a1420(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1438(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::node(t::T_PublicationObjSpec);
-out.clone().set(f::F_pubobjtype, V::Int(3));
+out.clone().set(f::F_pubobjtype, V::Int(4));
 out.clone().set(f::F_pubtable, V::node(t::T_PublicationTable));
 out.clone().get(f::F_pubtable).set(f::F_relation, h::makeRangeVarFromQualifiedName(&y[0], &y[1], &V::Int(l[0] as i64), &V::Null)?);
 out.clone().get(f::F_pubtable).set(f::F_columns, std::mem::take(&mut y[2]));
@@ -7121,60 +7226,100 @@ out.clone().get(f::F_pubtable).set(f::F_whereClause, std::mem::take(&mut y[3]));
 out.clone().set(f::F_location, V::Int(l[0] as i64));
 Ok(out)
 }
-fn a1421(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1439(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::node(t::T_PublicationObjSpec);
-out.clone().set(f::F_pubobjtype, V::Int(3));
+out.clone().set(f::F_pubobjtype, V::Int(4));
 out.clone().set(f::F_pubtable, V::node(t::T_PublicationTable));
 out.clone().get(f::F_pubtable).set(f::F_relation, std::mem::take(&mut y[0]));
 out.clone().get(f::F_pubtable).set(f::F_columns, std::mem::take(&mut y[1]));
 out.clone().get(f::F_pubtable).set(f::F_whereClause, std::mem::take(&mut y[2]));
 Ok(out)
 }
-fn a1422(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1440(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::node(t::T_PublicationObjSpec);
-out.clone().set(f::F_pubobjtype, V::Int(3));
+out.clone().set(f::F_pubobjtype, V::Int(4));
 out.clone().set(f::F_location, V::Int(l[0] as i64));
 Ok(out)
 }
-fn a1425(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1445(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = V::node(t::T_PublicationAllObjSpec);
+out.clone().set(f::F_pubobjtype, V::Int(0));
+out.clone().set(f::F_except_tables, std::mem::take(&mut y[2]));
+out.clone().set(f::F_location, V::Int(l[0] as i64));
+Ok(out)
+}
+fn a1446(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = V::node(t::T_PublicationAllObjSpec);
+out.clone().set(f::F_pubobjtype, V::Int(1));
+out.clone().set(f::F_location, V::Int(l[0] as i64));
+Ok(out)
+}
+fn a1449(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = V::node(t::T_PublicationObjSpec);
+out.clone().set(f::F_pubobjtype, V::Int(1));
+out.clone().set(f::F_pubtable, V::node(t::T_PublicationTable));
+out.clone().get(f::F_pubtable).set(f::F_except, V::Int(1));
+out.clone().get(f::F_pubtable).set(f::F_relation, std::mem::take(&mut y[0]));
+out.clone().set(f::F_location, V::Int(l[0] as i64));
+Ok(out)
+}
+fn a1451(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = h::lappend(&y[0], &y[3])?;
+
+Ok(out)
+}
+fn a1452(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterPublicationStmt);
 v_n.set(f::F_pubname, y[2].clone());
 v_n.set(f::F_options, y[4].clone());
+v_n.set(f::F_for_all_tables, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a1426(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1453(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterPublicationStmt);
 v_n.set(f::F_pubname, y[2].clone());
 v_n.set(f::F_pubobjects, y[4].clone());
 let _ = h::preprocess_pubobj_list(&v_n.get(f::F_pubobjects), &V::Null)?;
 v_n.set(f::F_action, V::Int(0));
+v_n.set(f::F_for_all_tables, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a1427(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1454(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterPublicationStmt);
 v_n.set(f::F_pubname, y[2].clone());
 v_n.set(f::F_pubobjects, y[4].clone());
 let _ = h::preprocess_pubobj_list(&v_n.get(f::F_pubobjects), &V::Null)?;
 v_n.set(f::F_action, V::Int(2));
+v_n.set(f::F_for_all_tables, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a1428(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1455(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = y.first().cloned().unwrap_or(V::Null);
+let mut v_n = V::node(t::T_AlterPublicationStmt);
+v_n.set(f::F_pubname, y[2].clone());
+v_n.set(f::F_action, V::Int(2));
+let _ = h::preprocess_pub_all_objtype_list(&y[4], &V::place(&v_n, f::F_pubobjects), &V::place(&v_n, f::F_for_all_tables), &V::place(&v_n, f::F_for_all_sequences), &V::Null)?;
+out = v_n.clone();
+Ok(out)
+}
+fn a1456(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterPublicationStmt);
 v_n.set(f::F_pubname, y[2].clone());
 v_n.set(f::F_pubobjects, y[4].clone());
 let _ = h::preprocess_pubobj_list(&v_n.get(f::F_pubobjects), &V::Null)?;
 v_n.set(f::F_action, V::Int(1));
+v_n.set(f::F_for_all_tables, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a1429(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1457(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CreateSubscriptionStmt);
 v_n.set(f::F_subname, y[2].clone());
@@ -7185,7 +7330,17 @@ v_n.set(f::F_options, y[7].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1430(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1458(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = y.first().cloned().unwrap_or(V::Null);
+let mut v_n = V::node(t::T_CreateSubscriptionStmt);
+v_n.set(f::F_subname, y[2].clone());
+v_n.set(f::F_servername, y[4].clone());
+v_n.set(f::F_publication, y[6].clone());
+v_n.set(f::F_options, y[7].clone());
+out = v_n.clone();
+Ok(out)
+}
+fn a1459(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterSubscriptionStmt);
 v_n.set(f::F_kind, V::Int(0));
@@ -7194,36 +7349,43 @@ v_n.set(f::F_options, y[4].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1431(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1460(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterSubscriptionStmt);
-v_n.set(f::F_kind, V::Int(1));
+v_n.set(f::F_kind, V::Int(2));
 v_n.set(f::F_subname, y[2].clone());
 v_n.set(f::F_conninfo, y[4].clone());
 v_n.set(f::F_conninfo_location, V::Int(l[4] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a1432(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1461(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterSubscriptionStmt);
-v_n.set(f::F_kind, V::Int(5));
+v_n.set(f::F_kind, V::Int(1));
+v_n.set(f::F_subname, y[2].clone());
+v_n.set(f::F_servername, y[4].clone());
+out = v_n.clone();
+Ok(out)
+}
+fn a1462(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = y.first().cloned().unwrap_or(V::Null);
+let mut v_n = V::node(t::T_AlterSubscriptionStmt);
+v_n.set(f::F_kind, V::Int(6));
 v_n.set(f::F_subname, y[2].clone());
 v_n.set(f::F_options, y[5].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1433(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1463(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterSubscriptionStmt);
-v_n.set(f::F_kind, V::Int(3));
+v_n.set(f::F_kind, V::Int(7));
 v_n.set(f::F_subname, y[2].clone());
-v_n.set(f::F_publication, y[5].clone());
-v_n.set(f::F_options, y[6].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1434(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1464(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterSubscriptionStmt);
 v_n.set(f::F_kind, V::Int(4));
@@ -7233,44 +7395,54 @@ v_n.set(f::F_options, y[6].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1435(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1465(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterSubscriptionStmt);
-v_n.set(f::F_kind, V::Int(2));
+v_n.set(f::F_kind, V::Int(5));
 v_n.set(f::F_subname, y[2].clone());
 v_n.set(f::F_publication, y[5].clone());
 v_n.set(f::F_options, y[6].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1436(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1466(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterSubscriptionStmt);
-v_n.set(f::F_kind, V::Int(6));
+v_n.set(f::F_kind, V::Int(3));
+v_n.set(f::F_subname, y[2].clone());
+v_n.set(f::F_publication, y[5].clone());
+v_n.set(f::F_options, y[6].clone());
+out = v_n.clone();
+Ok(out)
+}
+fn a1467(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = y.first().cloned().unwrap_or(V::Null);
+let mut v_n = V::node(t::T_AlterSubscriptionStmt);
+v_n.set(f::F_kind, V::Int(8));
 v_n.set(f::F_subname, y[2].clone());
 v_n.set(f::F_options, h::list_make1(&h::makeDefElem(&V::s("enabled"), &h::makeBoolean(&V::Int(1))?, &V::Int(l[0] as i64))?)?);
 out = v_n.clone();
 Ok(out)
 }
-fn a1437(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1468(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterSubscriptionStmt);
-v_n.set(f::F_kind, V::Int(6));
+v_n.set(f::F_kind, V::Int(8));
 v_n.set(f::F_subname, y[2].clone());
 v_n.set(f::F_options, h::list_make1(&h::makeDefElem(&V::s("enabled"), &h::makeBoolean(&V::Int(0))?, &V::Int(l[0] as i64))?)?);
 out = v_n.clone();
 Ok(out)
 }
-fn a1438(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1469(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterSubscriptionStmt);
-v_n.set(f::F_kind, V::Int(7));
+v_n.set(f::F_kind, V::Int(9));
 v_n.set(f::F_subname, y[2].clone());
 v_n.set(f::F_options, y[4].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1439(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1470(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_DropSubscriptionStmt);
 v_n.set(f::F_subname, y[2].clone());
@@ -7279,7 +7451,7 @@ v_n.set(f::F_behavior, y[3].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1440(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1471(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_DropSubscriptionStmt);
 v_n.set(f::F_subname, y[4].clone());
@@ -7288,7 +7460,7 @@ v_n.set(f::F_behavior, y[5].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1441(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1472(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_RuleStmt);
 v_n.set(f::F_replace, y[1].clone());
@@ -7301,7 +7473,7 @@ v_n.set(f::F_actions, y[12].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1445(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1476(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 if y[2].ne(&V::Null).truthy() {
 out = h::lappend(&y[0], &y[2])?;
@@ -7310,7 +7482,7 @@ out = y[0].clone();
 }
 Ok(out)
 }
-fn a1446(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1477(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 if y[0].ne(&V::Null).truthy() {
 out = h::list_make1(&y[0])?;
@@ -7319,7 +7491,7 @@ out = V::Null;
 }
 Ok(out)
 }
-fn a1461(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1492(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_NotifyStmt);
 v_n.set(f::F_conditionname, y[1].clone());
@@ -7328,7 +7500,7 @@ v_n.set(f::F_payload_location, V::Int(l[3] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a1462(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1493(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_NotifyStmt);
 v_n.set(f::F_conditionname, y[1].clone());
@@ -7336,28 +7508,28 @@ v_n.set(f::F_payload, V::Null);
 out = v_n.clone();
 Ok(out)
 }
-fn a1463(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1494(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_ListenStmt);
 v_n.set(f::F_conditionname, y[1].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1464(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1495(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_UnlistenStmt);
 v_n.set(f::F_conditionname, y[1].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1465(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1496(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_UnlistenStmt);
 v_n.set(f::F_conditionname, V::Null);
 out = v_n.clone();
 Ok(out)
 }
-fn a1466(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1497(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_TransactionStmt);
 v_n.set(f::F_kind, V::Int(3));
@@ -7367,7 +7539,7 @@ v_n.set(f::F_location, V::Int(1).neg());
 out = v_n.clone();
 Ok(out)
 }
-fn a1467(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1498(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_TransactionStmt);
 v_n.set(f::F_kind, V::Int(1));
@@ -7376,7 +7548,7 @@ v_n.set(f::F_location, V::Int(1).neg());
 out = v_n.clone();
 Ok(out)
 }
-fn a1468(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1499(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_TransactionStmt);
 v_n.set(f::F_kind, V::Int(2));
@@ -7386,7 +7558,7 @@ v_n.set(f::F_location, V::Int(1).neg());
 out = v_n.clone();
 Ok(out)
 }
-fn a1470(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1501(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_TransactionStmt);
 v_n.set(f::F_kind, V::Int(4));
@@ -7395,7 +7567,7 @@ v_n.set(f::F_location, V::Int(l[1] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a1471(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1502(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_TransactionStmt);
 v_n.set(f::F_kind, V::Int(5));
@@ -7404,7 +7576,7 @@ v_n.set(f::F_location, V::Int(l[2] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a1472(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1503(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_TransactionStmt);
 v_n.set(f::F_kind, V::Int(5));
@@ -7413,7 +7585,7 @@ v_n.set(f::F_location, V::Int(l[1] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a1473(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1504(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_TransactionStmt);
 v_n.set(f::F_kind, V::Int(6));
@@ -7422,7 +7594,7 @@ v_n.set(f::F_location, V::Int(l[4] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a1474(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1505(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_TransactionStmt);
 v_n.set(f::F_kind, V::Int(6));
@@ -7431,7 +7603,7 @@ v_n.set(f::F_location, V::Int(l[3] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a1475(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1506(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_TransactionStmt);
 v_n.set(f::F_kind, V::Int(7));
@@ -7440,7 +7612,7 @@ v_n.set(f::F_location, V::Int(l[2] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a1476(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1507(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_TransactionStmt);
 v_n.set(f::F_kind, V::Int(8));
@@ -7449,7 +7621,7 @@ v_n.set(f::F_location, V::Int(l[2] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a1477(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1508(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_TransactionStmt);
 v_n.set(f::F_kind, V::Int(9));
@@ -7458,7 +7630,7 @@ v_n.set(f::F_location, V::Int(l[2] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a1478(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1509(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_TransactionStmt);
 v_n.set(f::F_kind, V::Int(0));
@@ -7467,32 +7639,32 @@ v_n.set(f::F_location, V::Int(1).neg());
 out = v_n.clone();
 Ok(out)
 }
-fn a1483(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1514(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("transaction_isolation"), &h::makeStringConst(&y[2], &V::Int(l[2] as i64))?, &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a1484(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1515(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("transaction_read_only"), &h::makeIntConst(&V::Int(1), &V::Int(l[0] as i64))?, &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a1485(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1516(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("transaction_read_only"), &h::makeIntConst(&V::Int(0), &V::Int(l[0] as i64))?, &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a1486(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1517(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("transaction_deferrable"), &h::makeIntConst(&V::Int(1), &V::Int(l[0] as i64))?, &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a1487(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1518(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("transaction_deferrable"), &h::makeIntConst(&V::Int(0), &V::Int(l[0] as i64))?, &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a1496(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1527(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_ViewStmt);
 v_n.set(f::F_view, y[3].clone());
@@ -7505,7 +7677,7 @@ v_n.set(f::F_withCheckOption, y[8].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1497(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1528(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_ViewStmt);
 v_n.set(f::F_view, y[5].clone());
@@ -7518,7 +7690,7 @@ v_n.set(f::F_withCheckOption, y[10].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1498(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1529(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_ViewStmt);
 v_n.set(f::F_view, y[4].clone());
@@ -7534,7 +7706,7 @@ return Err(h::message("WITH CHECK OPTION not supported on recursive views", &[])
 out = v_n.clone();
 Ok(out)
 }
-fn a1499(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1530(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_ViewStmt);
 v_n.set(f::F_view, y[6].clone());
@@ -7550,14 +7722,14 @@ return Err(h::message("WITH CHECK OPTION not supported on recursive views", &[])
 out = v_n.clone();
 Ok(out)
 }
-fn a1504(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1535(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_LoadStmt);
 v_n.set(f::F_filename, y[1].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1505(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1536(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CreatedbStmt);
 v_n.set(f::F_dbname, y[2].clone());
@@ -7565,17 +7737,17 @@ v_n.set(f::F_options, y[4].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1511(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1542(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&y[0], &h::makeString(&y[2])?, &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a1514(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1545(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::s("connection_limit");
 
 Ok(out)
 }
-fn a1522(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1553(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterDatabaseStmt);
 v_n.set(f::F_dbname, y[2].clone());
@@ -7583,7 +7755,7 @@ v_n.set(f::F_options, y[4].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1523(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1554(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterDatabaseStmt);
 v_n.set(f::F_dbname, y[2].clone());
@@ -7591,7 +7763,7 @@ v_n.set(f::F_options, y[3].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1524(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1555(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterDatabaseStmt);
 v_n.set(f::F_dbname, y[2].clone());
@@ -7599,14 +7771,14 @@ v_n.set(f::F_options, h::list_make1(&h::makeDefElem(&V::s("tablespace"), &h::mak
 out = v_n.clone();
 Ok(out)
 }
-fn a1525(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1556(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterDatabaseRefreshCollStmt);
 v_n.set(f::F_dbname, y[2].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1526(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1557(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterDatabaseSetStmt);
 v_n.set(f::F_dbname, y[2].clone());
@@ -7614,7 +7786,7 @@ v_n.set(f::F_setstmt, y[3].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1527(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1558(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_DropdbStmt);
 v_n.set(f::F_dbname, y[2].clone());
@@ -7623,7 +7795,7 @@ v_n.set(f::F_options, V::Null);
 out = v_n.clone();
 Ok(out)
 }
-fn a1528(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1559(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_DropdbStmt);
 v_n.set(f::F_dbname, y[4].clone());
@@ -7632,7 +7804,7 @@ v_n.set(f::F_options, V::Null);
 out = v_n.clone();
 Ok(out)
 }
-fn a1529(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1560(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_DropdbStmt);
 v_n.set(f::F_dbname, y[2].clone());
@@ -7641,7 +7813,7 @@ v_n.set(f::F_options, y[5].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1530(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1561(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_DropdbStmt);
 v_n.set(f::F_dbname, y[4].clone());
@@ -7650,26 +7822,26 @@ v_n.set(f::F_options, y[7].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1533(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1564(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("force"), &V::Null, &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a1534(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1565(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterCollationStmt);
 v_n.set(f::F_collname, y[2].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1535(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1566(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterSystemStmt);
 v_n.set(f::F_setstmt, y[3].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1537(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1568(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CreateDomainStmt);
 v_n.set(f::F_domainname, y[2].clone());
@@ -7678,7 +7850,7 @@ let _ = h::SplitColQualList(&y[5], &V::place(&v_n, f::F_constraints), &V::place(
 out = v_n.clone();
 Ok(out)
 }
-fn a1538(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1569(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterDomainStmt);
 v_n.set(f::F_subtype, V::Int(84));
@@ -7687,7 +7859,7 @@ v_n.set(f::F_def, y[3].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1539(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1570(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterDomainStmt);
 v_n.set(f::F_subtype, V::Int(78));
@@ -7695,7 +7867,7 @@ v_n.set(f::F_typeName, y[2].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1540(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1571(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterDomainStmt);
 v_n.set(f::F_subtype, V::Int(79));
@@ -7703,7 +7875,7 @@ v_n.set(f::F_typeName, y[2].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1541(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1572(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterDomainStmt);
 v_n.set(f::F_subtype, V::Int(67));
@@ -7712,7 +7884,7 @@ v_n.set(f::F_def, y[4].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1542(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1573(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterDomainStmt);
 v_n.set(f::F_subtype, V::Int(88));
@@ -7723,7 +7895,7 @@ v_n.set(f::F_missing_ok, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a1543(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1574(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterDomainStmt);
 v_n.set(f::F_subtype, V::Int(88));
@@ -7734,7 +7906,7 @@ v_n.set(f::F_missing_ok, V::Int(1));
 out = v_n.clone();
 Ok(out)
 }
-fn a1544(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1575(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterDomainStmt);
 v_n.set(f::F_subtype, V::Int(86));
@@ -7743,7 +7915,7 @@ v_n.set(f::F_name, y[5].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1547(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1578(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTSDictionaryStmt);
 v_n.set(f::F_dictname, y[4].clone());
@@ -7751,7 +7923,7 @@ v_n.set(f::F_options, y[5].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1548(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1579(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTSConfigurationStmt);
 v_n.set(f::F_kind, V::Int(0));
@@ -7763,7 +7935,7 @@ v_n.set(f::F_replace, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a1549(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1580(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTSConfigurationStmt);
 v_n.set(f::F_kind, V::Int(1));
@@ -7775,7 +7947,7 @@ v_n.set(f::F_replace, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a1550(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1581(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTSConfigurationStmt);
 v_n.set(f::F_kind, V::Int(2));
@@ -7787,7 +7959,7 @@ v_n.set(f::F_replace, V::Int(1));
 out = v_n.clone();
 Ok(out)
 }
-fn a1551(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1582(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTSConfigurationStmt);
 v_n.set(f::F_kind, V::Int(3));
@@ -7799,7 +7971,7 @@ v_n.set(f::F_replace, V::Int(1));
 out = v_n.clone();
 Ok(out)
 }
-fn a1552(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1583(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTSConfigurationStmt);
 v_n.set(f::F_kind, V::Int(4));
@@ -7809,7 +7981,7 @@ v_n.set(f::F_missing_ok, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a1553(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1584(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_AlterTSConfigurationStmt);
 v_n.set(f::F_kind, V::Int(4));
@@ -7819,7 +7991,7 @@ v_n.set(f::F_missing_ok, V::Int(1));
 out = v_n.clone();
 Ok(out)
 }
-fn a1556(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1587(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CreateConversionStmt);
 v_n.set(f::F_conversion_name, y[3].clone());
@@ -7830,61 +8002,102 @@ v_n.set(f::F_def, y[1].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1557(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1588(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
-let mut v_n = V::node(t::T_ClusterStmt);
-v_n.set(f::F_relation, y[4].clone());
+let mut v_n = V::node(t::T_RepackStmt);
+v_n.set(f::F_command, V::Int(2));
+v_n.set(f::F_relation, h::makeVacuumRelation(&y[2], &V::Int(0), &y[3])?);
+v_n.set(f::F_indexname, y[6].clone());
+v_n.set(f::F_usingindex, V::Int(1));
+v_n.set(f::F_params, y[1].clone());
+out = v_n.clone();
+Ok(out)
+}
+fn a1589(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = y.first().cloned().unwrap_or(V::Null);
+let mut v_n = V::node(t::T_RepackStmt);
+v_n.set(f::F_command, V::Int(2));
+v_n.set(f::F_relation, h::makeVacuumRelation(&y[2], &V::Int(0), &y[3])?);
+v_n.set(f::F_indexname, V::Null);
+v_n.set(f::F_usingindex, y[4].clone());
+v_n.set(f::F_params, y[1].clone());
+out = v_n.clone();
+Ok(out)
+}
+fn a1590(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = y.first().cloned().unwrap_or(V::Null);
+let mut v_n = V::node(t::T_RepackStmt);
+v_n.set(f::F_command, V::Int(2));
+v_n.set(f::F_relation, V::Null);
+v_n.set(f::F_indexname, V::Null);
+v_n.set(f::F_usingindex, y[2].clone());
+v_n.set(f::F_params, y[1].clone());
+out = v_n.clone();
+Ok(out)
+}
+fn a1591(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = y.first().cloned().unwrap_or(V::Null);
+let mut v_n = V::node(t::T_RepackStmt);
+v_n.set(f::F_command, V::Int(1));
+v_n.set(f::F_relation, V::node(t::T_VacuumRelation));
+v_n.get(f::F_relation).set(f::F_relation, y[4].clone());
 v_n.set(f::F_indexname, y[5].clone());
+v_n.set(f::F_usingindex, V::Int(1));
 v_n.set(f::F_params, y[2].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1558(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1592(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
-let mut v_n = V::node(t::T_ClusterStmt);
+let mut v_n = V::node(t::T_RepackStmt);
+v_n.set(f::F_command, V::Int(1));
 v_n.set(f::F_relation, V::Null);
 v_n.set(f::F_indexname, V::Null);
-v_n.set(f::F_params, y[2].clone());
+v_n.set(f::F_usingindex, V::Int(1));
+v_n.set(f::F_params, y[1].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1559(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1593(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
-let mut v_n = V::node(t::T_ClusterStmt);
-v_n.set(f::F_relation, y[2].clone());
+let mut v_n = V::node(t::T_RepackStmt);
+v_n.set(f::F_command, V::Int(1));
+v_n.set(f::F_relation, V::node(t::T_VacuumRelation));
+v_n.get(f::F_relation).set(f::F_relation, y[2].clone());
 v_n.set(f::F_indexname, y[3].clone());
-v_n.set(f::F_params, V::Null);
+v_n.set(f::F_usingindex, V::Int(1));
 if y[1].truthy() {
-v_n.set(f::F_params, h::lappend(&v_n.get(f::F_params), &h::makeDefElem(&V::s("verbose"), &V::Null, &V::Int(l[1] as i64))?)?);
+v_n.set(f::F_params, h::list_make1(&h::makeDefElem(&V::s("verbose"), &V::Null, &V::Int(l[1] as i64))?)?);
 }
 out = v_n.clone();
 Ok(out)
 }
-fn a1560(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1594(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
-let mut v_n = V::node(t::T_ClusterStmt);
+let mut v_n = V::node(t::T_RepackStmt);
+v_n.set(f::F_command, V::Int(1));
 v_n.set(f::F_relation, V::Null);
 v_n.set(f::F_indexname, V::Null);
-v_n.set(f::F_params, V::Null);
-if y[1].truthy() {
-v_n.set(f::F_params, h::lappend(&v_n.get(f::F_params), &h::makeDefElem(&V::s("verbose"), &V::Null, &V::Int(l[1] as i64))?)?);
-}
+v_n.set(f::F_usingindex, V::Int(1));
+v_n.set(f::F_params, h::list_make1(&h::makeDefElem(&V::s("verbose"), &V::Null, &V::Int(l[1] as i64))?)?);
 out = v_n.clone();
 Ok(out)
 }
-fn a1561(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1595(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
-let mut v_n = V::node(t::T_ClusterStmt);
-v_n.set(f::F_relation, y[4].clone());
+let mut v_n = V::node(t::T_RepackStmt);
+v_n.set(f::F_command, V::Int(1));
+v_n.set(f::F_relation, V::node(t::T_VacuumRelation));
+v_n.get(f::F_relation).set(f::F_relation, y[4].clone());
 v_n.set(f::F_indexname, y[2].clone());
-v_n.set(f::F_params, V::Null);
+v_n.set(f::F_usingindex, V::Int(1));
 if y[1].truthy() {
-v_n.set(f::F_params, h::lappend(&v_n.get(f::F_params), &h::makeDefElem(&V::s("verbose"), &V::Null, &V::Int(l[1] as i64))?)?);
+v_n.set(f::F_params, h::list_make1(&h::makeDefElem(&V::s("verbose"), &V::Null, &V::Int(l[1] as i64))?)?);
 }
 out = v_n.clone();
 Ok(out)
 }
-fn a1564(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1598(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_VacuumStmt);
 v_n.set(f::F_options, V::Null);
@@ -7905,7 +8118,7 @@ v_n.set(f::F_is_vacuumcmd, V::Int(1));
 out = v_n.clone();
 Ok(out)
 }
-fn a1565(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1599(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_VacuumStmt);
 v_n.set(f::F_options, y[2].clone());
@@ -7914,43 +8127,30 @@ v_n.set(f::F_is_vacuumcmd, V::Int(1));
 out = v_n.clone();
 Ok(out)
 }
-fn a1566(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1600(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_VacuumStmt);
-v_n.set(f::F_options, V::Null);
-if y[1].truthy() {
-v_n.set(f::F_options, h::lappend(&v_n.get(f::F_options), &h::makeDefElem(&V::s("verbose"), &V::Null, &V::Int(l[1] as i64))?)?);
-}
+v_n.set(f::F_options, y[1].clone());
 v_n.set(f::F_rels, y[2].clone());
 v_n.set(f::F_is_vacuumcmd, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a1567(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1601(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_VacuumStmt);
-v_n.set(f::F_options, y[2].clone());
-v_n.set(f::F_rels, y[4].clone());
+v_n.set(f::F_options, h::list_make1(&h::makeDefElem(&V::s("verbose"), &V::Null, &V::Int(l[1] as i64))?)?);
+v_n.set(f::F_rels, y[2].clone());
 v_n.set(f::F_is_vacuumcmd, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a1574(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = V::s("analyze");
-
-Ok(out)
-}
-fn a1575(y: &mut [V], l: &[i32], here: i32) -> R {
-let mut out = V::s("format");
-
-Ok(out)
-}
-fn a1589(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1614(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeVacuumRelation(&y[0], &V::Int(0), &y[1])?;
 
 Ok(out)
 }
-fn a1594(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1619(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_ExplainStmt);
 v_n.set(f::F_query, y[1].clone());
@@ -7958,7 +8158,7 @@ v_n.set(f::F_options, V::Null);
 out = v_n.clone();
 Ok(out)
 }
-fn a1595(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1620(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_ExplainStmt);
 v_n.set(f::F_query, y[3].clone());
@@ -7969,7 +8169,7 @@ v_n.set(f::F_options, h::lappend(&v_n.get(f::F_options), &h::makeDefElem(&V::s("
 out = v_n.clone();
 Ok(out)
 }
-fn a1596(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1621(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_ExplainStmt);
 v_n.set(f::F_query, y[2].clone());
@@ -7977,7 +8177,7 @@ v_n.set(f::F_options, h::list_make1(&h::makeDefElem(&V::s("verbose"), &V::Null, 
 out = v_n.clone();
 Ok(out)
 }
-fn a1597(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1622(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_ExplainStmt);
 v_n.set(f::F_query, y[4].clone());
@@ -7985,7 +8185,7 @@ v_n.set(f::F_options, y[2].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1608(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1633(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_PrepareStmt);
 v_n.set(f::F_name, y[1].clone());
@@ -7994,7 +8194,7 @@ v_n.set(f::F_query, y[4].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1616(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1641(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_ExecuteStmt);
 v_n.set(f::F_name, y[1].clone());
@@ -8002,7 +8202,7 @@ v_n.set(f::F_params, y[2].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1617(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1642(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_ctas = V::node(t::T_CreateTableAsStmt);
 let mut v_n = V::node(t::T_ExecuteStmt);
@@ -8010,7 +8210,7 @@ v_n.set(f::F_name, y[6].clone());
 v_n.set(f::F_params, y[7].clone());
 v_ctas.set(f::F_query, v_n.clone());
 v_ctas.set(f::F_into, y[3].clone());
-v_ctas.set(f::F_objtype, V::Int(41));
+v_ctas.set(f::F_objtype, V::Int(42));
 v_ctas.set(f::F_is_select_into, V::Int(0));
 v_ctas.set(f::F_if_not_exists, V::Int(0));
 y[3].get(f::F_rel).set(f::F_relpersistence, y[1].clone());
@@ -8018,7 +8218,7 @@ y[3].set(f::F_skipData, V::b(!y[8].truthy()));
 out = v_ctas.clone();
 Ok(out)
 }
-fn a1618(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1643(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_ctas = V::node(t::T_CreateTableAsStmt);
 let mut v_n = V::node(t::T_ExecuteStmt);
@@ -8026,7 +8226,7 @@ v_n.set(f::F_name, y[9].clone());
 v_n.set(f::F_params, y[10].clone());
 v_ctas.set(f::F_query, v_n.clone());
 v_ctas.set(f::F_into, y[6].clone());
-v_ctas.set(f::F_objtype, V::Int(41));
+v_ctas.set(f::F_objtype, V::Int(42));
 v_ctas.set(f::F_is_select_into, V::Int(0));
 v_ctas.set(f::F_if_not_exists, V::Int(1));
 y[6].get(f::F_rel).set(f::F_relpersistence, y[1].clone());
@@ -8034,7 +8234,7 @@ y[6].set(f::F_skipData, V::b(!y[11].truthy()));
 out = v_ctas.clone();
 Ok(out)
 }
-fn a1621(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1646(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_DeallocateStmt);
 v_n.set(f::F_name, y[1].clone());
@@ -8043,7 +8243,7 @@ v_n.set(f::F_location, V::Int(l[1] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a1622(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1647(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_DeallocateStmt);
 v_n.set(f::F_name, y[2].clone());
@@ -8052,7 +8252,7 @@ v_n.set(f::F_location, V::Int(l[2] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a1623(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1648(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_DeallocateStmt);
 v_n.set(f::F_name, V::Null);
@@ -8061,7 +8261,7 @@ v_n.set(f::F_location, V::Int(1).neg());
 out = v_n.clone();
 Ok(out)
 }
-fn a1625(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1650(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 y[4].set(f::F_relation, y[3].clone());
 y[4].set(f::F_onConflictClause, y[5].clone());
@@ -8070,45 +8270,45 @@ y[4].set(f::F_withClause, y[0].clone());
 out = y[4].clone();
 Ok(out)
 }
-fn a1627(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1652(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 y[0].set(f::F_alias, h::makeAlias(&y[2], &V::Null)?);
 out = y[0].clone();
 Ok(out)
 }
-fn a1628(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1653(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::node(t::T_InsertStmt);
 out.clone().set(f::F_cols, V::Null);
 out.clone().set(f::F_selectStmt, std::mem::take(&mut y[0]));
 Ok(out)
 }
-fn a1629(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1654(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::node(t::T_InsertStmt);
 out.clone().set(f::F_cols, V::Null);
 out.clone().set(f::F_override, std::mem::take(&mut y[1]));
 out.clone().set(f::F_selectStmt, std::mem::take(&mut y[3]));
 Ok(out)
 }
-fn a1630(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1655(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::node(t::T_InsertStmt);
 out.clone().set(f::F_cols, std::mem::take(&mut y[1]));
 out.clone().set(f::F_selectStmt, std::mem::take(&mut y[3]));
 Ok(out)
 }
-fn a1631(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1656(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::node(t::T_InsertStmt);
 out.clone().set(f::F_cols, std::mem::take(&mut y[1]));
 out.clone().set(f::F_override, std::mem::take(&mut y[4]));
 out.clone().set(f::F_selectStmt, std::mem::take(&mut y[6]));
 Ok(out)
 }
-fn a1632(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1657(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::node(t::T_InsertStmt);
 out.clone().set(f::F_cols, V::Null);
 out.clone().set(f::F_selectStmt, V::Null);
 Ok(out)
 }
-fn a1637(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1662(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::node(t::T_ResTarget);
 out.clone().set(f::F_name, std::mem::take(&mut y[0]));
 out.clone().set(f::F_indirection, h::check_indirection(&y[1], &V::Null)?);
@@ -8116,25 +8316,37 @@ out.clone().set(f::F_val, V::Null);
 out.clone().set(f::F_location, V::Int(l[0] as i64));
 Ok(out)
 }
-fn a1638(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1663(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = V::node(t::T_OnConflictClause);
+out.clone().set(f::F_action, V::Int(3));
+out.clone().set(f::F_infer, std::mem::take(&mut y[2]));
+out.clone().set(f::F_targetList, V::Null);
+out.clone().set(f::F_lockStrength, std::mem::take(&mut y[5]));
+out.clone().set(f::F_whereClause, std::mem::take(&mut y[6]));
+out.clone().set(f::F_location, V::Int(l[0] as i64));
+Ok(out)
+}
+fn a1664(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::node(t::T_OnConflictClause);
 out.clone().set(f::F_action, V::Int(2));
 out.clone().set(f::F_infer, std::mem::take(&mut y[2]));
 out.clone().set(f::F_targetList, std::mem::take(&mut y[6]));
+out.clone().set(f::F_lockStrength, V::Int(0));
 out.clone().set(f::F_whereClause, std::mem::take(&mut y[7]));
 out.clone().set(f::F_location, V::Int(l[0] as i64));
 Ok(out)
 }
-fn a1639(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1665(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::node(t::T_OnConflictClause);
 out.clone().set(f::F_action, V::Int(1));
 out.clone().set(f::F_infer, std::mem::take(&mut y[2]));
 out.clone().set(f::F_targetList, V::Null);
+out.clone().set(f::F_lockStrength, V::Int(0));
 out.clone().set(f::F_whereClause, V::Null);
 out.clone().set(f::F_location, V::Int(l[0] as i64));
 Ok(out)
 }
-fn a1641(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1667(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::node(t::T_InferClause);
 out.clone().set(f::F_indexElems, std::mem::take(&mut y[1]));
 out.clone().set(f::F_whereClause, std::mem::take(&mut y[3]));
@@ -8142,7 +8354,7 @@ out.clone().set(f::F_conname, V::Null);
 out.clone().set(f::F_location, V::Int(l[0] as i64));
 Ok(out)
 }
-fn a1642(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1668(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::node(t::T_InferClause);
 out.clone().set(f::F_indexElems, V::Null);
 out.clone().set(f::F_whereClause, V::Null);
@@ -8150,7 +8362,7 @@ out.clone().set(f::F_conname, std::mem::take(&mut y[2]));
 out.clone().set(f::F_location, V::Int(l[0] as i64));
 Ok(out)
 }
-fn a1644(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1670(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_ReturningClause);
 v_n.set(f::F_options, y[1].clone());
@@ -8158,7 +8370,7 @@ v_n.set(f::F_exprs, y[2].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1650(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1676(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_ReturningOption);
 v_n.set(f::F_option, y[0].clone());
@@ -8167,7 +8379,7 @@ v_n.set(f::F_location, V::Int(l[0] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a1653(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1679(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_DeleteStmt);
 v_n.set(f::F_relation, y[3].clone());
@@ -8178,7 +8390,7 @@ v_n.set(f::F_withClause, y[0].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1656(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1682(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_LockStmt);
 v_n.set(f::F_relations, y[2].clone());
@@ -8187,17 +8399,17 @@ v_n.set(f::F_nowait, y[4].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1663(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1689(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::Int(5);
 
 Ok(out)
 }
-fn a1664(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1690(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::Int(6);
 
 Ok(out)
 }
-fn a1672(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1698(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_UpdateStmt);
 v_n.set(f::F_relation, y[2].clone());
@@ -8209,18 +8421,18 @@ v_n.set(f::F_withClause, y[0].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1674(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1700(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::list_concat(&y[0], &y[2])?;
 
 Ok(out)
 }
-fn a1675(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1701(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 y[0].set(f::F_val, y[2].clone());
 out = h::list_make1(&y[0])?;
 Ok(out)
 }
-fn a1676(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1702(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_ncolumns = h::list_length(&y[1])?;
 let mut v_i = V::Int(1);
@@ -8237,7 +8449,7 @@ v_i = v_i.add(&V::Int(1));
 out = y[1].clone();
 Ok(out)
 }
-fn a1680(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1706(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_m = V::node(t::T_MergeStmt);
 v_m.set(f::F_withClause, y[0].clone());
@@ -8249,14 +8461,14 @@ v_m.set(f::F_returningClause, y[9].clone());
 out = v_m.clone();
 Ok(out)
 }
-fn a1683(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1709(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 y[3].set(f::F_matchKind, y[0].clone());
 y[3].set(f::F_condition, y[1].clone());
 out = y[3].clone();
 Ok(out)
 }
-fn a1686(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1712(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_m = V::node(t::T_MergeWhenClause);
 v_m.set(f::F_matchKind, y[0].clone());
@@ -8265,7 +8477,7 @@ v_m.set(f::F_condition, y[1].clone());
 out = v_m.clone();
 Ok(out)
 }
-fn a1694(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1720(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_MergeWhenClause);
 v_n.set(f::F_commandType, V::Int(2));
@@ -8275,7 +8487,7 @@ v_n.set(f::F_values, V::Null);
 out = v_n.clone();
 Ok(out)
 }
-fn a1695(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1721(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_MergeWhenClause);
 v_n.set(f::F_commandType, V::Int(4));
@@ -8285,7 +8497,7 @@ v_n.set(f::F_values, V::Null);
 out = v_n.clone();
 Ok(out)
 }
-fn a1696(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1722(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_MergeWhenClause);
 v_n.set(f::F_commandType, V::Int(3));
@@ -8295,7 +8507,7 @@ v_n.set(f::F_values, y[1].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1697(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1723(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_MergeWhenClause);
 v_n.set(f::F_commandType, V::Int(3));
@@ -8305,7 +8517,7 @@ v_n.set(f::F_values, y[4].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1698(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1724(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_MergeWhenClause);
 v_n.set(f::F_commandType, V::Int(3));
@@ -8315,7 +8527,7 @@ v_n.set(f::F_values, y[4].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1699(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1725(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_MergeWhenClause);
 v_n.set(f::F_commandType, V::Int(3));
@@ -8325,7 +8537,7 @@ v_n.set(f::F_values, y[7].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1700(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1726(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_MergeWhenClause);
 v_n.set(f::F_commandType, V::Int(3));
@@ -8335,7 +8547,7 @@ v_n.set(f::F_values, V::Null);
 out = v_n.clone();
 Ok(out)
 }
-fn a1702(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1728(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_DeclareCursorStmt);
 v_n.set(f::F_portalname, y[1].clone());
@@ -8344,74 +8556,74 @@ v_n.set(f::F_query, y[6].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1705(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1731(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y[0].or(&V::Int(4));
 
 Ok(out)
 }
-fn a1706(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1732(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y[0].or(&V::Int(2));
 
 Ok(out)
 }
-fn a1707(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1733(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y[0].or(&V::Int(1));
 
 Ok(out)
 }
-fn a1708(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1734(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y[0].or(&V::Int(16));
 
 Ok(out)
 }
-fn a1709(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1735(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y[0].or(&V::Int(8));
 
 Ok(out)
 }
-fn a1718(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1744(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let _ = h::insertSelectOptions(&y[0], &y[1], &V::Null, &V::Null, &V::Null, &V::Null)?;
 out = y[0].clone();
 Ok(out)
 }
-fn a1719(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1745(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let _ = h::insertSelectOptions(&y[0], &y[1], &y[2], &y[3], &V::Null, &V::Null)?;
 out = y[0].clone();
 Ok(out)
 }
-fn a1720(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1746(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let _ = h::insertSelectOptions(&y[0], &y[1], &y[3], &y[2], &V::Null, &V::Null)?;
 out = y[0].clone();
 Ok(out)
 }
-fn a1721(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1747(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let _ = h::insertSelectOptions(&y[1], &V::Null, &V::Null, &V::Null, &y[0], &V::Null)?;
 out = y[1].clone();
 Ok(out)
 }
-fn a1722(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1748(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let _ = h::insertSelectOptions(&y[1], &y[2], &V::Null, &V::Null, &y[0], &V::Null)?;
 out = y[1].clone();
 Ok(out)
 }
-fn a1723(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1749(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let _ = h::insertSelectOptions(&y[1], &y[2], &y[3], &y[4], &y[0], &V::Null)?;
 out = y[1].clone();
 Ok(out)
 }
-fn a1724(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1750(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let _ = h::insertSelectOptions(&y[1], &y[2], &y[4], &y[3], &y[0], &V::Null)?;
 out = y[1].clone();
 Ok(out)
 }
-fn a1727(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1753(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_SelectStmt);
 v_n.set(f::F_targetList, y[2].clone());
@@ -8425,7 +8637,7 @@ v_n.set(f::F_windowClause, y[8].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1728(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1754(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_SelectStmt);
 v_n.set(f::F_distinctClause, y[1].clone());
@@ -8440,7 +8652,7 @@ v_n.set(f::F_windowClause, y[8].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1730(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1756(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_cr = V::node(t::T_ColumnRef);
 let mut v_rt = V::node(t::T_ResTarget);
@@ -8456,36 +8668,36 @@ v_n.set(f::F_fromClause, h::list_make1(&y[1])?);
 out = v_n.clone();
 Ok(out)
 }
-fn a1731(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1757(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeSetOp(&V::Int(1), &y[2].eq(&V::Int(1)), &y[0], &y[3])?;
 
 Ok(out)
 }
-fn a1732(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1758(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeSetOp(&V::Int(2), &y[2].eq(&V::Int(1)), &y[0], &y[3])?;
 
 Ok(out)
 }
-fn a1733(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1759(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeSetOp(&V::Int(3), &y[2].eq(&V::Int(1)), &y[0], &y[3])?;
 
 Ok(out)
 }
-fn a1734(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1760(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::node(t::T_WithClause);
 out.clone().set(f::F_ctes, std::mem::take(&mut y[1]));
 out.clone().set(f::F_recursive, V::Int(0));
 out.clone().set(f::F_location, V::Int(l[0] as i64));
 Ok(out)
 }
-fn a1736(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1762(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::node(t::T_WithClause);
 out.clone().set(f::F_ctes, std::mem::take(&mut y[2]));
 out.clone().set(f::F_recursive, V::Int(1));
 out.clone().set(f::F_location, V::Int(l[0] as i64));
 Ok(out)
 }
-fn a1739(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1765(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CommonTableExpr);
 v_n.set(f::F_ctename, y[0].clone());
@@ -8498,7 +8710,7 @@ v_n.set(f::F_location, V::Int(l[0] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a1743(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1769(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CTESearchClause);
 v_n.set(f::F_search_col_list, y[4].clone());
@@ -8508,7 +8720,7 @@ v_n.set(f::F_location, V::Int(l[0] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a1744(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1770(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CTESearchClause);
 v_n.set(f::F_search_col_list, y[4].clone());
@@ -8518,7 +8730,7 @@ v_n.set(f::F_location, V::Int(l[0] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a1746(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1772(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CTECycleClause);
 v_n.set(f::F_cycle_col_list, y[1].clone());
@@ -8530,7 +8742,7 @@ v_n.set(f::F_location, V::Int(l[0] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a1747(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1773(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CTECycleClause);
 v_n.set(f::F_cycle_col_list, y[1].clone());
@@ -8542,7 +8754,7 @@ v_n.set(f::F_location, V::Int(l[0] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a1751(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1777(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::node(t::T_IntoClause);
 out.clone().set(f::F_rel, std::mem::take(&mut y[1]));
 out.clone().set(f::F_colNames, V::Null);
@@ -8553,44 +8765,44 @@ out.clone().set(f::F_viewQuery, V::Null);
 out.clone().set(f::F_skipData, V::Int(0));
 Ok(out)
 }
-fn a1753(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1779(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = std::mem::take(&mut y[2]);
 out.clone().set(f::F_relpersistence, V::Int(116));
 Ok(out)
 }
-fn a1755(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1781(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = std::mem::take(&mut y[3]);
 out.clone().set(f::F_relpersistence, V::Int(116));
 Ok(out)
 }
-fn a1757(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1783(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 
 out = y[3].clone();
 out.clone().set(f::F_relpersistence, V::Int(116));
 Ok(out)
 }
-fn a1759(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1785(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = std::mem::take(&mut y[2]);
 out.clone().set(f::F_relpersistence, V::Int(117));
 Ok(out)
 }
-fn a1760(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1786(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = std::mem::take(&mut y[1]);
 out.clone().set(f::F_relpersistence, V::Int(112));
 Ok(out)
 }
-fn a1761(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1787(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = std::mem::take(&mut y[0]);
 out.clone().set(f::F_relpersistence, V::Int(112));
 Ok(out)
 }
-fn a1767(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1793(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::list_make1(&V::Null)?;
 
 Ok(out)
 }
-fn a1778(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1804(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::node(t::T_SortBy);
 out.clone().set(f::F_node, std::mem::take(&mut y[0]));
 out.clone().set(f::F_sortby_dir, V::Int(3));
@@ -8599,7 +8811,7 @@ out.clone().set(f::F_useOp, std::mem::take(&mut y[2]));
 out.clone().set(f::F_location, V::Int(l[2] as i64));
 Ok(out)
 }
-fn a1779(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1805(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::node(t::T_SortBy);
 out.clone().set(f::F_node, std::mem::take(&mut y[0]));
 out.clone().set(f::F_sortby_dir, std::mem::take(&mut y[1]));
@@ -8608,19 +8820,19 @@ out.clone().set(f::F_useOp, V::Null);
 out.clone().set(f::F_location, V::Int(1).neg());
 Ok(out)
 }
-fn a1780(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1806(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = std::mem::take(&mut y[0]);
 out.clone().set(f::F_limitOffset, std::mem::take(&mut y[1]));
 out.clone().set(f::F_offsetLoc, V::Int(l[1] as i64));
 Ok(out)
 }
-fn a1781(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1807(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = std::mem::take(&mut y[1]);
 out.clone().set(f::F_limitOffset, std::mem::take(&mut y[0]));
 out.clone().set(f::F_offsetLoc, V::Int(l[0] as i64));
 Ok(out)
 }
-fn a1783(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1809(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_SelectLimit);
 v_n.set(f::F_limitOffset, y[0].clone());
@@ -8632,7 +8844,7 @@ v_n.set(f::F_optionLoc, V::Int(1).neg());
 out = v_n.clone();
 Ok(out)
 }
-fn a1786(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1812(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_SelectLimit);
 v_n.set(f::F_limitOffset, V::Null);
@@ -8644,12 +8856,12 @@ v_n.set(f::F_optionLoc, V::Int(1).neg());
 out = v_n.clone();
 Ok(out)
 }
-fn a1787(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1813(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 return Err(h::message("LIMIT #,# syntax is not supported", &[]));
 Ok(out)
 }
-fn a1788(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1814(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_SelectLimit);
 v_n.set(f::F_limitOffset, V::Null);
@@ -8661,7 +8873,7 @@ v_n.set(f::F_optionLoc, V::Int(1).neg());
 out = v_n.clone();
 Ok(out)
 }
-fn a1789(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1815(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_SelectLimit);
 v_n.set(f::F_limitOffset, V::Null);
@@ -8673,7 +8885,7 @@ v_n.set(f::F_optionLoc, V::Int(l[4] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a1790(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1816(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_SelectLimit);
 v_n.set(f::F_limitOffset, V::Null);
@@ -8685,7 +8897,7 @@ v_n.set(f::F_optionLoc, V::Int(1).neg());
 out = v_n.clone();
 Ok(out)
 }
-fn a1791(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1817(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_SelectLimit);
 v_n.set(f::F_limitOffset, V::Null);
@@ -8697,32 +8909,32 @@ v_n.set(f::F_optionLoc, V::Int(l[3] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a1795(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1821(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeNullAConst(&V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a1798(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1824(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeSimpleA_Expr(&V::Int(0), &V::s("+"), &V::Null, &y[1], &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a1799(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1825(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::doNegate(&y[1], &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a1800(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1826(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeIntConst(&y[0], &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a1801(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1827(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeFloatConst(&y[0], &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a1806(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1832(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_GroupClause);
 v_n.set(f::F_distinct, y[2].eq(&V::Int(2)));
@@ -8730,7 +8942,7 @@ v_n.set(f::F_list, y[3].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1807(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1833(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_GroupClause);
 v_n.set(f::F_distinct, V::Int(0));
@@ -8738,27 +8950,27 @@ v_n.set(f::F_list, V::Null);
 out = v_n.clone();
 Ok(out)
 }
-fn a1815(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1841(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeGroupingSet(&V::Int(0), &V::Null, &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a1816(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1842(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeGroupingSet(&V::Int(2), &y[2], &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a1817(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1843(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeGroupingSet(&V::Int(3), &y[2], &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a1818(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1844(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeGroupingSet(&V::Int(4), &y[3], &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a1827(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1853(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_LockingClause);
 v_n.set(f::F_lockedRels, y[1].clone());
@@ -8767,27 +8979,27 @@ v_n.set(f::F_waitPolicy, y[2].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1834(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1862(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_SelectStmt);
 v_n.set(f::F_valuesLists, h::list_make1(&y[2])?);
 out = v_n.clone();
 Ok(out)
 }
-fn a1835(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1863(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = y[0].clone();
 v_n.set(f::F_valuesLists, h::lappend(&v_n.get(f::F_valuesLists), &y[3])?);
 out = v_n.clone();
 Ok(out)
 }
-fn a1840(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1868(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 y[0].set(f::F_alias, y[1].clone());
 out = y[0].clone();
 Ok(out)
 }
-fn a1841(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1869(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = y[2].clone();
 y[0].set(f::F_alias, y[1].clone());
@@ -8795,7 +9007,7 @@ v_n.set(f::F_relation, y[0].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1842(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1870(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = y[0].clone();
 v_n.set(f::F_alias, h::linitial(&y[1]));
@@ -8803,7 +9015,7 @@ v_n.set(f::F_coldeflist, h::lsecond(&y[1]));
 out = v_n.clone();
 Ok(out)
 }
-fn a1843(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1871(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = y[1].clone();
 v_n.set(f::F_lateral, V::Int(1));
@@ -8812,14 +9024,14 @@ v_n.set(f::F_coldeflist, h::lsecond(&y[2]));
 out = v_n.clone();
 Ok(out)
 }
-fn a1844(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1872(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = y[0].clone();
 v_n.set(f::F_alias, y[1].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1845(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1873(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = y[1].clone();
 v_n.set(f::F_lateral, V::Int(1));
@@ -8827,7 +9039,7 @@ v_n.set(f::F_alias, y[2].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1846(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1874(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_RangeSubselect);
 v_n.set(f::F_lateral, V::Int(0));
@@ -8836,7 +9048,7 @@ v_n.set(f::F_alias, y[1].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1847(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1875(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_RangeSubselect);
 v_n.set(f::F_lateral, V::Int(1));
@@ -8845,20 +9057,20 @@ v_n.set(f::F_alias, y[2].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1849(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1877(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 y[1].set(f::F_alias, y[3].clone());
 out = y[1].clone();
 Ok(out)
 }
-fn a1850(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1878(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_jt = y[0].clone();
 v_jt.set(f::F_alias, y[1].clone());
 out = v_jt.clone();
 Ok(out)
 }
-fn a1851(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1879(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_jt = y[1].clone();
 v_jt.set(f::F_alias, y[2].clone());
@@ -8866,7 +9078,7 @@ v_jt.set(f::F_lateral, V::Int(1));
 out = v_jt.clone();
 Ok(out)
 }
-fn a1853(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1881(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_JoinExpr);
 v_n.set(f::F_jointype, V::Int(0));
@@ -8879,7 +9091,7 @@ v_n.set(f::F_quals, V::Null);
 out = v_n.clone();
 Ok(out)
 }
-fn a1854(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1882(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_JoinExpr);
 v_n.set(f::F_jointype, y[1].clone());
@@ -8895,7 +9107,7 @@ v_n.set(f::F_quals, y[4].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1855(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1883(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_JoinExpr);
 v_n.set(f::F_jointype, V::Int(0));
@@ -8911,7 +9123,7 @@ v_n.set(f::F_quals, y[3].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1856(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1884(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_JoinExpr);
 v_n.set(f::F_jointype, y[2].clone());
@@ -8924,7 +9136,7 @@ v_n.set(f::F_quals, V::Null);
 out = v_n.clone();
 Ok(out)
 }
-fn a1857(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1885(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_JoinExpr);
 v_n.set(f::F_jointype, V::Int(0));
@@ -8937,76 +9149,76 @@ v_n.set(f::F_quals, V::Null);
 out = v_n.clone();
 Ok(out)
 }
-fn a1858(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1886(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::node(t::T_Alias);
 out.clone().set(f::F_aliasname, std::mem::take(&mut y[1]));
 out.clone().set(f::F_colnames, std::mem::take(&mut y[3]));
 Ok(out)
 }
-fn a1859(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1887(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::node(t::T_Alias);
 out.clone().set(f::F_aliasname, std::mem::take(&mut y[1]));
 Ok(out)
 }
-fn a1860(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1888(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::node(t::T_Alias);
 out.clone().set(f::F_aliasname, std::mem::take(&mut y[0]));
 out.clone().set(f::F_colnames, std::mem::take(&mut y[2]));
 Ok(out)
 }
-fn a1861(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1889(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::node(t::T_Alias);
 out.clone().set(f::F_aliasname, std::mem::take(&mut y[0]));
 Ok(out)
 }
-fn a1866(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1894(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::list_make2(&y[0], &V::Null)?;
 
 Ok(out)
 }
-fn a1867(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1895(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::list_make2(&V::Null, &y[2])?;
 
 Ok(out)
 }
-fn a1868(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1896(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_a = V::node(t::T_Alias);
 v_a.set(f::F_aliasname, y[1].clone());
 out = h::list_make2(&v_a, &y[3])?;
 Ok(out)
 }
-fn a1869(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1897(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_a = V::node(t::T_Alias);
 v_a.set(f::F_aliasname, y[0].clone());
 out = h::list_make2(&v_a, &y[2])?;
 Ok(out)
 }
-fn a1877(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1905(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::list_make2(&y[2], &y[4])?;
 
 Ok(out)
 }
-fn a1879(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1907(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = std::mem::take(&mut y[0]);
 out.clone().set(f::F_inh, V::Int(1));
 out.clone().set(f::F_alias, V::Null);
 Ok(out)
 }
-fn a1882(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1910(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = std::mem::take(&mut y[1]);
 out.clone().set(f::F_inh, V::Int(0));
 out.clone().set(f::F_alias, V::Null);
 Ok(out)
 }
-fn a1883(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1911(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = std::mem::take(&mut y[2]);
 out.clone().set(f::F_inh, V::Int(0));
 out.clone().set(f::F_alias, V::Null);
 Ok(out)
 }
-fn a1887(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1915(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_alias = V::node(t::T_Alias);
 v_alias.set(f::F_aliasname, y[1].clone());
@@ -9014,7 +9226,7 @@ y[0].set(f::F_alias, v_alias.clone());
 out = y[0].clone();
 Ok(out)
 }
-fn a1888(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1916(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_alias = V::node(t::T_Alias);
 v_alias.set(f::F_aliasname, y[2].clone());
@@ -9022,7 +9234,7 @@ y[0].set(f::F_alias, v_alias.clone());
 out = y[0].clone();
 Ok(out)
 }
-fn a1889(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1917(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_RangeTableSample);
 v_n.set(f::F_method, y[1].clone());
@@ -9032,7 +9244,7 @@ v_n.set(f::F_location, V::Int(l[1] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a1892(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1920(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_RangeFunction);
 v_n.set(f::F_lateral, V::Int(0));
@@ -9042,7 +9254,7 @@ v_n.set(f::F_functions, h::list_make1(&h::list_make2(&y[0], &V::Null)?)?);
 out = v_n.clone();
 Ok(out)
 }
-fn a1893(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1921(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_RangeFunction);
 v_n.set(f::F_lateral, V::Int(0));
@@ -9052,12 +9264,12 @@ v_n.set(f::F_functions, y[3].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a1894(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1922(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::list_make2(&y[0], &y[1])?;
 
 Ok(out)
 }
-fn a1904(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1932(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CurrentOfExpr);
 v_n.set(f::F_cursor_name, y[3].clone());
@@ -9065,7 +9277,7 @@ v_n.set(f::F_cursor_param, V::Int(0));
 out = v_n.clone();
 Ok(out)
 }
-fn a1910(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1938(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_ColumnDef);
 v_n.set(f::F_colname, y[0].clone());
@@ -9084,7 +9296,7 @@ v_n.set(f::F_location, V::Int(l[0] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a1911(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1939(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_RangeTableFunc);
 v_n.set(f::F_rowexpr, y[2].clone());
@@ -9095,7 +9307,7 @@ v_n.set(f::F_location, V::Int(l[0] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a1912(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1940(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_RangeTableFunc);
 v_n.set(f::F_rowexpr, y[7].clone());
@@ -9106,7 +9318,7 @@ v_n.set(f::F_location, V::Int(l[0] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a1915(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1943(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_fc = V::node(t::T_RangeTableFuncCol);
 v_fc.set(f::F_colname, y[0].clone());
@@ -9119,7 +9331,7 @@ v_fc.set(f::F_location, V::Int(l[0] as i64));
 out = v_fc.clone();
 Ok(out)
 }
-fn a1916(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1944(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_fc = V::node(t::T_RangeTableFuncCol);
 let mut v_option = V::Null;
@@ -9160,7 +9372,7 @@ return Err(h::message("unrecognized column option \"%s\"", &[v_defel.get(f::F_de
 out = v_fc.clone();
 Ok(out)
 }
-fn a1917(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1945(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_fc = V::node(t::T_RangeTableFuncCol);
 v_fc.set(f::F_colname, y[0].clone());
@@ -9169,7 +9381,7 @@ v_fc.set(f::F_location, V::Int(l[0] as i64));
 out = v_fc.clone();
 Ok(out)
 }
-fn a1920(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1948(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 if h::strcmp(&y[0], &V::s("__pg__is_not_null"))?.eq(&V::Int(0)).truthy() {
 return Err(h::message("option name \"%s\" cannot be used in XMLTABLE", &[y[0].clone()]));
@@ -9177,27 +9389,27 @@ return Err(h::message("option name \"%s\" cannot be used in XMLTABLE", &[y[0].cl
 out = h::makeDefElem(&y[0], &y[1], &V::Int(l[0] as i64))?;
 Ok(out)
 }
-fn a1921(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1949(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("default"), &y[1], &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a1922(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1950(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("__pg__is_not_null"), &h::makeBoolean(&V::Int(1))?, &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a1923(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1951(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("__pg__is_not_null"), &h::makeBoolean(&V::Int(0))?, &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a1924(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1952(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeDefElem(&V::s("path"), &y[1], &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a1927(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1955(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::node(t::T_ResTarget);
 out.clone().set(f::F_name, std::mem::take(&mut y[2]));
 out.clone().set(f::F_indirection, V::Null);
@@ -9205,7 +9417,7 @@ out.clone().set(f::F_val, std::mem::take(&mut y[0]));
 out.clone().set(f::F_location, V::Int(l[0] as i64));
 Ok(out)
 }
-fn a1928(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1956(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::node(t::T_ResTarget);
 out.clone().set(f::F_name, V::Null);
 out.clone().set(f::F_indirection, V::Null);
@@ -9213,7 +9425,7 @@ out.clone().set(f::F_val, std::mem::take(&mut y[1]));
 out.clone().set(f::F_location, V::Int(l[0] as i64));
 Ok(out)
 }
-fn a1929(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1957(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_JsonTable);
 let mut v_pathstring = V::Null;
@@ -9230,7 +9442,7 @@ v_n.set(f::F_location, V::Int(l[0] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a1934(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1962(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_JsonTableColumn);
 v_n.set(f::F_coltype, V::Int(0));
@@ -9239,7 +9451,7 @@ v_n.set(f::F_location, V::Int(l[0] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a1935(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1963(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_JsonTableColumn);
 v_n.set(f::F_coltype, V::Int(1));
@@ -9255,7 +9467,7 @@ v_n.set(f::F_location, V::Int(l[0] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a1936(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1964(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_JsonTableColumn);
 v_n.set(f::F_coltype, V::Int(3));
@@ -9271,7 +9483,7 @@ v_n.set(f::F_location, V::Int(l[0] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a1937(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1965(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_JsonTableColumn);
 v_n.set(f::F_coltype, V::Int(2));
@@ -9287,7 +9499,7 @@ v_n.set(f::F_location, V::Int(l[0] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a1938(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1966(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_JsonTableColumn);
 v_n.set(f::F_coltype, V::Int(4));
@@ -9297,7 +9509,7 @@ v_n.set(f::F_location, V::Int(l[0] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a1939(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1967(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_JsonTableColumn);
 v_n.set(f::F_coltype, V::Int(4));
@@ -9307,118 +9519,118 @@ v_n.set(f::F_location, V::Int(l[0] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a1942(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1970(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeJsonTablePathSpec(&y[1], &V::Null, &V::Int(l[1] as i64), &V::Int(1).neg())?;
 
 Ok(out)
 }
-fn a1944(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1972(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = std::mem::take(&mut y[0]);
 out.clone().set(f::F_arrayBounds, std::mem::take(&mut y[1]));
 Ok(out)
 }
-fn a1945(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1973(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = std::mem::take(&mut y[1]);
 out.clone().set(f::F_arrayBounds, std::mem::take(&mut y[2]));
 out.clone().set(f::F_setof, V::Int(1));
 Ok(out)
 }
-fn a1946(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1974(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = std::mem::take(&mut y[0]);
 out.clone().set(f::F_arrayBounds, h::list_make1(&h::makeInteger(&y[3])?)?);
 Ok(out)
 }
-fn a1947(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1975(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = std::mem::take(&mut y[1]);
 out.clone().set(f::F_arrayBounds, h::list_make1(&h::makeInteger(&y[4])?)?);
 out.clone().set(f::F_setof, V::Int(1));
 Ok(out)
 }
-fn a1948(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1976(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = std::mem::take(&mut y[0]);
 out.clone().set(f::F_arrayBounds, h::list_make1(&h::makeInteger(&V::Int(1).neg())?)?);
 Ok(out)
 }
-fn a1949(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1977(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = std::mem::take(&mut y[1]);
 out.clone().set(f::F_arrayBounds, h::list_make1(&h::makeInteger(&V::Int(1).neg())?)?);
 out.clone().set(f::F_setof, V::Int(1));
 Ok(out)
 }
-fn a1950(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1978(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::lappend(&y[0], &h::makeInteger(&V::Int(1).neg())?)?;
 
 Ok(out)
 }
-fn a1951(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1979(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::lappend(&y[0], &h::makeInteger(&y[2])?)?;
 
 Ok(out)
 }
-fn a1958(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1986(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = std::mem::take(&mut y[0]);
 out.clone().set(f::F_typmods, std::mem::take(&mut y[1]));
 Ok(out)
 }
-fn a1959(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1987(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = std::mem::take(&mut y[0]);
 out.clone().set(f::F_typmods, h::list_make2(&h::makeIntConst(&V::Int(32767), &V::Int(1).neg())?, &h::makeIntConst(&y[2], &V::Int(l[2] as i64))?)?);
 Ok(out)
 }
-fn a1966(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1994(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeTypeName(&y[0])?;
 out.clone().set(f::F_typmods, std::mem::take(&mut y[1]));
 out.clone().set(f::F_location, V::Int(l[0] as i64));
 Ok(out)
 }
-fn a1967(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1995(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeTypeNameFromNameList(&h::lcons(&h::makeString(&y[0])?, &y[1])?)?;
 out.clone().set(f::F_typmods, std::mem::take(&mut y[2]));
 out.clone().set(f::F_location, V::Int(l[0] as i64));
 Ok(out)
 }
-fn a1970(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a1998(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::SystemTypeName(&V::s("int4"))?;
 out.clone().set(f::F_location, V::Int(l[0] as i64));
 Ok(out)
 }
-fn a1972(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2000(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::SystemTypeName(&V::s("int2"))?;
 out.clone().set(f::F_location, V::Int(l[0] as i64));
 Ok(out)
 }
-fn a1973(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2001(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::SystemTypeName(&V::s("int8"))?;
 out.clone().set(f::F_location, V::Int(l[0] as i64));
 Ok(out)
 }
-fn a1974(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2002(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::SystemTypeName(&V::s("float4"))?;
 out.clone().set(f::F_location, V::Int(l[0] as i64));
 Ok(out)
 }
-fn a1975(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2003(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = std::mem::take(&mut y[1]);
 out.clone().set(f::F_location, V::Int(l[0] as i64));
 Ok(out)
 }
-fn a1976(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2004(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::SystemTypeName(&V::s("float8"))?;
 out.clone().set(f::F_location, V::Int(l[0] as i64));
 Ok(out)
 }
-fn a1977(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2005(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::SystemTypeName(&V::s("numeric"))?;
 out.clone().set(f::F_typmods, std::mem::take(&mut y[1]));
 out.clone().set(f::F_location, V::Int(l[0] as i64));
 Ok(out)
 }
-fn a1980(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2008(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::SystemTypeName(&V::s("bool"))?;
 out.clone().set(f::F_location, V::Int(l[0] as i64));
 Ok(out)
 }
-fn a1981(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2009(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 if y[1].lt(&V::Int(1)).truthy() {
 return Err(h::message("precision for type float must be at least 1 bit", &[]));
@@ -9435,17 +9647,17 @@ return Err(h::message("precision for type float must be less than 54 bits", &[])
 }
 Ok(out)
 }
-fn a1982(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2010(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::SystemTypeName(&V::s("float8"))?;
 
 Ok(out)
 }
-fn a1986(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2014(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = std::mem::take(&mut y[0]);
 out.clone().set(f::F_typmods, V::Null);
 Ok(out)
 }
-fn a1987(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2015(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_typname = V::Null;
 v_typname = (if y[1].truthy() { V::s("varbit") } else { V::s("bit") });
@@ -9454,7 +9666,7 @@ out.clone().set(f::F_typmods, y[3].clone());
 out.clone().set(f::F_location, V::Int(l[0] as i64));
 Ok(out)
 }
-fn a1988(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2016(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 if y[1].truthy() {
 out = h::SystemTypeName(&V::s("varbit"))?;
@@ -9465,13 +9677,13 @@ out.clone().set(f::F_typmods, h::list_make1(&h::makeIntConst(&V::Int(1), &V::Int
 out.clone().set(f::F_location, V::Int(l[0] as i64));
 Ok(out)
 }
-fn a1993(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2021(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::SystemTypeName(&y[0])?;
 out.clone().set(f::F_typmods, h::list_make1(&h::makeIntConst(&y[2], &V::Int(l[2] as i64))?)?);
 out.clone().set(f::F_location, V::Int(l[0] as i64));
 Ok(out)
 }
-fn a1994(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2022(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::SystemTypeName(&y[0])?;
 if h::strcmp(&y[0], &V::s("bpchar"))?.eq(&V::Int(0)).truthy() {
 out.clone().set(f::F_typmods, h::list_make1(&h::makeIntConst(&V::Int(1), &V::Int(1).neg())?)?);
@@ -9479,22 +9691,22 @@ out.clone().set(f::F_typmods, h::list_make1(&h::makeIntConst(&V::Int(1), &V::Int
 out.clone().set(f::F_location, V::Int(l[0] as i64));
 Ok(out)
 }
-fn a1995(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2023(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = (if y[1].truthy() { V::s("varchar") } else { V::s("bpchar") });
 
 Ok(out)
 }
-fn a1997(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2025(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::s("varchar");
 
 Ok(out)
 }
-fn a1998(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2026(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = (if y[2].truthy() { V::s("varchar") } else { V::s("bpchar") });
 
 Ok(out)
 }
-fn a2003(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2031(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 if y[4].truthy() {
 out = h::SystemTypeName(&V::s("timestamptz"))?;
@@ -9505,7 +9717,7 @@ out.clone().set(f::F_typmods, h::list_make1(&h::makeIntConst(&y[2], &V::Int(l[2]
 out.clone().set(f::F_location, V::Int(l[0] as i64));
 Ok(out)
 }
-fn a2004(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2032(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 if y[1].truthy() {
 out = h::SystemTypeName(&V::s("timestamptz"))?;
@@ -9515,7 +9727,7 @@ out = h::SystemTypeName(&V::s("timestamp"))?;
 out.clone().set(f::F_location, V::Int(l[0] as i64));
 Ok(out)
 }
-fn a2005(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2033(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 if y[4].truthy() {
 out = h::SystemTypeName(&V::s("timetz"))?;
@@ -9526,7 +9738,7 @@ out.clone().set(f::F_typmods, h::list_make1(&h::makeIntConst(&y[2], &V::Int(l[2]
 out.clone().set(f::F_location, V::Int(l[0] as i64));
 Ok(out)
 }
-fn a2006(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2034(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 if y[1].truthy() {
 out = h::SystemTypeName(&V::s("timetz"))?;
@@ -9536,92 +9748,92 @@ out = h::SystemTypeName(&V::s("time"))?;
 out.clone().set(f::F_location, V::Int(l[0] as i64));
 Ok(out)
 }
-fn a2007(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2035(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::SystemTypeName(&V::s("interval"))?;
 out.clone().set(f::F_location, V::Int(l[0] as i64));
 Ok(out)
 }
-fn a2011(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2039(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::list_make1(&h::makeIntConst(&h::INTERVAL_MASK(&V::Int(2))?, &V::Int(l[0] as i64))?)?;
 
 Ok(out)
 }
-fn a2012(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2040(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::list_make1(&h::makeIntConst(&h::INTERVAL_MASK(&V::Int(1))?, &V::Int(l[0] as i64))?)?;
 
 Ok(out)
 }
-fn a2013(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2041(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::list_make1(&h::makeIntConst(&h::INTERVAL_MASK(&V::Int(3))?, &V::Int(l[0] as i64))?)?;
 
 Ok(out)
 }
-fn a2014(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2042(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::list_make1(&h::makeIntConst(&h::INTERVAL_MASK(&V::Int(10))?, &V::Int(l[0] as i64))?)?;
 
 Ok(out)
 }
-fn a2015(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2043(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::list_make1(&h::makeIntConst(&h::INTERVAL_MASK(&V::Int(11))?, &V::Int(l[0] as i64))?)?;
 
 Ok(out)
 }
-fn a2017(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2045(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::list_make1(&h::makeIntConst(&h::INTERVAL_MASK(&V::Int(2))?.or(&h::INTERVAL_MASK(&V::Int(1))?), &V::Int(l[0] as i64))?)?;
 
 Ok(out)
 }
-fn a2018(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2046(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::list_make1(&h::makeIntConst(&h::INTERVAL_MASK(&V::Int(3))?.or(&h::INTERVAL_MASK(&V::Int(10))?), &V::Int(l[0] as i64))?)?;
 
 Ok(out)
 }
-fn a2019(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2047(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::list_make1(&h::makeIntConst(&h::INTERVAL_MASK(&V::Int(3))?.or(&h::INTERVAL_MASK(&V::Int(10))?).or(&h::INTERVAL_MASK(&V::Int(11))?), &V::Int(l[0] as i64))?)?;
 
 Ok(out)
 }
-fn a2020(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2048(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = std::mem::take(&mut y[2]);
 h::set_linitial(&out.clone(), h::makeIntConst(&h::INTERVAL_MASK(&V::Int(3))?.or(&h::INTERVAL_MASK(&V::Int(10))?).or(&h::INTERVAL_MASK(&V::Int(11))?).or(&h::INTERVAL_MASK(&V::Int(12))?), &V::Int(l[0] as i64))?);
 Ok(out)
 }
-fn a2021(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2049(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::list_make1(&h::makeIntConst(&h::INTERVAL_MASK(&V::Int(10))?.or(&h::INTERVAL_MASK(&V::Int(11))?), &V::Int(l[0] as i64))?)?;
 
 Ok(out)
 }
-fn a2022(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2050(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = std::mem::take(&mut y[2]);
 h::set_linitial(&out.clone(), h::makeIntConst(&h::INTERVAL_MASK(&V::Int(10))?.or(&h::INTERVAL_MASK(&V::Int(11))?).or(&h::INTERVAL_MASK(&V::Int(12))?), &V::Int(l[0] as i64))?);
 Ok(out)
 }
-fn a2023(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2051(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = std::mem::take(&mut y[2]);
 h::set_linitial(&out.clone(), h::makeIntConst(&h::INTERVAL_MASK(&V::Int(11))?.or(&h::INTERVAL_MASK(&V::Int(12))?), &V::Int(l[0] as i64))?);
 Ok(out)
 }
-fn a2025(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2053(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::list_make1(&h::makeIntConst(&h::INTERVAL_MASK(&V::Int(12))?, &V::Int(l[0] as i64))?)?;
 
 Ok(out)
 }
-fn a2026(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2054(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::list_make2(&h::makeIntConst(&h::INTERVAL_MASK(&V::Int(12))?, &V::Int(l[0] as i64))?, &h::makeIntConst(&y[2], &V::Int(l[2] as i64))?)?;
 
 Ok(out)
 }
-fn a2027(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2055(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::SystemTypeName(&V::s("json"))?;
 out.clone().set(f::F_location, V::Int(l[0] as i64));
 Ok(out)
 }
-fn a2029(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2057(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeTypeCast(&y[0], &y[2], &V::Int(l[1] as i64))?;
 
 Ok(out)
 }
-fn a2030(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2058(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_CollateClause);
 v_n.set(f::F_arg, y[0].clone());
@@ -9630,170 +9842,170 @@ v_n.set(f::F_location, V::Int(l[1] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a2031(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2059(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeFuncCall(&h::SystemFuncName(&V::s("timezone"))?, &h::list_make2(&y[4], &y[0])?, &V::Int(3), &V::Int(l[1] as i64))?;
 
 Ok(out)
 }
-fn a2032(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2060(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeFuncCall(&h::SystemFuncName(&V::s("timezone"))?, &h::list_make1(&y[0])?, &V::Int(3), &V::Int(1).neg())?;
 
 Ok(out)
 }
-fn a2035(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2063(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeSimpleA_Expr(&V::Int(0), &V::s("+"), &y[0], &y[2], &V::Int(l[1] as i64))?;
 
 Ok(out)
 }
-fn a2036(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2064(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeSimpleA_Expr(&V::Int(0), &V::s("-"), &y[0], &y[2], &V::Int(l[1] as i64))?;
 
 Ok(out)
 }
-fn a2037(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2065(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeSimpleA_Expr(&V::Int(0), &V::s("*"), &y[0], &y[2], &V::Int(l[1] as i64))?;
 
 Ok(out)
 }
-fn a2038(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2066(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeSimpleA_Expr(&V::Int(0), &V::s("/"), &y[0], &y[2], &V::Int(l[1] as i64))?;
 
 Ok(out)
 }
-fn a2039(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2067(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeSimpleA_Expr(&V::Int(0), &V::s("%"), &y[0], &y[2], &V::Int(l[1] as i64))?;
 
 Ok(out)
 }
-fn a2040(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2068(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeSimpleA_Expr(&V::Int(0), &V::s("^"), &y[0], &y[2], &V::Int(l[1] as i64))?;
 
 Ok(out)
 }
-fn a2041(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2069(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeSimpleA_Expr(&V::Int(0), &V::s("<"), &y[0], &y[2], &V::Int(l[1] as i64))?;
 
 Ok(out)
 }
-fn a2042(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2070(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeSimpleA_Expr(&V::Int(0), &V::s(">"), &y[0], &y[2], &V::Int(l[1] as i64))?;
 
 Ok(out)
 }
-fn a2043(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2071(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeSimpleA_Expr(&V::Int(0), &V::s("="), &y[0], &y[2], &V::Int(l[1] as i64))?;
 
 Ok(out)
 }
-fn a2044(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2072(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeSimpleA_Expr(&V::Int(0), &V::s("<="), &y[0], &y[2], &V::Int(l[1] as i64))?;
 
 Ok(out)
 }
-fn a2045(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2073(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeSimpleA_Expr(&V::Int(0), &V::s(">="), &y[0], &y[2], &V::Int(l[1] as i64))?;
 
 Ok(out)
 }
-fn a2046(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2074(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeSimpleA_Expr(&V::Int(0), &V::s("<>"), &y[0], &y[2], &V::Int(l[1] as i64))?;
 
 Ok(out)
 }
-fn a2047(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2075(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeA_Expr(&V::Int(0), &y[1], &y[0], &y[2], &V::Int(l[1] as i64))?;
 
 Ok(out)
 }
-fn a2048(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2076(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeA_Expr(&V::Int(0), &y[0], &V::Null, &y[1], &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a2049(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2077(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeAndExpr(&y[0], &y[2], &V::Int(l[1] as i64))?;
 
 Ok(out)
 }
-fn a2050(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2078(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeOrExpr(&y[0], &y[2], &V::Int(l[1] as i64))?;
 
 Ok(out)
 }
-fn a2051(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2079(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeNotExpr(&y[1], &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a2053(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2081(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeSimpleA_Expr(&V::Int(7), &V::s("~~"), &y[0], &y[2], &V::Int(l[1] as i64))?;
 
 Ok(out)
 }
-fn a2054(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2082(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = h::makeFuncCall(&h::SystemFuncName(&V::s("like_escape"))?, &h::list_make2(&y[2], &y[4])?, &V::Int(0), &V::Int(l[1] as i64))?;
 out = h::makeSimpleA_Expr(&V::Int(7), &V::s("~~"), &y[0], &v_n, &V::Int(l[1] as i64))?;
 Ok(out)
 }
-fn a2055(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2083(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeSimpleA_Expr(&V::Int(7), &V::s("!~~"), &y[0], &y[3], &V::Int(l[1] as i64))?;
 
 Ok(out)
 }
-fn a2056(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2084(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = h::makeFuncCall(&h::SystemFuncName(&V::s("like_escape"))?, &h::list_make2(&y[3], &y[5])?, &V::Int(0), &V::Int(l[1] as i64))?;
 out = h::makeSimpleA_Expr(&V::Int(7), &V::s("!~~"), &y[0], &v_n, &V::Int(l[1] as i64))?;
 Ok(out)
 }
-fn a2057(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2085(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeSimpleA_Expr(&V::Int(8), &V::s("~~*"), &y[0], &y[2], &V::Int(l[1] as i64))?;
 
 Ok(out)
 }
-fn a2058(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2086(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = h::makeFuncCall(&h::SystemFuncName(&V::s("like_escape"))?, &h::list_make2(&y[2], &y[4])?, &V::Int(0), &V::Int(l[1] as i64))?;
 out = h::makeSimpleA_Expr(&V::Int(8), &V::s("~~*"), &y[0], &v_n, &V::Int(l[1] as i64))?;
 Ok(out)
 }
-fn a2059(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2087(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeSimpleA_Expr(&V::Int(8), &V::s("!~~*"), &y[0], &y[3], &V::Int(l[1] as i64))?;
 
 Ok(out)
 }
-fn a2060(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2088(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = h::makeFuncCall(&h::SystemFuncName(&V::s("like_escape"))?, &h::list_make2(&y[3], &y[5])?, &V::Int(0), &V::Int(l[1] as i64))?;
 out = h::makeSimpleA_Expr(&V::Int(8), &V::s("!~~*"), &y[0], &v_n, &V::Int(l[1] as i64))?;
 Ok(out)
 }
-fn a2061(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2089(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = h::makeFuncCall(&h::SystemFuncName(&V::s("similar_to_escape"))?, &h::list_make1(&y[3])?, &V::Int(0), &V::Int(l[1] as i64))?;
 out = h::makeSimpleA_Expr(&V::Int(9), &V::s("~"), &y[0], &v_n, &V::Int(l[1] as i64))?;
 Ok(out)
 }
-fn a2062(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2090(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = h::makeFuncCall(&h::SystemFuncName(&V::s("similar_to_escape"))?, &h::list_make2(&y[3], &y[5])?, &V::Int(0), &V::Int(l[1] as i64))?;
 out = h::makeSimpleA_Expr(&V::Int(9), &V::s("~"), &y[0], &v_n, &V::Int(l[1] as i64))?;
 Ok(out)
 }
-fn a2063(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2091(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = h::makeFuncCall(&h::SystemFuncName(&V::s("similar_to_escape"))?, &h::list_make1(&y[4])?, &V::Int(0), &V::Int(l[1] as i64))?;
 out = h::makeSimpleA_Expr(&V::Int(9), &V::s("!~"), &y[0], &v_n, &V::Int(l[1] as i64))?;
 Ok(out)
 }
-fn a2064(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2092(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = h::makeFuncCall(&h::SystemFuncName(&V::s("similar_to_escape"))?, &h::list_make2(&y[4], &y[6])?, &V::Int(0), &V::Int(l[1] as i64))?;
 out = h::makeSimpleA_Expr(&V::Int(9), &V::s("!~"), &y[0], &v_n, &V::Int(l[1] as i64))?;
 Ok(out)
 }
-fn a2065(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2093(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_NullTest);
 v_n.set(f::F_arg, y[0].clone());
@@ -9802,7 +10014,7 @@ v_n.set(f::F_location, V::Int(l[1] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a2067(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2095(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_NullTest);
 v_n.set(f::F_arg, y[0].clone());
@@ -9811,7 +10023,7 @@ v_n.set(f::F_location, V::Int(l[1] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a2069(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2097(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 if h::list_length(&y[0])?.ne(&V::Int(2)).truthy() {
 return Err(h::message("wrong number of parameters on left side of OVERLAPS expression", &[]));
@@ -9822,7 +10034,7 @@ return Err(h::message("wrong number of parameters on right side of OVERLAPS expr
 out = h::makeFuncCall(&h::SystemFuncName(&V::s("overlaps"))?, &h::list_concat(&y[0], &y[2])?, &V::Int(3), &V::Int(l[1] as i64))?;
 Ok(out)
 }
-fn a2070(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2098(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_b = V::node(t::T_BooleanTest);
 v_b.set(f::F_arg, y[0].clone());
@@ -9831,7 +10043,7 @@ v_b.set(f::F_location, V::Int(l[1] as i64));
 out = v_b.clone();
 Ok(out)
 }
-fn a2071(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2099(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_b = V::node(t::T_BooleanTest);
 v_b.set(f::F_arg, y[0].clone());
@@ -9840,7 +10052,7 @@ v_b.set(f::F_location, V::Int(l[1] as i64));
 out = v_b.clone();
 Ok(out)
 }
-fn a2072(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2100(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_b = V::node(t::T_BooleanTest);
 v_b.set(f::F_arg, y[0].clone());
@@ -9849,7 +10061,7 @@ v_b.set(f::F_location, V::Int(l[1] as i64));
 out = v_b.clone();
 Ok(out)
 }
-fn a2073(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2101(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_b = V::node(t::T_BooleanTest);
 v_b.set(f::F_arg, y[0].clone());
@@ -9858,7 +10070,7 @@ v_b.set(f::F_location, V::Int(l[1] as i64));
 out = v_b.clone();
 Ok(out)
 }
-fn a2074(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2102(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_b = V::node(t::T_BooleanTest);
 v_b.set(f::F_arg, y[0].clone());
@@ -9867,7 +10079,7 @@ v_b.set(f::F_location, V::Int(l[1] as i64));
 out = v_b.clone();
 Ok(out)
 }
-fn a2075(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2103(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_b = V::node(t::T_BooleanTest);
 v_b.set(f::F_arg, y[0].clone());
@@ -9876,37 +10088,37 @@ v_b.set(f::F_location, V::Int(l[1] as i64));
 out = v_b.clone();
 Ok(out)
 }
-fn a2076(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2104(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeSimpleA_Expr(&V::Int(3), &V::s("="), &y[0], &y[4], &V::Int(l[1] as i64))?;
 
 Ok(out)
 }
-fn a2077(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2105(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeSimpleA_Expr(&V::Int(4), &V::s("="), &y[0], &y[5], &V::Int(l[1] as i64))?;
 
 Ok(out)
 }
-fn a2078(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2106(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeSimpleA_Expr(&V::Int(10), &V::s("BETWEEN"), &y[0], &h::list_make2(&y[3], &y[5])?, &V::Int(l[1] as i64))?;
 
 Ok(out)
 }
-fn a2079(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2107(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeSimpleA_Expr(&V::Int(11), &V::s("NOT BETWEEN"), &y[0], &h::list_make2(&y[4], &y[6])?, &V::Int(l[1] as i64))?;
 
 Ok(out)
 }
-fn a2080(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2108(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeSimpleA_Expr(&V::Int(12), &V::s("BETWEEN SYMMETRIC"), &y[0], &h::list_make2(&y[3], &y[5])?, &V::Int(l[1] as i64))?;
 
 Ok(out)
 }
-fn a2081(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2109(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeSimpleA_Expr(&V::Int(13), &V::s("NOT BETWEEN SYMMETRIC"), &y[0], &h::list_make2(&y[4], &y[6])?, &V::Int(l[1] as i64))?;
 
 Ok(out)
 }
-fn a2082(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2110(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_SubLink);
 v_n.set(f::F_subselect, y[2].clone());
@@ -9918,7 +10130,7 @@ v_n.set(f::F_location, V::Int(l[1] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a2083(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2111(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = h::makeSimpleA_Expr(&V::Int(6), &V::s("="), &y[0], &y[3], &V::Int(l[1] as i64))?;
 v_n.set(f::F_rexpr_list_start, V::Int(l[2] as i64));
@@ -9926,7 +10138,7 @@ v_n.set(f::F_rexpr_list_end, V::Int(l[4] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a2084(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2112(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_SubLink);
 v_n.set(f::F_subselect, y[3].clone());
@@ -9938,7 +10150,7 @@ v_n.set(f::F_location, V::Int(l[1] as i64));
 out = h::makeNotExpr(&v_n, &V::Int(l[1] as i64))?;
 Ok(out)
 }
-fn a2085(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2113(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = h::makeSimpleA_Expr(&V::Int(6), &V::s("<>"), &y[0], &y[4], &V::Int(l[1] as i64))?;
 v_n.set(f::F_rexpr_list_start, V::Int(l[3] as i64));
@@ -9946,7 +10158,7 @@ v_n.set(f::F_rexpr_list_end, V::Int(l[5] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a2086(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2114(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_SubLink);
 v_n.set(f::F_subLinkType, y[2].clone());
@@ -9958,7 +10170,7 @@ v_n.set(f::F_location, V::Int(l[1] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a2087(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2115(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 if y[2].eq(&V::Int(2)).truthy() {
 out = h::makeA_Expr(&V::Int(1), &y[1], &y[0], &y[4], &V::Int(l[1] as i64))?;
@@ -9967,61 +10179,61 @@ out = h::makeA_Expr(&V::Int(2), &y[1], &y[0], &y[4], &V::Int(l[1] as i64))?;
 }
 Ok(out)
 }
-fn a2088(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2116(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 return Err(h::message("UNIQUE predicate is not yet implemented", &[]));
 Ok(out)
 }
-fn a2089(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2117(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeXmlExpr(&V::Int(7), &V::Null, &V::Null, &h::list_make1(&y[0])?, &V::Int(l[1] as i64))?;
 
 Ok(out)
 }
-fn a2090(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2118(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeNotExpr(&h::makeXmlExpr(&V::Int(7), &V::Null, &V::Null, &h::list_make1(&y[0])?, &V::Int(l[1] as i64))?, &V::Int(l[1] as i64))?;
 
 Ok(out)
 }
-fn a2091(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2119(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeFuncCall(&h::SystemFuncName(&V::s("is_normalized"))?, &h::list_make1(&y[0])?, &V::Int(3), &V::Int(l[1] as i64))?;
 
 Ok(out)
 }
-fn a2092(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2120(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeFuncCall(&h::SystemFuncName(&V::s("is_normalized"))?, &h::list_make2(&y[0], &h::makeStringConst(&y[2], &V::Int(l[2] as i64))?)?, &V::Int(3), &V::Int(l[1] as i64))?;
 
 Ok(out)
 }
-fn a2093(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2121(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeNotExpr(&h::makeFuncCall(&h::SystemFuncName(&V::s("is_normalized"))?, &h::list_make1(&y[0])?, &V::Int(3), &V::Int(l[1] as i64))?, &V::Int(l[1] as i64))?;
 
 Ok(out)
 }
-fn a2094(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2122(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeNotExpr(&h::makeFuncCall(&h::SystemFuncName(&V::s("is_normalized"))?, &h::list_make2(&y[0], &h::makeStringConst(&y[3], &V::Int(l[3] as i64))?)?, &V::Int(3), &V::Int(l[1] as i64))?, &V::Int(l[1] as i64))?;
 
 Ok(out)
 }
-fn a2095(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2123(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_format = h::makeJsonFormat(&V::Int(0), &V::Int(0), &V::Int(1).neg())?;
-out = h::makeJsonIsPredicate(&y[0], &v_format, &y[2], &y[3], &V::Int(l[0] as i64))?;
+out = h::makeJsonIsPredicate(&y[0], &v_format, &y[2], &y[3], &V::Int(0), &V::Int(l[0] as i64))?;
 Ok(out)
 }
-fn a2096(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2124(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_format = h::makeJsonFormat(&V::Int(0), &V::Int(0), &V::Int(1).neg())?;
-out = h::makeNotExpr(&h::makeJsonIsPredicate(&y[0], &v_format, &y[3], &y[4], &V::Int(l[0] as i64))?, &V::Int(l[0] as i64))?;
+out = h::makeNotExpr(&h::makeJsonIsPredicate(&y[0], &v_format, &y[3], &y[4], &V::Int(0), &V::Int(l[0] as i64))?, &V::Int(l[0] as i64))?;
 Ok(out)
 }
-fn a2097(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2125(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_SetToDefault);
 v_n.set(f::F_location, V::Int(l[0] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a2122(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2150(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_p = V::node(t::T_ParamRef);
 v_p.set(f::F_number, y[0].clone());
@@ -10036,7 +10248,7 @@ out = v_p.clone();
 }
 Ok(out)
 }
-fn a2123(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2151(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 if y[3].truthy() {
 let mut v_n = V::node(t::T_A_Indirection);
@@ -10048,7 +10260,7 @@ out = y[1].clone();
 }
 Ok(out)
 }
-fn a2126(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2154(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_SubLink);
 v_n.set(f::F_subLinkType, V::Int(4));
@@ -10060,7 +10272,7 @@ v_n.set(f::F_location, V::Int(l[0] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a2127(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2155(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_SubLink);
 let mut v_a = V::node(t::T_A_Indirection);
@@ -10075,7 +10287,7 @@ v_a.set(f::F_indirection, h::check_indirection(&y[1], &V::Null)?);
 out = v_a.clone();
 Ok(out)
 }
-fn a2128(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2156(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_SubLink);
 v_n.set(f::F_subLinkType, V::Int(0));
@@ -10087,7 +10299,7 @@ v_n.set(f::F_location, V::Int(l[0] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a2129(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2157(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_SubLink);
 v_n.set(f::F_subLinkType, V::Int(6));
@@ -10099,14 +10311,14 @@ v_n.set(f::F_location, V::Int(l[0] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a2130(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2158(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = y[1].clone();
 v_n.set(f::F_location, V::Int(l[0] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a2131(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2159(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_r = V::node(t::T_RowExpr);
 v_r.set(f::F_args, y[0].clone());
@@ -10117,7 +10329,7 @@ v_r.set(f::F_location, V::Int(l[0] as i64));
 out = v_r.clone();
 Ok(out)
 }
-fn a2132(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2160(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_r = V::node(t::T_RowExpr);
 v_r.set(f::F_args, y[0].clone());
@@ -10128,7 +10340,7 @@ v_r.set(f::F_location, V::Int(l[0] as i64));
 out = v_r.clone();
 Ok(out)
 }
-fn a2133(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2161(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_g = V::node(t::T_GroupingFunc);
 v_g.set(f::F_args, y[2].clone());
@@ -10136,19 +10348,19 @@ v_g.set(f::F_location, V::Int(l[0] as i64));
 out = v_g.clone();
 Ok(out)
 }
-fn a2134(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2162(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeFuncCall(&y[0], &V::Null, &V::Int(0), &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a2135(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2163(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = h::makeFuncCall(&y[0], &y[2], &V::Int(0), &V::Int(l[0] as i64))?;
 v_n.set(f::F_agg_order, y[3].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a2136(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2164(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = h::makeFuncCall(&y[0], &h::list_make1(&y[3])?, &V::Int(0), &V::Int(l[0] as i64))?;
 v_n.set(f::F_func_variadic, V::Int(1));
@@ -10156,7 +10368,7 @@ v_n.set(f::F_agg_order, y[4].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a2137(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2165(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = h::makeFuncCall(&y[0], &h::lappend(&y[2], &y[5])?, &V::Int(0), &V::Int(l[0] as i64))?;
 v_n.set(f::F_func_variadic, V::Int(1));
@@ -10164,14 +10376,14 @@ v_n.set(f::F_agg_order, y[6].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a2138(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2166(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = h::makeFuncCall(&y[0], &y[3], &V::Int(0), &V::Int(l[0] as i64))?;
 v_n.set(f::F_agg_order, y[4].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a2139(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2167(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = h::makeFuncCall(&y[0], &y[3], &V::Int(0), &V::Int(l[0] as i64))?;
 v_n.set(f::F_agg_order, y[4].clone());
@@ -10179,14 +10391,14 @@ v_n.set(f::F_agg_distinct, V::Int(1));
 out = v_n.clone();
 Ok(out)
 }
-fn a2140(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2168(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = h::makeFuncCall(&y[0], &V::Null, &V::Int(0), &V::Int(l[0] as i64))?;
 v_n.set(f::F_agg_star, V::Int(1));
 out = v_n.clone();
 Ok(out)
 }
-fn a2141(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2169(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = y[0].clone();
 if y[1].ne(&V::Null).truthy() {
@@ -10203,11 +10415,12 @@ v_n.set(f::F_agg_order, y[1].clone());
 v_n.set(f::F_agg_within_group, V::Int(1));
 }
 v_n.set(f::F_agg_filter, y[2].clone());
-v_n.set(f::F_over, y[3].clone());
+v_n.set(f::F_ignore_nulls, y[3].clone());
+v_n.set(f::F_over, y[4].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a2142(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2170(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = (if V::b(y[0].is_a(t::T_JsonObjectAgg)).truthy() { y[0].get(f::F_constructor) } else { y[0].get(f::F_constructor) });
 v_n.set(f::F_agg_filter, y[1].clone());
@@ -10215,167 +10428,167 @@ v_n.set(f::F_over, y[2].clone());
 out = y[0].clone();
 Ok(out)
 }
-fn a2147(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2175(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeFuncCall(&h::SystemFuncName(&V::s("pg_collation_for"))?, &h::list_make1(&y[3])?, &V::Int(3), &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a2148(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2176(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeSQLValueFunction(&V::Int(0), &V::Int(1).neg(), &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a2149(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2177(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeSQLValueFunction(&V::Int(1), &V::Int(1).neg(), &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a2150(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2178(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeSQLValueFunction(&V::Int(2), &y[2], &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a2151(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2179(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeSQLValueFunction(&V::Int(3), &V::Int(1).neg(), &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a2152(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2180(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeSQLValueFunction(&V::Int(4), &y[2], &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a2153(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2181(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeSQLValueFunction(&V::Int(5), &V::Int(1).neg(), &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a2154(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2182(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeSQLValueFunction(&V::Int(6), &y[2], &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a2155(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2183(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeSQLValueFunction(&V::Int(7), &V::Int(1).neg(), &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a2156(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2184(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeSQLValueFunction(&V::Int(8), &y[2], &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a2157(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2185(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeSQLValueFunction(&V::Int(9), &V::Int(1).neg(), &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a2158(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2186(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeSQLValueFunction(&V::Int(10), &V::Int(1).neg(), &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a2159(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2187(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeSQLValueFunction(&V::Int(12), &V::Int(1).neg(), &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a2160(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2188(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeFuncCall(&h::SystemFuncName(&V::s("system_user"))?, &V::Null, &V::Int(3), &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a2161(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2189(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeSQLValueFunction(&V::Int(11), &V::Int(1).neg(), &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a2162(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2190(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeSQLValueFunction(&V::Int(13), &V::Int(1).neg(), &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a2163(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2191(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeSQLValueFunction(&V::Int(14), &V::Int(1).neg(), &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a2164(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2192(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeTypeCast(&y[2], &y[4], &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a2165(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2193(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeFuncCall(&h::SystemFuncName(&V::s("extract"))?, &y[2], &V::Int(3), &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a2166(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2194(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeFuncCall(&h::SystemFuncName(&V::s("normalize"))?, &h::list_make1(&y[2])?, &V::Int(3), &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a2167(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2195(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeFuncCall(&h::SystemFuncName(&V::s("normalize"))?, &h::list_make2(&y[2], &h::makeStringConst(&y[4], &V::Int(l[4] as i64))?)?, &V::Int(3), &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a2168(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2196(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeFuncCall(&h::SystemFuncName(&V::s("overlay"))?, &y[2], &V::Int(3), &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a2169(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2197(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeFuncCall(&h::list_make1(&h::makeString(&V::s("overlay"))?)?, &y[2], &V::Int(0), &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a2170(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2198(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeFuncCall(&h::SystemFuncName(&V::s("position"))?, &y[2], &V::Int(3), &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a2171(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2199(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeFuncCall(&h::SystemFuncName(&V::s("substring"))?, &y[2], &V::Int(3), &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a2172(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2200(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeFuncCall(&h::list_make1(&h::makeString(&V::s("substring"))?)?, &y[2], &V::Int(0), &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a2173(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2201(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeFuncCall(&h::SystemFuncName(&h::strVal(&h::llast(&y[4].get(f::F_names)))?)?, &h::list_make1(&y[2])?, &V::Int(0), &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a2174(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2202(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeFuncCall(&h::SystemFuncName(&V::s("btrim"))?, &y[3], &V::Int(3), &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a2175(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2203(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeFuncCall(&h::SystemFuncName(&V::s("ltrim"))?, &y[3], &V::Int(3), &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a2176(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2204(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeFuncCall(&h::SystemFuncName(&V::s("rtrim"))?, &y[3], &V::Int(3), &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a2177(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2205(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeFuncCall(&h::SystemFuncName(&V::s("btrim"))?, &y[2], &V::Int(3), &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a2178(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2206(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeSimpleA_Expr(&V::Int(5), &V::s("="), &y[2], &y[4], &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a2179(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2207(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_c = V::node(t::T_CoalesceExpr);
 v_c.set(f::F_args, y[2].clone());
@@ -10383,7 +10596,7 @@ v_c.set(f::F_location, V::Int(l[0] as i64));
 out = v_c.clone();
 Ok(out)
 }
-fn a2180(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2208(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_v = V::node(t::T_MinMaxExpr);
 v_v.set(f::F_args, y[2].clone());
@@ -10392,7 +10605,7 @@ v_v.set(f::F_location, V::Int(l[0] as i64));
 out = v_v.clone();
 Ok(out)
 }
-fn a2181(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2209(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_v = V::node(t::T_MinMaxExpr);
 v_v.set(f::F_args, y[2].clone());
@@ -10401,64 +10614,64 @@ v_v.set(f::F_location, V::Int(l[0] as i64));
 out = v_v.clone();
 Ok(out)
 }
-fn a2182(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2210(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeXmlExpr(&V::Int(0), &V::Null, &V::Null, &y[2], &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a2183(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2211(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeXmlExpr(&V::Int(1), &y[3], &V::Null, &V::Null, &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a2184(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2212(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeXmlExpr(&V::Int(1), &y[3], &y[5], &V::Null, &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a2185(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2213(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeXmlExpr(&V::Int(1), &y[3], &V::Null, &y[5], &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a2186(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2214(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeXmlExpr(&V::Int(1), &y[3], &y[5], &y[7], &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a2187(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2215(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeFuncCall(&h::SystemFuncName(&V::s("xmlexists"))?, &h::list_make2(&y[2], &y[3])?, &V::Int(3), &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a2188(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2216(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeXmlExpr(&V::Int(2), &V::Null, &y[2], &V::Null, &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a2189(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2217(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_x = h::makeXmlExpr(&V::Int(3), &V::Null, &V::Null, &h::list_make2(&y[3], &h::makeBoolAConst(&y[4], &V::Int(1).neg())?)?, &V::Int(l[0] as i64))?;
 v_x.set(f::F_xmloption, y[2].clone());
 out = v_x.clone();
 Ok(out)
 }
-fn a2190(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2218(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeXmlExpr(&V::Int(4), &y[3], &V::Null, &V::Null, &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a2191(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2219(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeXmlExpr(&V::Int(4), &y[3], &V::Null, &h::list_make1(&y[5])?, &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a2192(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2220(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeXmlExpr(&V::Int(5), &V::Null, &V::Null, &h::list_make3(&y[2], &y[4], &y[5])?, &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a2193(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2221(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_XmlSerialize);
 v_n.set(f::F_xmloption, y[2].clone());
@@ -10469,12 +10682,12 @@ v_n.set(f::F_location, V::Int(l[0] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a2194(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2222(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeFuncCall(&h::SystemFuncName(&V::s("json_object"))?, &y[2], &V::Int(0), &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a2195(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2223(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_JsonObjectConstructor);
 v_n.set(f::F_exprs, y[2].clone());
@@ -10485,7 +10698,7 @@ v_n.set(f::F_location, V::Int(l[0] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a2196(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2224(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_JsonObjectConstructor);
 v_n.set(f::F_exprs, V::Null);
@@ -10496,7 +10709,7 @@ v_n.set(f::F_location, V::Int(l[0] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a2197(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2225(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_JsonArrayConstructor);
 v_n.set(f::F_exprs, y[2].clone());
@@ -10506,7 +10719,7 @@ v_n.set(f::F_location, V::Int(l[0] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a2198(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2226(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_JsonArrayQueryConstructor);
 v_n.set(f::F_query, y[2].clone());
@@ -10517,7 +10730,7 @@ v_n.set(f::F_location, V::Int(l[0] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a2199(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2227(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_JsonArrayConstructor);
 v_n.set(f::F_exprs, V::Null);
@@ -10527,7 +10740,7 @@ v_n.set(f::F_location, V::Int(l[0] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a2200(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2228(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_JsonParseExpr);
 v_n.set(f::F_expr, y[2].clone());
@@ -10537,7 +10750,7 @@ v_n.set(f::F_location, V::Int(l[0] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a2201(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2229(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_JsonScalarExpr);
 v_n.set(f::F_expr, y[2].clone());
@@ -10546,7 +10759,7 @@ v_n.set(f::F_location, V::Int(l[0] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a2202(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2230(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_JsonSerializeExpr);
 v_n.set(f::F_expr, y[2].clone());
@@ -10555,7 +10768,7 @@ v_n.set(f::F_location, V::Int(l[0] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a2203(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2231(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_m = V::node(t::T_MergeSupportFunc);
 v_m.set(f::F_msftype, V::Int(25));
@@ -10563,7 +10776,7 @@ v_m.set(f::F_location, V::Int(l[0] as i64));
 out = v_m.clone();
 Ok(out)
 }
-fn a2204(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2232(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_JsonFuncExpr);
 v_n.set(f::F_op, V::Int(1));
@@ -10579,7 +10792,7 @@ v_n.set(f::F_location, V::Int(l[0] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a2205(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2233(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_JsonFuncExpr);
 v_n.set(f::F_op, V::Int(0));
@@ -10592,7 +10805,7 @@ v_n.set(f::F_location, V::Int(l[0] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a2206(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2234(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_JsonFuncExpr);
 v_n.set(f::F_op, V::Int(2));
@@ -10606,32 +10819,32 @@ v_n.set(f::F_location, V::Int(l[0] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a2208(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2236(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeNullAConst(&V::Int(1).neg())?;
 
 Ok(out)
 }
-fn a2209(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2237(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeIntConst(&V::Int(0), &V::Int(1).neg())?;
 
 Ok(out)
 }
-fn a2210(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2238(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeIntConst(&V::Int(1), &V::Int(1).neg())?;
 
 Ok(out)
 }
-fn a2211(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2239(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeIntConst(&V::Int(2), &V::Int(1).neg())?;
 
 Ok(out)
 }
-fn a2212(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2240(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeIntConst(&V::Int(3), &V::Int(1).neg())?;
 
 Ok(out)
 }
-fn a2217(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2245(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::node(t::T_ResTarget);
 out.clone().set(f::F_name, V::Null);
 out.clone().set(f::F_indirection, V::Null);
@@ -10639,14 +10852,23 @@ out.clone().set(f::F_val, std::mem::take(&mut y[0]));
 out.clone().set(f::F_location, V::Int(l[0] as i64));
 Ok(out)
 }
-fn a2240(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2260(y: &mut [V], l: &[i32], here: i32) -> R {
+let mut out = y.first().cloned().unwrap_or(V::Null);
+let mut v_n = V::node(t::T_WaitStmt);
+v_n.set(f::F_lsn_literal, y[3].clone());
+v_n.set(f::F_options, y[4].clone());
+v_n.set(f::F_lsn_location, V::Int(l[3] as i64));
+out = v_n.clone();
+Ok(out)
+}
+fn a2274(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = y[2].clone();
 v_n.set(f::F_name, y[0].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a2242(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2276(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_WindowDef);
 v_n.set(f::F_name, y[1].clone());
@@ -10660,7 +10882,7 @@ v_n.set(f::F_location, V::Int(l[1] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a2244(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2278(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_WindowDef);
 v_n.set(f::F_name, V::Null);
@@ -10674,7 +10896,7 @@ v_n.set(f::F_location, V::Int(l[0] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a2249(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2283(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = y[1].clone();
 v_n.set(f::F_frameOptions, v_n.get(f::F_frameOptions).or(&V::Int(1).or(&V::Int(2))));
@@ -10682,7 +10904,7 @@ v_n.set(f::F_frameOptions, v_n.get(f::F_frameOptions).or(&y[2]));
 out = v_n.clone();
 Ok(out)
 }
-fn a2250(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2284(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = y[1].clone();
 v_n.set(f::F_frameOptions, v_n.get(f::F_frameOptions).or(&V::Int(1).or(&V::Int(4))));
@@ -10690,7 +10912,7 @@ v_n.set(f::F_frameOptions, v_n.get(f::F_frameOptions).or(&y[2]));
 out = v_n.clone();
 Ok(out)
 }
-fn a2251(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2285(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = y[1].clone();
 v_n.set(f::F_frameOptions, v_n.get(f::F_frameOptions).or(&V::Int(1).or(&V::Int(8))));
@@ -10698,7 +10920,7 @@ v_n.set(f::F_frameOptions, v_n.get(f::F_frameOptions).or(&y[2]));
 out = v_n.clone();
 Ok(out)
 }
-fn a2252(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2286(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_WindowDef);
 v_n.set(f::F_frameOptions, V::Int(1058));
@@ -10707,7 +10929,7 @@ v_n.set(f::F_endOffset, V::Null);
 out = v_n.clone();
 Ok(out)
 }
-fn a2253(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2287(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = y[0].clone();
 if v_n.get(f::F_frameOptions).and(&V::Int(128)).truthy() {
@@ -10720,7 +10942,7 @@ v_n.set(f::F_frameOptions, v_n.get(f::F_frameOptions).or(&V::Int(1024)));
 out = v_n.clone();
 Ok(out)
 }
-fn a2254(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2288(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n1 = y[1].clone();
 let mut v_n2 = y[3].clone();
@@ -10744,7 +10966,7 @@ v_n1.set(f::F_endOffset, v_n2.get(f::F_startOffset));
 out = v_n1.clone();
 Ok(out)
 }
-fn a2255(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2289(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_WindowDef);
 v_n.set(f::F_frameOptions, V::Int(32));
@@ -10753,7 +10975,7 @@ v_n.set(f::F_endOffset, V::Null);
 out = v_n.clone();
 Ok(out)
 }
-fn a2256(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2290(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_WindowDef);
 v_n.set(f::F_frameOptions, V::Int(128));
@@ -10762,7 +10984,7 @@ v_n.set(f::F_endOffset, V::Null);
 out = v_n.clone();
 Ok(out)
 }
-fn a2257(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2291(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_WindowDef);
 v_n.set(f::F_frameOptions, V::Int(512));
@@ -10771,7 +10993,7 @@ v_n.set(f::F_endOffset, V::Null);
 out = v_n.clone();
 Ok(out)
 }
-fn a2258(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2292(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_WindowDef);
 v_n.set(f::F_frameOptions, V::Int(2048));
@@ -10780,7 +11002,7 @@ v_n.set(f::F_endOffset, V::Null);
 out = v_n.clone();
 Ok(out)
 }
-fn a2259(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2293(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_WindowDef);
 v_n.set(f::F_frameOptions, V::Int(8192));
@@ -10789,107 +11011,107 @@ v_n.set(f::F_endOffset, V::Null);
 out = v_n.clone();
 Ok(out)
 }
-fn a2260(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2294(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::Int(32768);
 
 Ok(out)
 }
-fn a2261(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2295(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::Int(65536);
 
 Ok(out)
 }
-fn a2262(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2296(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::Int(131072);
 
 Ok(out)
 }
-fn a2267(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2301(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::lappend(&y[1], &y[3])?;
 
 Ok(out)
 }
-fn a2276(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2310(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::s("+");
 
 Ok(out)
 }
-fn a2277(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2311(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::s("-");
 
 Ok(out)
 }
-fn a2278(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2312(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::s("*");
 
 Ok(out)
 }
-fn a2279(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2313(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::s("/");
 
 Ok(out)
 }
-fn a2280(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2314(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::s("%");
 
 Ok(out)
 }
-fn a2281(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2315(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::s("^");
 
 Ok(out)
 }
-fn a2282(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2316(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::s("<");
 
 Ok(out)
 }
-fn a2283(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2317(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::s(">");
 
 Ok(out)
 }
-fn a2284(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2318(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::s("=");
 
 Ok(out)
 }
-fn a2285(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2319(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::s("<=");
 
 Ok(out)
 }
-fn a2286(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2320(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::s(">=");
 
 Ok(out)
 }
-fn a2287(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2321(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::s("<>");
 
 Ok(out)
 }
-fn a2294(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2328(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::list_make1(&h::makeString(&V::s("~~"))?)?;
 
 Ok(out)
 }
-fn a2295(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2329(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::list_make1(&h::makeString(&V::s("!~~"))?)?;
 
 Ok(out)
 }
-fn a2296(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2330(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::list_make1(&h::makeString(&V::s("~~*"))?)?;
 
 Ok(out)
 }
-fn a2297(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2331(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::list_make1(&h::makeString(&V::s("!~~*"))?)?;
 
 Ok(out)
 }
-fn a2303(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2337(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_na = V::node(t::T_NamedArgExpr);
 v_na.set(f::F_name, y[0].clone());
@@ -10899,107 +11121,107 @@ v_na.set(f::F_location, V::Int(l[0] as i64));
 out = v_na.clone();
 Ok(out)
 }
-fn a2309(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2343(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeAArrayExpr(&y[1], &V::Int(l[0] as i64), &V::Int(l[2] as i64))?;
 
 Ok(out)
 }
-fn a2311(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2345(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeAArrayExpr(&V::Null, &V::Int(l[0] as i64), &V::Int(l[1] as i64))?;
 
 Ok(out)
 }
-fn a2314(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2348(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::list_make2(&h::makeStringConst(&y[0], &V::Int(l[0] as i64))?, &y[2])?;
 
 Ok(out)
 }
-fn a2315(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2349(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::list_make2(&h::makeParamRef(&y[0], &V::Int(l[0] as i64))?, &y[2])?;
 
 Ok(out)
 }
-fn a2317(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2351(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::s("year");
 
 Ok(out)
 }
-fn a2318(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2352(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::s("month");
 
 Ok(out)
 }
-fn a2319(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2353(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::s("day");
 
 Ok(out)
 }
-fn a2320(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2354(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::s("hour");
 
 Ok(out)
 }
-fn a2321(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2355(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::s("minute");
 
 Ok(out)
 }
-fn a2322(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2356(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::s("second");
 
 Ok(out)
 }
-fn a2324(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2358(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::s("NFC");
 
 Ok(out)
 }
-fn a2325(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2359(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::s("NFD");
 
 Ok(out)
 }
-fn a2326(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2360(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::s("NFKC");
 
 Ok(out)
 }
-fn a2327(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2361(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::s("NFKD");
 
 Ok(out)
 }
-fn a2328(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2362(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::list_make4(&y[0], &y[2], &y[4], &y[6])?;
 
 Ok(out)
 }
-fn a2329(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2363(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::list_make3(&y[0], &y[2], &y[4])?;
 
 Ok(out)
 }
-fn a2330(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2364(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::list_make2(&y[2], &y[0])?;
 
 Ok(out)
 }
-fn a2332(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2366(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::list_make3(&y[0], &y[4], &y[2])?;
 
 Ok(out)
 }
-fn a2334(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2368(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::list_make3(&y[0], &h::makeIntConst(&V::Int(1), &V::Int(1).neg())?, &h::makeTypeCast(&y[2], &h::SystemTypeName(&V::s("int4"))?, &V::Int(1).neg())?)?;
 
 Ok(out)
 }
-fn a2336(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2370(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::lappend(&y[2], &y[0])?;
 
 Ok(out)
 }
-fn a2339(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2373(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_c = V::node(t::T_CaseExpr);
 v_c.set(f::F_casetype, V::Int(0));
@@ -11010,7 +11232,7 @@ v_c.set(f::F_location, V::Int(l[0] as i64));
 out = v_c.clone();
 Ok(out)
 }
-fn a2342(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2376(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_w = V::node(t::T_CaseWhen);
 v_w.set(f::F_expr, y[1].clone());
@@ -11019,22 +11241,22 @@ v_w.set(f::F_location, V::Int(l[0] as i64));
 out = v_w.clone();
 Ok(out)
 }
-fn a2347(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2381(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeColumnRef(&y[0], &V::Null, &V::Int(l[0] as i64), &V::Null)?;
 
 Ok(out)
 }
-fn a2348(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2382(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeColumnRef(&y[0], &y[1], &V::Int(l[0] as i64), &V::Null)?;
 
 Ok(out)
 }
-fn a2349(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2383(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeString(&y[1])?;
 
 Ok(out)
 }
-fn a2351(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2385(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_ai = V::node(t::T_A_Indices);
 v_ai.set(f::F_is_slice, V::Int(0));
@@ -11043,7 +11265,7 @@ v_ai.set(f::F_uidx, y[1].clone());
 out = v_ai.clone();
 Ok(out)
 }
-fn a2352(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2386(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_ai = V::node(t::T_A_Indices);
 v_ai.set(f::F_is_slice, V::Int(1));
@@ -11052,7 +11274,7 @@ v_ai.set(f::F_uidx, y[3].clone());
 out = v_ai.clone();
 Ok(out)
 }
-fn a2365(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2399(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_JsonArgument);
 v_n.set(f::F_val, y[0].clone());
@@ -11060,32 +11282,32 @@ v_n.set(f::F_name, y[2].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a2375(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2409(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeJsonBehavior(&V::Int(8), &y[1], &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a2376(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2410(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeJsonBehavior(&y[0], &V::Null, &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a2386(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2420(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::list_make2(&V::Null, &y[0])?;
 
 Ok(out)
 }
-fn a2387(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2421(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::list_make2(&y[0], &y[3])?;
 
 Ok(out)
 }
-fn a2391(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2425(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeJsonValueExpr(&y[0], &V::Null, &y[1])?;
 
 Ok(out)
 }
-fn a2392(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2426(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_encoding = V::Null;
 if V::b(!h::pg_strcasecmp(&y[3], &V::s("utf8"))?.truthy()).truthy() {
@@ -11104,17 +11326,17 @@ return Err(h::message("unrecognized JSON encoding: %s", &[y[3].clone()]));
 out = h::makeJsonFormat(&V::Int(1), &v_encoding, &V::Int(l[0] as i64))?;
 Ok(out)
 }
-fn a2393(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2427(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeJsonFormat(&V::Int(1), &V::Int(0), &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a2395(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2429(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeJsonFormat(&V::Int(0), &V::Int(0), &V::Int(1).neg())?;
 
 Ok(out)
 }
-fn a2401(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2435(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_JsonOutput);
 v_n.set(f::F_typeName, y[1].clone());
@@ -11123,12 +11345,12 @@ v_n.get(f::F_returning).set(f::F_format, y[2].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a2415(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2449(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeJsonKeyValue(&y[0], &y[2])?;
 
 Ok(out)
 }
-fn a2425(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2459(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_JsonObjectAgg);
 v_n.set(f::F_arg, y[2].clone());
@@ -11141,7 +11363,7 @@ v_n.get(f::F_constructor).set(f::F_location, V::Int(l[0] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a2426(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2460(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_JsonArrayAgg);
 v_n.set(f::F_arg, y[2].clone());
@@ -11153,7 +11375,7 @@ v_n.get(f::F_constructor).set(f::F_location, V::Int(l[0] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a2434(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2468(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = V::node(t::T_ResTarget);
 out.clone().set(f::F_name, std::mem::take(&mut y[1]));
 out.clone().set(f::F_indirection, V::Null);
@@ -11161,7 +11383,7 @@ out.clone().set(f::F_val, std::mem::take(&mut y[0]));
 out.clone().set(f::F_location, V::Int(l[0] as i64));
 Ok(out)
 }
-fn a2436(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2470(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_ColumnRef);
 v_n.set(f::F_fields, h::list_make1(&V::node(t::T_A_Star))?);
@@ -11173,34 +11395,34 @@ out.clone().set(f::F_val, v_n.clone());
 out.clone().set(f::F_location, V::Int(l[0] as i64));
 Ok(out)
 }
-fn a2439(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2473(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeRangeVar(&V::Null, &y[0], &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a2440(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2474(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeRangeVarFromQualifiedName(&y[0], &y[1], &V::Int(l[0] as i64), &V::Null)?;
 
 Ok(out)
 }
-fn a2447(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2481(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::check_func_name(&h::lcons(&h::makeString(&y[0])?, &y[1])?, &V::Null)?;
 
 Ok(out)
 }
-fn a2451(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2485(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeBitStringConst(&y[0], &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a2453(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2487(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_t = h::makeTypeNameFromNameList(&y[0])?;
 v_t.set(f::F_location, V::Int(l[0] as i64));
 out = h::makeStringConstCast(&y[1], &V::Int(l[1] as i64), &v_t)?;
 Ok(out)
 }
-fn a2454(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2488(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_t = h::makeTypeNameFromNameList(&y[0])?;
 let mut v_lc = V::Null;
@@ -11218,14 +11440,14 @@ v_t.set(f::F_location, V::Int(l[0] as i64));
 out = h::makeStringConstCast(&y[5], &V::Int(l[5] as i64), &v_t)?;
 Ok(out)
 }
-fn a2455(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2489(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_t = h::makeTypeNameFromNameList(&y[0])?;
 v_t.set(f::F_location, V::Int(l[0] as i64));
 out = h::makeParamRefCast(&y[1], &V::Int(l[1] as i64), &v_t)?;
 Ok(out)
 }
-fn a2456(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2490(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_t = h::makeTypeNameFromNameList(&y[0])?;
 let mut v_lc = V::Null;
@@ -11243,53 +11465,53 @@ v_t.set(f::F_location, V::Int(l[0] as i64));
 out = h::makeParamRefCast(&y[5], &V::Int(l[5] as i64), &v_t)?;
 Ok(out)
 }
-fn a2457(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2491(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeStringConstCast(&y[1], &V::Int(l[1] as i64), &y[0])?;
 
 Ok(out)
 }
-fn a2458(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2492(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_t = y[0].clone();
 v_t.set(f::F_typmods, y[2].clone());
 out = h::makeStringConstCast(&y[1], &V::Int(l[1] as i64), &v_t)?;
 Ok(out)
 }
-fn a2460(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2494(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeParamRefCast(&y[1], &V::Int(l[1] as i64), &y[0])?;
 
 Ok(out)
 }
-fn a2461(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2495(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_t = y[0].clone();
 v_t.set(f::F_typmods, y[2].clone());
 out = h::makeParamRefCast(&y[1], &V::Int(l[1] as i64), &v_t)?;
 Ok(out)
 }
-fn a2462(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2496(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_t = y[0].clone();
 v_t.set(f::F_typmods, h::list_make2(&h::makeIntConst(&V::Int(32767), &V::Int(1).neg())?, &h::makeIntConst(&y[2], &V::Int(l[2] as i64))?)?);
 out = h::makeParamRefCast(&y[4], &V::Int(l[4] as i64), &v_t)?;
 Ok(out)
 }
-fn a2463(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2497(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeBoolAConst(&V::Int(1), &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a2464(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2498(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeBoolAConst(&V::Int(0), &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a2470(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2504(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y[1].neg();
 
 Ok(out)
 }
-fn a2471(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2505(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_spc = y[0].clone();
 's6: {
@@ -11318,7 +11540,7 @@ break 's6;
 }
 Ok(out)
 }
-fn a2472(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2506(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::Null;
 if h::strcmp(&y[0], &V::s("public"))?.eq(&V::Int(0)).truthy() {
@@ -11335,17 +11557,17 @@ v_n.set(f::F_rolename, y[0].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a2473(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2507(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeRoleSpec(&V::Int(1), &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a2475(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2509(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::makeRoleSpec(&V::Int(3), &V::Int(l[0] as i64))?;
 
 Ok(out)
 }
-fn a2478(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2512(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_SelectStmt);
 v_n.set(f::F_distinctClause, y[0].clone());
@@ -11369,7 +11591,7 @@ v_n.set(f::F_lockingClause, y[9].clone());
 out = v_n.clone();
 Ok(out)
 }
-fn a2479(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2513(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = y.first().cloned().unwrap_or(V::Null);
 let mut v_n = V::node(t::T_PLAssignStmt);
 v_n.set(f::F_name, y[0].clone());
@@ -11379,7 +11601,7 @@ v_n.set(f::F_location, V::Int(l[0] as i64));
 out = v_n.clone();
 Ok(out)
 }
-fn a2481(y: &mut [V], l: &[i32], here: i32) -> R {
+fn a2515(y: &mut [V], l: &[i32], here: i32) -> R {
 let mut out = h::psprintf(&[V::s("$%d"), std::mem::take(&mut y[0])])?;
 
 Ok(out)
@@ -11387,4 +11609,4 @@ Ok(out)
 fn default_action(y: &mut [V], _: &[i32], _: i32) -> R {
 Ok(y.first().cloned().unwrap_or(V::Null))
 }
-pub static ACTIONS: [Action; 3450] = [default_action, default_action, a2, a3, a4, a5, a6, a7, a8, a9, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, a136, a137, a136, a137, a136, a141, a142, a141, a142, a142, a146, a147, default_action, default_action, default_action, a151, a136, a151, a136, a155, a156, a157, a158, a159, a160, a161, a162, a163, a164, a165, a137, a167, a168, a164, a170, a170, a172, a173, a173, a136, a176, a177, a178, a177, a178, a181, a182, a181, a184, a181, a182, a187, a188, a141, a190, a191, a192, a193, a194, a151, a136, default_action, default_action, default_action, default_action, default_action, default_action, a203, a204, a205, a206, a207, default_action, a209, a209, a211, a211, a137, a214, a215, a216, a217, a218, a219, a220, a221, a222, a223, a224, a225, a226, a227, a228, a229, a230, a231, a232, a233, a234, a235, a236, a237, a238, a239, a240, a241, a137, a232, a234, a232, a246, a247, a233, a136, a136, a137, a136, a136, a137, a137, a256, a137, a258, a259, a260, a261, a262, a256, a137, a256, a137, a267, a268, a269, a270, a271, a272, a136, a137, a141, a142, a277, a278, a279, a279, a281, a282, a283, a284, a285, a286, a287, a288, a289, a290, a291, a292, a293, a294, a295, a296, a297, a298, a299, a300, a301, a302, a303, a230, a231, a306, a307, a308, a309, a310, a311, a312, a313, a314, a315, a316, a317, a318, a319, a320, a321, a322, a323, a324, a325, a326, a327, a328, a329, a330, a331, a332, a333, a334, a335, a336, a337, a338, a339, a340, a341, a342, a343, a344, a345, a346, a347, a348, a349, a350, a351, a352, a353, a354, a355, a356, a357, a358, a359, a360, a361, a362, a363, a364, a365, a366, a367, a368, a369, a370, a371, a176, a136, a374, a136, a256, a136, a378, a379, a380, a381, a256, a256, a136, a230, a231, a387, a388, a389, a390, a230, a151, a393, a394, a395, a396, a397, a136, a137, a136, a401, a402, a403, a404, a405, a230, a231, a408, a230, a231, a411, a330, a331, a414, a415, a416, a417, a418, a141, a142, a141, a142, a137, a136, a136, a137, a256, a151, a136, a430, a431, a432, a433, a434, a435, a436, a437, a438, a439, a440, a441, a442, a443, a444, a430, a136, a447, a136, default_action, default_action, a230, a231, a453, a454, a137, a456, a457, a256, a136, a230, a231, a454, a463, a464, a465, a466, a467, a468, a469, a469, a469, a469, a473, a473, a475, a476, a137, a136, a256, a136, a230, a231, a230, a231, a137, a137, a137, a137, a137, a490, a491, a492, a256, a494, a137, a136, a256, a494, a137, a136, a151, a136, a503, a137, a137, a374, a507, a508, a509, a510, a511, a512, a513, a514, a515, a141, a142, a141, a519, a520, a521, a522, a522, a524, a525, a526, a527, a528, a529, a530, a531, a532, a142, a141, a535, a536, a537, a538, a539, a540, a541, a542, a543, a503, a137, a546, a547, a548, a549, a550, a551, a552, a553, a503, a137, a556, a557, a141, a142, a141, a142, a256, a136, a230, a231, a176, a136, a568, a569, a454, a176, a136, a573, a574, a521, a521, a230, a231, a579, a580, a176, a136, a583, a584, a585, a586, a587, a588, a176, a590, a591, a592, a593, a594, a176, a136, a137, a136, a599, a230, a231, a602, a603, a604, a256, a136, a256, a136, a136, a610, a535, a141, a142, a256, a136, a616, a136, a176, a619, a620, a230, a231, a623, a624, a625, a626, a627, a628, a629, a630, a141, a142, a141, a634, a635, a636, a475, a476, a639, a640, a641, a642, a643, a137, a136, a256, a136, a230, a151, a650, a651, a652, a653, a654, a655, a656, a657, a658, a659, a660, a661, a662, a393, a394, a665, default_action, default_action, a668, a669, a670, a397, a230, a231, a674, a675, a141, a142, a228, a679, a256, a136, a256, a136, a137, a136, default_action, default_action, a688, a256, a136, a691, a692, a693, a694, a151, a136, a697, a698, a699, a700, a701, a151, a136, a698, a705, a706, a707, a708, a709, a710, a711, a712, a713, a714, a715, a716, a717, a718, a719, a720, a721, a722, a230, a151, a137, a136, a727, a728, a176, a136, a230, a231, a176, a230, a231, a137, a737, a738, a739, a740, a137, a454, a743, a744, a256, a136, a256, a136, a137, a136, a751, a752, a753, a754, a755, a756, a757, a758, a141, a535, a761, a762, a763, a764, a137, a766, a767, a768, a769, a770, a771, a176, a136, a616, a136, a256, a777, a256, a136, a780, a141, a256, a783, a783, a785, a786, a787, a788, a789, a790, a469, a792, a793, a535, a142, a540, a137, a798, a799, a800, a801, a802, a803, a256, a136, a230, a151, a808, a141, a142, a141, a142, a137, a176, a142, default_action, default_action, a141, a142, a176, a136, default_action, default_action, a230, a231, a136, a827, a454, a454, a454, a256, a136, a142, a834, a141, a535, a536, a537, a539, a538, a540, a541, a843, a844, a230, a231, a847, a228, a229, a850, a851, a852, a853, a854, a855, a856, a857, a858, a859, a860, a861, a862, a863, a864, a865, a866, a867, a868, a869, a870, a871, a256, a230, a231, a387, a388, a137, a454, a137, a137, a454, a454, a256, a230, a231, a387, a137, a136, a228, a229, a891, a892, a893, a894, a895, a141, a142, a898, a230, a231, a901, a902, a903, a904, a905, a141, a142, a256, a136, a136, a616, a136, a913, a914, a915, a230, a231, a918, a919, a920, a921, a922, a923, a924, a925, a926, a927, a926, a927, a930, a931, a932, a933, a934, a935, a936, a937, a938, a939, a940, a941, a942, a943, a944, a537, a946, a947, a948, a949, a950, a137, a952, a953, a954, a955, a142, a957, a958, a539, a960, a961, a962, a963, a964, a965, a966, a230, a231, a228, a679, a971, a229, a230, a231, a975, a142, a141, a142, a979, a980, a981, a982, a983, a984, a985, a986, a987, a988, a989, a990, a991, a992, a993, a994, a995, a996, a137, a136, a999, a1000, a1001, a1002, a1003, a1004, a1005, a1006, a1007, a1008, a256, a136, a137, a136, a1013, a1014, a1015, a1016, a1017, a1018, a1019, a1020, a1021, a1022, a1023, a1024, a1017, a1026, a1027, a1018, a1029, a1030, default_action, default_action, default_action, default_action, a1035, a1036, a1037, a137, a136, a136, a1041, a1042, a230, a231, a1045, a1045, a1045, a1048, a1045, a228, a229, a227, a1053, a1054, a1055, a1056, a1057, a1058, a1059, a1060, a1061, a1062, a1063, a1064, a1065, a1066, a1067, a1068, a1069, a1070, a1071, a1072, a1073, a230, a231, a137, a256, a141, a142, a1080, a1081, a1082, a1083, a231, a230, a453, a1087, a1087, a1089, a176, a136, a1092, a151, a136, a1095, a1096, a1096, a1098, a1099, a1100, a938, a1102, a1102, a939, a1105, a962, a1107, a1108, a1109, a141, a142, a256, a1113, a230, a231, a1116, a1117, a1118, a1119, a1120, a176, a136, a230, a231, a256, a136, a141, a535, a142, a141, a535, a142, a1133, a1134, a1135, a1136, a141, a142, a256, a136, a230, a231, a230, a231, a1145, a1146, a1146, a1148, a256, a136, a230, a231, a1153, a1154, a1155, a1156, a1157, a790, a1159, a1160, a1160, a522, default_action, a137, a137, a1166, a1167, a137, a1169, a1169, a1171, a1172, a1173, a1174, a1175, a230, a231, a1178, a230, a231, default_action, a136, a230, a151, a1185, a1186, a1186, a1188, a1189, a1190, a1191, a1192, a1191, a1192, a1195, a1196, a1197, a1198, a1199, a1200, a1201, a1202, a1203, a1204, a1205, a1206, a137, a228, a1209, a1210, a137, a1212, a136, a1214, a136, default_action, default_action, a1212, a1219, a256, a136, a1222, a230, a231, a1225, a1226, a1227, a230, a151, default_action, default_action, a1232, a1233, a1234, a1235, a1236, a1237, a1238, a1239, a1240, a1241, a1242, a1243, a1244, a1245, a228, a1247, a230, a231, a1250, a1251, a230, a151, a1254, a1203, a1204, a1257, a1258, a1259, a142, a141, a610, a1263, a141, a142, a1266, a1267, a1268, a1269, a1270, a1271, a1272, a1273, a1274, a142, a141, a610, a536, a256, a136, a1281, a1282, a1283, a1284, a1285, a1286, a1287, a1288, a1289, a1290, a1291, a1292, a1293, a1294, a1295, a1296, a1297, a1298, a1299, a1300, a1301, a1302, a1303, a1304, a1305, a1306, a1307, a1308, a1309, a1310, a1311, a1312, a1313, a1314, a1315, a1316, a1317, a1318, a1319, a1320, a1321, a1322, a1323, a1324, a1325, a1326, a1327, a1291, a1291, a1330, a1331, a1332, a1333, a1334, a1335, a1336, a1337, default_action, default_action, a141, a142, a1342, a1343, a1344, a1345, a1346, a1347, a141, a142, a1350, a1351, a1352, a1353, a1354, a1355, a1356, a1357, a1358, a1359, a1360, a1361, a1362, a1363, a1364, a1365, a1366, a1367, a1368, a1369, a1370, a1371, a1372, a1373, a1374, a1375, a1376, a1377, a230, a231, a388, a387, a388, a137, a454, a137, a137, a454, a1388, a1389, a1390, a1391, a1392, a1393, a1394, a1395, a1396, a1397, a1398, a1399, a1400, a1401, a1402, a1403, a1404, a1405, a1406, a1407, a1408, a1409, a1410, a1411, a1412, a1413, a1414, a1415, a1416, a1417, a1418, a1419, a1420, a1421, a1422, a230, a231, a1425, a1426, a1427, a1428, a1429, a1430, a1431, a1432, a1433, a1434, a1435, a1436, a1437, a1438, a1439, a1440, a1441, a136, a230, a256, a1445, a1446, default_action, default_action, default_action, default_action, default_action, a137, a136, a141, a535, a536, a610, a141, a142, a142, a1461, a1462, a1463, a1464, a1465, a1466, a1467, a1468, a1466, a1470, a1471, a1472, a1473, a1474, a1475, a1476, a1477, a1478, a1468, default_action, default_action, default_action, a1483, a1484, a1485, a1486, a1487, a230, a231, a151, default_action, a136, a141, a142, a142, a1496, a1497, a1498, a1499, a535, a535, a141, a142, a1504, a1505, a137, a136, a230, a151, a387, a1511, a388, a137, a1514, a137, a137, a137, a137, a137, default_action, default_action, a1522, a1523, a1524, a1525, a1526, a1527, a1528, a1529, a1530, a230, a231, a1533, a1534, a1535, a1535, a1537, a1538, a1539, a1540, a1541, a1542, a1543, a1544, default_action, default_action, a1547, a1548, a1549, a1550, a1551, a1552, a1553, default_action, default_action, a1556, a1557, a1558, a1559, a1560, a1561, a256, a136, a1564, a1565, a1566, a1567, a230, a231, default_action, default_action, a453, a137, a1574, a1575, a454, a137, a136, a141, a142, a141, a142, a141, a142, a141, a142, a256, a136, a1589, a230, a231, a137, a136, a1594, a1595, a1596, a1597, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, a1608, a256, a136, default_action, default_action, default_action, default_action, default_action, a1616, a1617, a1618, a256, a136, a1621, a1622, a1623, a1623, a1625, a137, a1627, a1628, a1629, a1630, a1631, a1632, a141, a535, a230, a231, a1637, a1638, a1639, a136, a1641, a1642, a136, a1644, a136, a176, a136, a230, a231, a1650, a142, a141, a1653, a256, a136, a1656, a256, a537, a141, a535, a610, a536, a1663, a1664, a944, a537, a141, a142, a535, a141, a142, a1672, a137, a1674, a1675, a1676, a1637, a230, a231, a1680, a230, a151, a1683, a1683, a1683, a1686, a1686, a142, a141, a535, a535, a256, a136, a1694, a1695, a1696, a1697, a1698, a1699, a1700, a176, a1702, a137, a142, a1705, a1706, a1707, a1708, a1709, a142, a538, a142, default_action, default_action, a256, a256, a137, a1718, a1719, a1720, a1721, a1722, a1723, a1724, a137, a137, a1727, a1728, a137, a1730, a1731, a1732, a1733, a1734, a1734, a1736, a230, a231, a1739, a141, a535, a142, a1743, a1744, a136, a1746, a1747, a136, a137, a136, a1751, a136, a1753, a1753, a1755, a1755, a1757, a1757, a1759, a1760, a1761, default_action, default_action, a141, a535, a142, a1767, a616, default_action, default_action, a137, a136, a137, a136, a176, a230, a231, a1778, a1779, a1780, a1781, a137, a1783, a137, a136, a1786, a1787, a1788, a1789, a1790, a1791, a256, a256, a137, a1795, a137, a137, a1798, a1799, a1800, a1801, a142, a142, a142, a142, a1806, a1807, a230, a231, a137, a137, a137, a137, a137, a1815, a1816, a1817, a1818, a256, a136, a137, a136, a137, a136, a230, a151, a1827, a536, a610, a535, a141, a256, a136, a1834, a1835, a256, a136, a230, a231, a1840, a1841, a1842, a1843, a1844, a1845, a1846, a1847, a137, a1849, a1850, a1851, a256, a1853, a1854, a1855, a1856, a1857, a1858, a1859, a1860, a1861, a137, a136, a1859, a136, a1866, a1867, a1868, a1869, a569, a535, a141, a610, a142, default_action, default_action, a1877, a256, a1879, a137, a1879, a1882, a1883, a230, a231, a137, a1887, a1888, a1889, a176, a136, a1892, a1893, a1894, a230, a231, a176, a136, a141, a142, a256, a136, a256, a1904, a136, a137, a136, a230, a231, a1910, a1911, a1912, a230, a231, a1915, a1916, a1917, a230, a151, a1920, a1921, a1922, a1923, a1924, a230, a231, a1927, a1928, a1929, a256, a136, a230, a231, a1934, a1935, a1936, a1937, a1938, a1939, default_action, default_action, a1942, a136, a1944, a1945, a1946, a1947, a1948, a1949, a1950, a1951, a136, a137, a137, a137, a137, a137, a1958, a1959, a137, a137, a137, a137, a137, a137, a1966, a1967, a256, a136, a1970, a1970, a1972, a1973, a1974, a1975, a1976, a1977, a1977, a1977, a1980, a1981, a1982, a137, a137, a137, a1986, a1987, a1988, a137, a137, a137, a1986, a1993, a1994, a1995, a1995, a1997, a1998, a1998, a1995, a141, a142, a2003, a2004, a2005, a2006, a2007, a141, a142, a142, a2011, a2012, a2013, a2014, a2015, a137, a2017, a2018, a2019, a2020, a2021, a2022, a2023, a136, a2025, a2026, a2027, a137, a2029, a2030, a2031, a2032, a1798, a1799, a2035, a2036, a2037, a2038, a2039, a2040, a2041, a2042, a2043, a2044, a2045, a2046, a2047, a2048, a2049, a2050, a2051, a2051, a2053, a2054, a2055, a2056, a2057, a2058, a2059, a2060, a2061, a2062, a2063, a2064, a2065, a2065, a2067, a2067, a2069, a2070, a2071, a2072, a2073, a2074, a2075, a2076, a2077, a2078, a2079, a2080, a2081, a2082, a2083, a2084, a2085, a2086, a2087, a2088, a2089, a2090, a2091, a2092, a2093, a2094, a2095, a2096, a2097, a137, a2029, a1798, a1799, a2035, a2036, a2037, a2038, a2039, a2040, a2041, a2042, a2043, a2044, a2045, a2046, a2047, a2048, a2076, a2077, a2089, a2090, a137, a137, a2122, a2123, a137, a137, a2126, a2127, a2128, a2129, a2130, a2131, a2132, a2133, a2134, a2135, a2136, a2137, a2138, a2139, a2140, a2141, a2142, a137, a137, a137, a137, a2147, a2148, a2149, a2150, a2151, a2152, a2153, a2154, a2155, a2156, a2157, a2158, a2159, a2160, a2161, a2162, a2163, a2164, a2165, a2166, a2167, a2168, a2169, a2170, a2171, a2172, a2173, a2174, a2175, a2176, a2177, a2178, a2179, a2180, a2181, a2182, a2183, a2184, a2185, a2186, a2187, a2188, a2189, a2190, a2191, a2192, a2193, a2194, a2195, a2196, a2197, a2198, a2199, a2200, a2201, a2202, a2203, a2204, a2205, a2206, a256, a2208, a2209, a2210, a2211, a2212, a176, a230, a231, a1927, a2217, a142, a141, a141, a142, a142, a141, a142, a142, a256, a256, a176, a176, default_action, default_action, a616, a136, a616, a136, a256, a136, a230, a231, a2240, a256, a2242, a136, a2244, a137, a136, a176, a136, a2249, a2250, a2251, a2252, a2253, a2254, a2255, a2256, a2257, a2258, a2259, a2260, a2261, a2262, a142, a142, a176, a136, a2267, a176, a136, a2267, a535, a535, a141, a137, a137, a2276, a2277, a2278, a2279, a2280, a2281, a2282, a2283, a2284, a2285, a2286, a2287, a228, a176, a228, a176, a228, a176, a2294, a2295, a2296, a2297, a230, a231, a230, a231, a137, a2303, a2303, a137, a136, a230, a231, a2309, a2309, a2311, a230, a231, a2314, a2315, a137, a2317, a2318, a2319, a2320, a2321, a2322, a137, a2324, a2325, a2326, a2327, a2328, a2329, a2330, a2329, a2332, a579, a2334, a2329, a2336, a256, a137, a2339, a230, a151, a2342, a256, a136, a137, a136, a2347, a2348, a2349, a456, a2351, a2352, a137, a136, a230, a151, a136, a151, default_action, default_action, a256, a136, a230, a231, a2365, a141, a141, a610, a610, a535, a610, a535, a610, a142, a2375, a2376, a141, a142, a610, a536, a1663, a1664, a944, a1664, a1866, a2386, a2387, a569, a137, a136, a2391, a2392, a2393, a137, a2395, a141, a141, a535, a535, a142, a2401, a136, a142, a142, a535, a141, a610, a141, a141, a142, a142, a142, a230, a231, a2415, a2415, a142, a141, a142, a142, a141, a141, a230, a231, a2425, a2426, a176, a136, a137, a136, a230, a231, a1927, a2434, a2217, a2436, a230, a231, a2439, a2440, a228, a229, a137, a137, a137, a228, a2447, a1800, a1801, a232, a2451, a2451, a2453, a2454, a2455, a2456, a2457, a2458, a247, a2460, a2461, a2462, a2463, a2464, a1795, a137, a137, a137, a256, a2470, a2471, a2472, a2473, a766, a2475, a230, a231, a2478, a2479, a137, a2481, default_action, default_action, a137, a137, a137, a137, a137, a137, a137, a137, a137, a137, a137, a137, a137, a137, a137, a137, a137, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action];
+pub static ACTIONS: [Action; 3494] = [default_action, default_action, a2, a3, a4, a5, a6, a7, a8, a9, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, a137, a138, a137, a138, a137, a142, a143, a142, a143, a142, a143, a143, a149, a137, a151, a152, a153, a138, a155, a156, a157, a138, a137, a160, a161, default_action, default_action, default_action, a165, a137, a165, a137, a169, a170, a171, a172, a173, a174, a175, a176, a177, a178, a179, a138, a181, a182, a178, a184, a184, a186, a187, a187, a137, a190, a191, a192, a191, a192, a195, a196, a195, a198, a195, a196, a201, a202, a142, a204, a205, a206, a207, a208, a165, a137, default_action, default_action, default_action, default_action, default_action, default_action, a217, a218, a219, a220, a221, default_action, a223, a223, a225, a225, a227, a227, a138, a230, a231, a232, a233, a234, a235, a236, a237, a238, a239, a240, a241, a242, a243, a244, a245, a151, a152, a248, a249, a250, a251, a252, a253, a254, a255, a256, a257, a138, a248, a250, a248, a262, a263, a249, a137, a137, a138, a137, a137, a138, a138, a149, a138, a274, a275, a276, a277, a278, a149, a138, a149, a138, a283, a284, a285, a286, a287, a288, a137, a138, a142, a143, a293, a294, a295, a295, a297, a298, a299, a300, a301, a302, a303, a304, a305, a306, a307, a308, a309, a310, a311, a312, a313, a314, a315, a316, a317, a318, a319, a151, a152, a322, a323, a324, a325, a326, a327, a328, a329, a330, a331, a332, a333, a334, a335, a336, a337, a338, a339, a340, a341, a342, a343, a344, a345, a346, a347, a348, a349, a350, a351, a352, a353, a354, a355, a356, a357, a358, a359, a360, a361, a362, a363, a364, a365, a366, a367, a368, a369, a370, a371, a372, a373, a374, a375, a376, a377, a378, a379, a380, a381, a382, a383, a384, a385, a386, a387, a190, a137, a390, a137, a149, a137, a394, a395, a396, a397, a149, a149, a137, a151, a152, a403, a404, a405, a406, a151, a165, a409, a410, a411, a412, a413, a137, a138, a137, a417, a418, a419, a420, a421, a151, a152, a424, a151, a152, a427, a346, a347, a430, a431, a432, a433, a434, a142, a143, a142, a143, a138, a137, a137, a138, a149, a165, a137, a446, a447, a448, a449, a450, a451, a452, a453, a454, a455, a456, a457, a458, a459, a460, a461, a446, a137, a464, a137, default_action, default_action, a151, a152, a153, a471, a157, a138, a474, a475, a149, a137, a151, a152, a157, a481, a482, a483, a484, a485, a486, a487, a487, a487, a487, a491, a491, a493, a494, a138, a137, a149, a137, a151, a152, a151, a152, a138, a138, a138, a138, a138, a508, a509, a510, a149, a512, a138, a137, a149, a512, a138, a137, a165, a137, a521, a138, a138, a390, a525, a526, a527, a528, a529, a530, a531, a532, a533, a142, a143, a142, a537, a538, a539, a540, a540, a542, a543, a544, a545, a546, a547, a548, a549, a550, a143, a142, a553, a554, a555, a556, a557, a558, a559, a560, a561, a521, a138, a564, a565, a566, a567, a568, a569, a570, a571, a521, a138, a574, a575, a142, a143, a142, a143, a149, a137, a151, a152, a190, a137, a586, a587, a157, a190, a137, a591, a592, a539, a539, a151, a152, a597, a598, a190, a137, a601, a602, a603, a604, a605, a606, a190, a608, a609, a610, a611, a612, a190, a137, a138, a137, a617, a151, a152, a620, a621, a622, a149, a137, a149, a137, a137, a628, a553, a142, a143, a149, a137, a634, a137, a190, a637, a638, a151, a152, a641, a642, a643, a644, a645, a646, a647, a648, a142, a143, a142, a652, a653, a654, a493, a494, a657, a658, a659, a660, a661, a138, a137, a149, a137, a151, a165, a668, a669, a670, a671, a672, a673, a674, a675, a676, a677, a678, a679, a680, a409, a410, a683, default_action, default_action, a686, a687, a688, a413, a151, a152, a692, a693, a142, a143, a244, a697, a149, a137, a149, a137, a138, a137, default_action, default_action, a706, a149, a137, a709, a710, a711, a712, a165, a137, a715, a716, a717, a718, a719, a165, a137, a716, a723, a724, a725, a726, a727, a728, a729, a730, a731, a732, a733, a734, a735, a736, a737, a738, a739, a740, a741, a742, a151, a165, a138, a137, a747, a748, a190, a137, a151, a152, a190, a151, a152, a138, a757, a758, a759, a760, a138, a157, a763, a764, a149, a137, a149, a137, a138, a137, a771, a772, a773, a774, a775, a776, a777, a778, a142, a553, a781, a782, a783, a784, a138, a786, a787, a788, a789, a790, a791, a190, a137, a634, a137, a149, a797, a149, a137, a800, a142, a149, a803, a803, a805, a806, a807, a808, a809, a810, a487, a812, a813, a553, a143, a558, a138, a818, a819, a820, a821, a822, a823, a149, a137, a151, a165, a828, a142, a143, a142, a143, a138, a190, a143, default_action, default_action, a142, a143, a190, a137, default_action, default_action, a151, a152, a137, a847, a157, a157, a157, a149, a137, a143, a854, a142, a553, a554, a555, a557, a556, a558, a559, a863, a864, a151, a152, a867, a244, a245, a870, a871, a872, a873, a874, a875, a876, a877, a878, a879, a880, a881, a882, a883, a884, a885, a886, a887, a888, a889, a890, a891, a149, a151, a152, a403, a404, a138, a157, a138, a138, a157, a157, a149, a151, a152, a403, a138, a137, a244, a245, a911, a912, a913, a914, a915, a142, a143, a918, a151, a152, a921, a922, a923, a924, a925, a142, a143, a149, a137, a137, a634, a137, a933, a934, a935, a151, a152, a938, a939, a940, a941, a942, a943, a944, a945, a946, a947, a946, a947, a950, a951, a952, a953, a954, a955, a956, a957, a958, a959, a960, a961, a962, a963, a964, a555, a966, a967, a968, a969, a970, a138, a972, a973, a974, a975, a143, a977, a978, a557, a980, a981, a982, a983, a984, a985, a986, a151, a152, a244, a697, a991, a245, a151, a152, a995, a143, a142, a143, a999, a1000, a1001, a1002, a1003, a1004, a1005, a1006, a1007, a1008, a1009, a1010, a1011, a1012, a1013, a1014, a1015, a1016, a138, a137, a1019, a1020, a1021, a1022, a1023, a1024, a1025, a1026, a1027, a1028, a149, a137, a138, a137, a1033, a1034, a1035, a1036, a1037, a1038, a1039, a1040, a1041, a1042, a1043, a1044, a1045, a1046, a1047, a1048, a1049, a1050, default_action, default_action, default_action, default_action, a1055, a1056, a1057, a138, a137, a137, a1061, a1062, a151, a152, a1065, a1065, a1065, a1068, a1065, a244, a245, a243, a1073, a1074, a1075, a1076, a1077, a1078, a1079, a1080, a1081, a1082, a1083, a1084, a1085, a1086, a1087, a1088, a1089, a1090, a1091, a1092, a1093, a151, a152, a138, a149, a142, a143, a1100, a1101, a1102, a1103, a152, a151, a153, a1107, a1107, a1109, a190, a137, a1112, a165, a137, a1115, a1116, a1116, a1118, a1119, a1120, a958, a1122, a1122, a959, a1125, a982, a1127, a1128, a1129, a142, a143, a149, a1133, a151, a152, a1136, a1137, a1138, a1139, a1140, a190, a137, a151, a152, a149, a137, a142, a553, a143, a142, a553, a143, a1153, a1154, a1155, a1156, a142, a143, a149, a137, a151, a152, a151, a152, a1165, a1166, a1166, a1168, a149, a137, a151, a152, a1173, a1174, a1175, a1176, a1177, a810, a1179, a1180, a1180, a540, default_action, a138, a138, a1186, a1187, a138, a1189, a1189, a1191, a1192, a1193, a1194, a1195, a151, a152, a1198, a151, a152, default_action, a137, a151, a165, a1205, a1206, a1206, a1208, a1209, a1210, a1211, a1212, a1211, a1212, a1215, a1216, a1217, a1218, a1219, a1220, a1221, a1222, a1223, a1224, a1225, a1226, a138, a244, a1229, a1230, a138, a1232, a137, a1234, a137, default_action, default_action, a1232, a1239, a149, a137, a1242, a151, a152, a1245, a1246, a1247, a151, a165, default_action, default_action, a1252, a1253, a1254, a1255, a1256, a1257, a1258, a1259, a1260, a1261, a1262, a1263, a1264, a1265, a244, a1267, a151, a152, a1270, a1271, a151, a165, a1274, a1223, a1224, a1277, a1278, a1279, a143, a142, a628, a1283, a142, a143, a1286, a1287, a1288, a1289, a1290, a1291, a1292, a1293, a1294, a143, a142, a628, a554, a1299, a1300, a1301, a1302, a1303, a1304, a1305, a1306, a1307, a1308, a1309, a1310, a1311, a1312, a1313, a1314, a1315, a1316, a1317, a1318, a1319, a1320, a1321, a1322, a1323, a1324, a1325, a1326, a1327, a1328, a1329, a1330, a1331, a1332, a1333, a1334, a1335, a1336, a1337, a1338, a1339, a1340, a1341, a1342, a1343, a1344, a1345, a1309, a1309, a1348, a1349, a1350, a1351, a1352, a1353, a1354, a1355, default_action, default_action, a142, a143, a1360, a1361, a1362, a1363, a1364, a1365, a142, a143, a1368, a1369, a1370, a1371, a1372, a1373, a1374, a1375, a1376, a1377, a1378, a1379, a1380, a1381, a1382, a1383, a1384, a1385, a1386, a1387, a1388, a1389, a1390, a1391, a1392, a1393, a1394, a1395, a151, a152, a404, a403, a404, a138, a157, a138, a138, a157, a1406, a1407, a1408, a1409, a1410, a1411, a1412, a1413, a1414, a1415, a1416, a1417, a1418, a1419, a1420, a1421, a1422, a1423, a1424, a1425, a1426, a1427, a1428, a1429, a1430, a1431, a1432, a1433, a1434, a1435, a1436, a1437, a1438, a1439, a1440, a151, a152, a634, a137, a1445, a1446, a151, a152, a1449, a151, a1451, a1452, a1453, a1454, a1455, a1456, a1457, a1458, a1459, a1460, a1461, a1462, a1463, a1464, a1465, a1466, a1467, a1468, a1469, a1470, a1471, a1472, a137, a151, a149, a1476, a1477, default_action, default_action, default_action, default_action, default_action, a138, a137, a142, a553, a554, a628, a142, a143, a143, a1492, a1493, a1494, a1495, a1496, a1497, a1498, a1499, a1497, a1501, a1502, a1503, a1504, a1505, a1506, a1507, a1508, a1509, a1499, default_action, default_action, default_action, a1514, a1515, a1516, a1517, a1518, a151, a152, a165, default_action, a137, a142, a143, a143, a1527, a1528, a1529, a1530, a553, a553, a142, a143, a1535, a1536, a138, a137, a151, a165, a403, a1542, a404, a138, a1545, a138, a138, a138, a138, a138, default_action, default_action, a1553, a1554, a1555, a1556, a1557, a1558, a1559, a1560, a1561, a151, a152, a1564, a1565, a1566, a1566, a1568, a1569, a1570, a1571, a1572, a1573, a1574, a1575, default_action, default_action, a1578, a1579, a1580, a1581, a1582, a1583, a1584, default_action, default_action, a1587, a1588, a1589, a1590, a1591, a1592, a1593, a1594, a1595, a149, a137, a1598, a1599, a1600, a1601, default_action, default_action, a142, a143, a142, a143, a142, a143, a142, a143, a149, a137, a1614, a151, a152, a138, a137, a1619, a1620, a1621, a1622, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, a1633, a149, a137, default_action, default_action, default_action, default_action, default_action, a1641, a1642, a1643, a149, a137, a1646, a1647, a1648, a1648, a1650, a138, a1652, a1653, a1654, a1655, a1656, a1657, a142, a553, a151, a152, a1662, a1663, a1664, a1665, a137, a1667, a1668, a137, a1670, a137, a190, a137, a151, a152, a1676, a143, a142, a1679, a149, a137, a1682, a149, a555, a142, a553, a628, a554, a1689, a1690, a964, a555, a142, a143, a553, a142, a143, a1698, a138, a1700, a1701, a1702, a1662, a151, a152, a1706, a151, a165, a1709, a1709, a1709, a1712, a1712, a143, a142, a553, a553, a149, a137, a1720, a1721, a1722, a1723, a1724, a1725, a1726, a190, a1728, a138, a143, a1731, a1732, a1733, a1734, a1735, a143, a556, a143, default_action, default_action, a149, a149, a138, a1744, a1745, a1746, a1747, a1748, a1749, a1750, a138, a138, a1753, a1754, a138, a1756, a1757, a1758, a1759, a1760, a1760, a1762, a151, a152, a1765, a142, a553, a143, a1769, a1770, a137, a1772, a1773, a137, a138, a137, a1777, a137, a1779, a1779, a1781, a1781, a1783, a1783, a1785, a1786, a1787, default_action, default_action, a142, a553, a143, a1793, a634, default_action, default_action, a138, a137, a138, a137, a190, a151, a152, a1804, a1805, a1806, a1807, a138, a1809, a138, a137, a1812, a1813, a1814, a1815, a1816, a1817, a149, a149, a138, a1821, a138, a138, a1824, a1825, a1826, a1827, a143, a143, a143, a143, a1832, a1833, a151, a152, a138, a138, a138, a138, a138, a1841, a1842, a1843, a1844, a149, a137, a138, a137, a138, a137, a151, a165, a1853, a554, a628, a553, a142, a138, a143, a149, a137, a1862, a1863, a149, a137, a151, a152, a1868, a1869, a1870, a1871, a1872, a1873, a1874, a1875, a138, a1877, a1878, a1879, a149, a1881, a1882, a1883, a1884, a1885, a1886, a1887, a1888, a1889, a138, a137, a1887, a137, a1894, a1895, a1896, a1897, a587, a553, a142, a628, a143, default_action, default_action, a1905, a149, a1907, a138, a1907, a1910, a1911, a151, a152, a138, a1915, a1916, a1917, a190, a137, a1920, a1921, a1922, a151, a152, a190, a137, a142, a143, a149, a137, a149, a1932, a137, a138, a137, a151, a152, a1938, a1939, a1940, a151, a152, a1943, a1944, a1945, a151, a165, a1948, a1949, a1950, a1951, a1952, a151, a152, a1955, a1956, a1957, a149, a137, a151, a152, a1962, a1963, a1964, a1965, a1966, a1967, default_action, default_action, a1970, a137, a1972, a1973, a1974, a1975, a1976, a1977, a1978, a1979, a137, a138, a138, a138, a138, a138, a1986, a1987, a138, a138, a138, a138, a138, a138, a1994, a1995, a149, a137, a1998, a1998, a2000, a2001, a2002, a2003, a2004, a2005, a2005, a2005, a2008, a2009, a2010, a138, a138, a138, a2014, a2015, a2016, a138, a138, a138, a2014, a2021, a2022, a2023, a2023, a2025, a2026, a2026, a2023, a142, a143, a2031, a2032, a2033, a2034, a2035, a142, a143, a143, a2039, a2040, a2041, a2042, a2043, a138, a2045, a2046, a2047, a2048, a2049, a2050, a2051, a137, a2053, a2054, a2055, a138, a2057, a2058, a2059, a2060, a1824, a1825, a2063, a2064, a2065, a2066, a2067, a2068, a2069, a2070, a2071, a2072, a2073, a2074, a2075, a2076, a2077, a2078, a2079, a2079, a2081, a2082, a2083, a2084, a2085, a2086, a2087, a2088, a2089, a2090, a2091, a2092, a2093, a2093, a2095, a2095, a2097, a2098, a2099, a2100, a2101, a2102, a2103, a2104, a2105, a2106, a2107, a2108, a2109, a2110, a2111, a2112, a2113, a2114, a2115, a2116, a2117, a2118, a2119, a2120, a2121, a2122, a2123, a2124, a2125, a138, a2057, a1824, a1825, a2063, a2064, a2065, a2066, a2067, a2068, a2069, a2070, a2071, a2072, a2073, a2074, a2075, a2076, a2104, a2105, a2117, a2118, a138, a138, a2150, a2151, a138, a138, a2154, a2155, a2156, a2157, a2158, a2159, a2160, a2161, a2162, a2163, a2164, a2165, a2166, a2167, a2168, a2169, a2170, a138, a138, a138, a138, a2175, a2176, a2177, a2178, a2179, a2180, a2181, a2182, a2183, a2184, a2185, a2186, a2187, a2188, a2189, a2190, a2191, a2192, a2193, a2194, a2195, a2196, a2197, a2198, a2199, a2200, a2201, a2202, a2203, a2204, a2205, a2206, a2207, a2208, a2209, a2210, a2211, a2212, a2213, a2214, a2215, a2216, a2217, a2218, a2219, a2220, a2221, a2222, a2223, a2224, a2225, a2226, a2227, a2228, a2229, a2230, a2231, a2232, a2233, a2234, a149, a2236, a2237, a2238, a2239, a2240, a190, a151, a152, a1955, a2245, a143, a142, a142, a143, a143, a142, a143, a143, a149, a149, a190, a190, default_action, default_action, a2260, a190, a137, a634, a137, a634, a137, a142, a553, a143, a149, a137, a151, a152, a2274, a149, a2276, a137, a2278, a138, a137, a190, a137, a2283, a2284, a2285, a2286, a2287, a2288, a2289, a2290, a2291, a2292, a2293, a2294, a2295, a2296, a143, a143, a190, a137, a2301, a190, a137, a2301, a553, a553, a142, a138, a138, a2310, a2311, a2312, a2313, a2314, a2315, a2316, a2317, a2318, a2319, a2320, a2321, a244, a190, a244, a190, a244, a190, a2328, a2329, a2330, a2331, a151, a152, a151, a152, a138, a2337, a2337, a138, a137, a151, a152, a2343, a2343, a2345, a151, a152, a2348, a2349, a138, a2351, a2352, a2353, a2354, a2355, a2356, a138, a2358, a2359, a2360, a2361, a2362, a2363, a2364, a2363, a2366, a597, a2368, a2363, a2370, a149, a138, a2373, a151, a165, a2376, a149, a137, a138, a137, a2381, a2382, a2383, a474, a2385, a2386, a138, a137, a151, a165, a137, a165, default_action, default_action, a149, a137, a151, a152, a2399, a142, a142, a628, a628, a553, a628, a553, a628, a143, a2409, a2410, a142, a143, a628, a554, a1689, a1690, a964, a1690, a1894, a2420, a2421, a587, a138, a137, a2425, a2426, a2427, a138, a2429, a142, a142, a553, a553, a143, a2435, a137, a143, a143, a553, a142, a628, a142, a142, a143, a143, a143, a151, a152, a2449, a2449, a143, a142, a143, a143, a142, a142, a151, a152, a2459, a2460, a190, a137, a138, a137, a151, a152, a1955, a2468, a2245, a2470, a151, a152, a2473, a2474, a244, a245, a138, a138, a138, a244, a2481, a1826, a1827, a248, a2485, a2485, a2487, a2488, a2489, a2490, a2491, a2492, a263, a2494, a2495, a2496, a2497, a2498, a1821, a138, a138, a138, a149, a2504, a2505, a2506, a2507, a786, a2509, a151, a152, a2512, a2513, a138, a2515, default_action, default_action, a138, a138, a138, a138, a138, a138, a138, a138, a138, a138, a138, a138, a138, a138, a138, a138, a138, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action, default_action];

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { arrayLiteral } from "../src/execute.ts";
+import { columnKind } from "../src/values.ts";
 import { execute, executeSync, type QueryModule } from "./run.ts";
 import { checks, defineQuery } from "../src/index.ts";
 import type { EngineType, JsonSchema } from "../src/engine-type.ts";
@@ -474,6 +475,32 @@ test("postgres: a pgvector vector parameter takes an array of finite numbers, wr
   await assert.rejects(execute(client as never, nearest, { q: [1], qs: [[1], [NaN]], h: null }) as Promise<unknown>, /element at \[0\] is NaN/);
 });
 
+test("postgres: an array parameter tells its levels from its elements by the element's own value, at any depth, as `.run()` reads them", async () => {
+  const seen: unknown[][] = [];
+  const client = { query: async (config: { values: unknown[] }) => (seen.push(config.values), { rows: [], fields: [] }), getTypeParser: () => String };
+  // A vector its numbers, a segment and a polygon their points, a multirange its ranges: an array
+  // holding no array and no null is one of them, and any other a level of the array around it.
+  const types = { v: array(pgType("vector")), s: array(pgType("lseg")), g: array(pgType("polygon")), m: array(pgType("int4multirange")), b: array(pgType("box")), i: array(pgType("int4")), j: array({ kind: "json" }) };
+  const sql = "select $1::vector[], $2::lseg[], $3::polygon[], $4::int4multirange[], $5::box[], $6::int4[], $7::jsonb[]";
+  const q: QueryModule<"postgres"> = { dialect: "postgres", sql, text: sql, params: Object.keys(types), order: Object.keys(types), inputs: Object.fromEntries(Object.entries(types).map(([k, type]) => [k, { type, ...(k === "b" ? { delimiter: ";" } : {}) }])) };
+  const seg = [{ x: 0, y: 0 }, { x: 1, y: 1 }];
+  const range = { lower: 1, upper: 3, bounds: "[)" };
+  const box = { high: { x: 1, y: 1 }, low: { x: 0, y: 0 } };
+  const at = (depth: number, e: unknown): unknown => (depth === 0 ? e : [at(depth - 1, e), at(depth - 1, e)]);
+  for (const depth of [1, 2, 3]) {
+    await execute(client as never, q, { v: at(depth, [1, 2]), s: at(depth, seg), g: at(depth, seg), m: at(depth, [range]), b: at(depth, box), i: at(depth, 7), j: at(1, [1, null]) });
+    const literal = (text: string, delim = ","): string => arrayLiteral(at(depth, text) as unknown[], delim);
+    assert.deepEqual(seen.at(-1), [literal("[1,2]"), literal("[(0,0),(1,1)]"), literal("((0,0),(1,1))"), literal('{["1","3")}'), literal("(1,1),(0,0)", ";"), literal("7"), '{"[1,null]","[1,null]"}'], `depth ${depth}`);
+  }
+  // An empty multirange is one value; a JSON element's own null is its value's, never the array's.
+  await execute(client as never, q, { v: [], s: [], g: [], m: [[[]]], b: [], i: [], j: [[null]] });
+  assert.deepEqual(seen.at(-1), ["{}", "{}", "{}", '{{"{}"}}', "{}", "{}", '{"[null]"}']);
+  // A hole is an undefined, so an array holding one is a level, whose element it is.
+  await assert.rejects(execute(client as never, q, { v: [], s: [], g: [], m: [new Array(1)], b: [], i: [], j: [] }) as Promise<unknown>, /Parameter "m" is an array whose elements may not be null, and the element at \[0\]\[0\] is/);
+  // A NULL is an element of the level around it, which a parameter's elements may not be.
+  await assert.rejects(execute(client as never, q, { v: [[null, null], [[1], [2]]], s: [], g: [], m: [], b: [], i: [], j: [] }) as Promise<unknown>, /Parameter "v" is an array whose elements may not be null, and the element at \[0\]\[0\] is/);
+});
+
 test("postgres: a float of -0 goes as the text -0, which pg, postgres.js, PGlite and Neon would write as 0, alone and inside an array, a vector or a row value; every other float as the number it is", async () => {
   const seen: unknown[][] = [];
   const client = { query: async (config: { values: unknown[] }) => (seen.push(config.values), { rows: [], fields: [] }), getTypeParser: () => String };
@@ -940,6 +967,43 @@ test("postgres: an array of a domain over an array type comes back as whole arra
       await assert.rejects(async () => stamps.run(c, { x: [["2026-10-12 19:06:48"]] }), /Parameter "x" is a timestamptz, an instant, so a string for it names its zone/, name);
       const id = { pg: 6, "postgres.js": 7, PGlite: 8 }[name];
       assert.deepEqual({ ...(await insert.run(c, { id, x: [[7, 8], [], [9]] })) }, { x: [[7, 8], [], [9]] }, name);
+    }
+  } finally {
+    await client.end();
+    await lite.close();
+    await own.drop();
+  }
+});
+
+test("postgres: under allow_nested_arrays, an array of every element whose value is an array or an object comes back and goes back in at depths 1 to 3 on pg, postgres.js and PGlite", { skip: pgLive }, async () => {
+  const own = await postgresDatabase("reylo_execute_nested_arrays");
+  const pg = driver("pg");
+  const client = new pg.Client(own.url);
+  await client.connect();
+  const { PGlite } = driver("@electric-sql/pglite");
+  const lite = new PGlite();
+  // Each element type and its value's text, beside types whose value is no array.
+  const elements: [string, string, string?][] = [
+    ["lseg", "[(0,0),(1,1)]"], ["polygon", "((0,0),(1,1),(1,0))"], ["int4multirange", "{[1,3),[5,7)}"], ["int4multirange", "{}"], ["box", "(1,1),(0,0)"], ["point", "(1,2)"],
+    ["circle", "<(0,0),1>"], ["path", "[(0,0),(1,1)]"], ["line", "{1,2,3}"], ["int4range", "[1,3)"], ["int4", "7"], ["bytea", "\\x0102"], ["bit", "101", "bit(3)"],
+  ];
+  try {
+    for (const [name, text, cast = name] of elements) {
+      const type = array({ ...pgType(name), label: name } as EngineType, false, `_${name}`);
+      const delim = name === "box" ? ";" : ",";
+      const kind = columnKind(type, "postgres");
+      for (const depth of [1, 2, 3]) {
+        let literal = `"${text.replace(/["\\]/g, "\\$&")}"`;
+        for (let d = 0; d < depth; d++) literal = `{${literal}${delim}${literal}}`;
+        const value = `'${literal.replace(/'/g, "''")}'::${cast}[]`;
+        const read = defineQuery({ dialect: "postgres", sql: `select ${value} as a`, params: [], cardinality: "one", columns: [delim === "," ? ["a", kind] : ["a", kind, delim]], nestedArrays: true });
+        const back = defineQuery({ dialect: "postgres", sql: `select ($1::${cast}[])::text as a, (${value})::text as b`, params: ["p"], cardinality: "one", inputs: { p: { type, ...(delim === "," ? {} : { delimiter: delim }) } }, nestedArrays: true });
+        for (const [driverName, c] of [["pg", client], ["postgres.js", own.sql], ["PGlite", lite]] as const) {
+          const { a } = (await read.run(c as never)) as { a: unknown };
+          const { a: written, b: want } = (await back.run(c as never, { p: a })) as { a: string; b: string };
+          assert.equal(written, want, `${name} at depth ${depth} on ${driverName}`);
+        }
+      }
     }
   } finally {
     await client.end();

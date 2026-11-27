@@ -11,6 +11,7 @@ import { appendFileSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { defineQuery } from "../../../src/index.ts";
+import { columnKind } from "../../../src/values.ts";
 import { handWritten } from "./hand-written.ts";
 
 export type Dialect = "postgres" | "mysql" | "sqlite";
@@ -531,6 +532,41 @@ type Scenario = {
   params?: false;
   run(ctx: Ctx, client: Client, q: ReturnType<typeof queries>): Promise<string | void>;
 };
+
+// Postgres: an array of each built-in element whose value is an array (a segment, a polygon, a
+// multirange) or an object (a box, a point, a range), and of one that is neither, at depths 1 to 3,
+// read and passed back under `allow_nested_arrays` (`nestedArrays`), each parameter of its type.
+const float8 = { kind: "float", exponent_bits: 11, mantissa_bits: 52, label: "float8" };
+const point = { kind: "struct", label: "point", fields: [{ name: "x", type: float8 }, { name: "y", type: float8 }] };
+const NESTED: [name: string, element: object, text: string][] = [
+  ["lseg", { kind: "array", label: "lseg", size: { exact: 2 }, element: { type: point } }, "[(0,0),(1,1)]"],
+  ["polygon", { kind: "array", label: "polygon", size: { min: 1 }, element: { type: point } }, "((0,0),(1,1),(1,0))"],
+  ["int4multirange", { kind: "multirange", label: "int4multirange", subtype: T.int4 }, "{[1,3),[5,7)}"],
+  ["box", { kind: "struct", label: "box", fields: [{ name: "high", type: point }, { name: "low", type: point }] }, "(1,1),(0,0)"],
+  ["point", point, "(1,2)"],
+  ["int4range", { kind: "range", label: "int4range", subtype: T.int4 }, "[1,3)"],
+  ["int4", T.int4, "7"],
+];
+const nestedQueries = new Map<string, { read: any; back: any }>();
+function nestedQuery(name: string, element: object, text: string, depth: number) {
+  const key = `${name} ${depth}`;
+  let found = nestedQueries.get(key);
+  if (found === undefined) {
+    const type = array(element, `_${name}`);
+    const delim = name === "box" ? ";" : ",";
+    let literal = `"${text}"`;
+    for (let d = 0; d < depth; d++) literal = `{${literal}${delim}${literal}}`;
+    const value = `'${literal}'::${name}[]`;
+    const kind = columnKind(type as never, "postgres");
+    const extra = delim === "," ? {} : { delimiter: delim };
+    found = {
+      read: defineQuery<any, any, any, any>({ dialect: "postgres", ...handWritten(`select ${value} as a`, "postgres", []), cardinality: "one", columns: [delim === "," ? ["a", kind] : ["a", kind, delim]], nestedArrays: true }),
+      back: defineQuery<any, any, any, any>({ dialect: "postgres", ...handWritten(`select (:p::${name}[])::text = (${value})::text as same`, "postgres", ["p"]), cardinality: "one", inputs: { p: { type, ...extra } }, columns: [["same", "bool"]], nestedArrays: true }),
+    };
+    nestedQueries.set(key, found);
+  }
+  return found;
+}
 
 const SENTINEL = "dm-sentinel-rollback";
 export function sentinel(): Error {
@@ -1141,6 +1177,20 @@ export const SCENARIOS: Scenario[] = [
         typedEq(await call(ctx, q.infiniteBack, client, { doc, zx: -0 }), { doc: { n: -Infinity, r: Infinity }, zx: d1Json(ctx) ? 0 : -0 }, "the infinities passed back, and -0");
       } else {
         typedEq(await call(ctx, q.zeroBack, client, { doc: { z: -0 } }), { doc: true }, "-0 inside the document");
+      }
+    },
+  },
+  {
+    id: "S12 nested arrays: under allow_nested_arrays, an array of segments, polygons, multiranges, boxes, points, ranges or integers comes back and goes back in at depths 1 to 3",
+    on: "client",
+    dialects: ["postgres"],
+    async run(ctx, client) {
+      for (const [name, element, text] of NESTED) {
+        for (const depth of [1, 2, 3]) {
+          const { read, back } = nestedQuery(name, element, text, depth);
+          const { a } = await call(ctx, read, client);
+          eq(await call(ctx, back, client, { p: a }), { same: true }, `${name} at depth ${depth}, passed back`);
+        }
       }
     },
   },

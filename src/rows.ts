@@ -6,10 +6,10 @@
 // written again without the keys a call leaves out, so every row of a call gives the same keys.
 // Nothing here changes a value: a value the database would round, truncate or read in a zone
 // nobody chose is refused.
-import type { EngineType, JsonSchema } from "./engine-type.ts";
+import { holdsWholeArrays, type EngineType, type JsonSchema } from "./engine-type.ts";
 import type { Marks } from "./execute.ts";
 import { validate, withDefaults } from "./json-schema.ts";
-import { columnKind, describe, given, hstoreText, ParameterError, postgresInterval, postgresLiteral, postgresYear, RawJson as Raw, vectorText, writeJson, zoned } from "./values.ts";
+import { columnKind, delimiterOf, describe, given, hstoreText, isLevel, ParameterError, postgresInterval, postgresLiteral, postgresYear, RawJson as Raw, vectorText, writeJson, zoned } from "./values.ts";
 
 export { describe, zoned } from "./values.ts";
 
@@ -123,6 +123,17 @@ function jsonMember(f: RowField, v: unknown, dialect: Dialect, fail: (message: s
   return dialect !== "postgres" && f.type.kind === "json" ? new Raw(writeJson(v, dialect, fail)!) : v;
 }
 
+/**
+ * A whole array's text, from the value `check` gave it: each element in its checked form, a row
+ * value, a range, a geometric type and a vector already its text, so that an array there is a level.
+ */
+function wholeText(t: EngineType & { kind: "array" }, v: readonly unknown[]): string {
+  const element = t.element.type;
+  const json = columnKind(element, "postgres") === "json";
+  const quote = (text: string) => `"${text.replace(/["\\]/g, "\\$&")}"`;
+  return `{${v.map((e) => (e === null || e === undefined ? "NULL" : json ? quote(writeJson(e, "postgres", (message) => { throw new ParameterError(message); }) as string) : Array.isArray(e) ? wholeText(t, e) : quote(Object.is(e, -0) ? "-0" : String(e)))).join(delimiterOf(element) ?? ",")}}`;
+}
+
 /** One value checked against its type, as the JSON the database reads; `fail` says why not. */
 function check(type: EngineType, written: string, v: unknown, dialect: Dialect, fail: (message: string) => never): unknown {
   switch (type.kind) {
@@ -147,7 +158,23 @@ function check(type: EngineType, written: string, v: unknown, dialect: Dialect, 
       if (columnKind(type, dialect).endsWith("[]")) {
         if (!Array.isArray(v)) return fail(`is ${written}, an array; got ${describe(v)}.`);
         const element = written.replace(/\s*\[\s*\]\s*$/, "");
-        return v.map((e, i) => (e === null ? null : check(type.element.type, element, e, dialect, (message) => fail(`element ${i + 1} ${message}`))));
+        // A level of a Postgres array is told from one element as a parameter tells it (src/values.ts).
+        const kind = columnKind(type.element.type, dialect);
+        // Each element of an array of whole arrays (a domain's over an array type) is one, whatever
+        // it holds, and goes as its text, as a parameter of its own does: Postgres reads a JSON
+        // array inside a member as one more dimension.
+        const whole = dialect === "postgres" && holdsWholeArrays(type);
+        return v.map((e, i) => {
+          if (e === null) return null;
+          const at = (message: string) => fail(`element ${i + 1} ${message}`);
+          if (whole) {
+            const checked = check(type.element.type, element, e, dialect, at);
+            const inner = type.element.type;
+            return Array.isArray(checked) && inner.kind === "array" ? wholeText(inner, checked) : checked;
+          }
+          const level = dialect === "postgres" && Array.isArray(e) && isLevel(kind, e);
+          return check(level ? type : type.element.type, level ? written : element, e, dialect, at);
+        });
       }
       break;
     case "struct":
