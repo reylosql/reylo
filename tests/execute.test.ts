@@ -147,6 +147,83 @@ test("postgres: a JSON parameter's value is a JavaScript value, which every driv
   for (const values of seen) assert.deepEqual(values, jsonTexts);
 });
 
+test("a JSON parameter's NaN, infinities and -0 go in as each database's JSON reads them, a json[] element's and a structured parameter's JSON member's too, on every driver, and are refused where the database holds none", async () => {
+  const json = { type: { kind: "json" } } as const;
+  const doc = { nan: NaN, inf: Infinity, neg: -Infinity, z: -0 };
+  // Postgres writes a float's NaN and infinities inside a document as their text.
+  const pq: QueryModule<"postgres"> = { dialect: "postgres", sql: "select :doc::jsonb, :docs::jsonb[]", params: ["doc", "docs"], inputs: { doc: json, docs: { type: array({ kind: "json" }) } } };
+  const pgText = `{"nan":"NaN","inf":"Infinity","neg":"-Infinity","z":-0}`;
+  const seen: unknown[][] = [];
+  await execute(pgPool(async (_: string, values?: unknown[]) => (seen.push(values!), { rows: [] })), pq, { doc, docs: [doc, -0] });
+  const unwrap = (v: unknown) => (v !== null && typeof v === "object" ? (v as { value: unknown }).value : v);
+  await execute(postgresJsSql((_, values) => void seen.push(values.map(unwrap))), pq, { doc, docs: [doc, -0] });
+  // Bun.sql serializes a JSON parameter's value itself, so it gets one whose JSON is the text, -0 included.
+  const unsafe = async (_: string, values?: unknown[]) => (seen.push(values!.map((v) => (v !== null && typeof v === "object" ? JSON.stringify(v) : v))), []);
+  await execute({ unsafe, commitDistributed: async () => {} }, pq, { doc, docs: [doc, -0] });
+  await execute({ unsafe, commitDistributed: async () => {}, options: { prepare: false } }, pq, { doc, docs: [doc, -0] });
+  for (const values of seen) assert.deepEqual(values, [pgText, `{"${pgText.replace(/"/g, '\\"')}","-0"}`]);
+  // MySQL and SQLite read -0 from `-0e0`; SQLite an infinity from a number past a double's range.
+  const mq: QueryModule<"mysql"> = { dialect: "mysql", sql: "select cast(:doc as json)", params: ["doc"], inputs: { doc: json } };
+  const lq: QueryModule<"sqlite"> = { dialect: "sqlite", sql: "select json(:doc)", params: ["doc"], inputs: { doc: json } };
+  const mysql2 = { query: async () => [[], []] as [unknown, unknown], execute: async (_: unknown, v?: unknown[]) => (seen.push(v!), [[], []] as [unknown, unknown]) };
+  const libsql = { execute: async (q: { args: unknown[] }) => (seen.push(q.args), { rows: [] }), executeMultiple: async () => {} };
+  seen.length = 0;
+  await execute(mysql2, mq, { doc: { z: -0, n: [1.5, -0] } });
+  await execute(libsql, lq, { doc: { inf: Infinity, neg: -Infinity, z: -0 } });
+  assert.deepEqual(seen, [[`{"z":-0e0,"n":[1.5,-0e0]}`], [`{"inf":9e999,"neg":-9e999,"z":-0e0}`]]);
+  // MySQL holds no NaN or infinity, and SQLite no NaN: the parameter is refused before any client is called.
+  await assert.rejects(Promise.resolve().then(() => execute(mysql2, mq, { doc: { a: [Infinity] } })), /^TypeError: Parameter "doc" at \/a\/0 is Infinity, which MySQL holds no value for: write null or a string in its place\.$/);
+  await assert.rejects(Promise.resolve().then(() => execute(libsql, lq, { doc: { nan: NaN } })), /^TypeError: Parameter "doc" at \/nan is NaN, which SQLite holds no value for/);
+  await assert.rejects(Promise.resolve().then(() => execute(pgPool(async () => ({ rows: [] })), pq, { doc: null, docs: [{ n: 1n }] })), /BigInt/);
+  assert.equal(seen.length, 2);
+});
+
+test("NaN and the infinities go only where the database holds them: MySQL holds neither, SQLite no NaN, which its drivers bind as NULL, and a Postgres numeric with a precision no infinity", async () => {
+  const seen: unknown[][] = [];
+  const mysql2 = { query: async () => [[], []] as [unknown, unknown], execute: async (_: unknown, v?: unknown[]) => (seen.push(v!), [[], []] as [unknown, unknown]) };
+  const mq: QueryModule<"mysql"> = { dialect: "mysql", sql: "select :d, :n", params: ["d", "n"], inputs: { d: { type: myType("double") }, n: { type: myType("decimal") } } };
+  for (const v of [NaN, Infinity, -Infinity]) await assert.rejects(Promise.resolve().then(() => execute(mysql2, mq, { d: v, n: 1 })), new RegExp(`^TypeError: Parameter "d" is ${v}, which MySQL holds no value for\\.$`));
+  await assert.rejects(Promise.resolve().then(() => execute(mysql2, mq, { d: 1, n: NaN })), /Parameter "n" is NaN, which MySQL holds no value for/);
+  const db = new DatabaseSync(":memory:");
+  const lq: QueryModule<"sqlite"> = { dialect: "sqlite", ...handWritten("select :r as r, :u as u", "sqlite"), inputs: { r: { type: liteType("real") }, u: { type: { kind: "unknown" } } } };
+  assert.throws(() => execute(db, lq, { r: NaN, u: 1 }), /^TypeError: Parameter "r" is NaN, which SQLite holds no value for: it would be bound as NULL\.$/);
+  assert.throws(() => execute(db, lq, { r: 1, u: NaN }), /Parameter "u" is NaN/);
+  const pq: QueryModule<"postgres"> = { dialect: "postgres", sql: "select :f::float8, :n::numeric, :p::numeric(5,2)", params: ["f", "n", "p"], inputs: { f: { type: pgType("float8") }, n: { type: pgType("numeric") }, p: { type: { kind: "decimal", precision: 5, min_scale: 2, max_scale: 2, nan: true } } } };
+  const client = pgPool(async (_: string, values?: unknown[]) => (seen.push(values!), { rows: [] }));
+  await execute(client, pq, { f: NaN, n: -Infinity, p: NaN });
+  await execute(client, pq, { f: Infinity, n: NaN, p: 1.5 });
+  assert.deepEqual(seen, [[NaN, -Infinity, NaN], [Infinity, NaN, 1.5]]);
+  await assert.rejects(Promise.resolve().then(() => execute(client, pq, { f: 1, n: 1, p: Infinity })), /^TypeError: Parameter "p" is Infinity, which its type, a numeric with a precision, holds no value for\.$/);
+});
+
+test("sqlite: -0 for a float or a value of no declared type, and an infinity, go in at their marks as SQLite's literals, which sqlite3 and Turso's engine would bind as the INTEGER 0 and libSQL refuse; an integer's -0 goes as it is", async () => {
+  const seen: unknown[][] = [];
+  const libsql = { execute: async (q: { sql: string; args: unknown[] }) => (seen.push([q.sql, q.args]), { rows: [] }), executeMultiple: async () => {} };
+  const lq: QueryModule<"sqlite"> = { dialect: "sqlite", ...handWritten("select :r as r, :u as u, :i as i, :n as n, 1-:r as m", "sqlite"), inputs: { r: { type: liteType("real") }, u: { type: { kind: "unknown" } }, i: { type: liteType("integer") }, n: { type: liteType("numeric") } } };
+  await execute(libsql, lq, { r: -0, u: -0, i: -0, n: -0 });
+  await execute(libsql, lq, { r: Infinity, u: -Infinity, i: 1, n: 2.5 });
+  assert.deepEqual(seen, [
+    ["select (-0.0) as r, (-0.0) as u, ? as i, (-0.0) as n, 1-(-0.0) as m", [-0]],
+    ["select (9e999) as r, (-9e999) as u, ? as i, ? as n, 1-(9e999) as m", [1, 2.5]],
+  ]);
+  // On the drivers themselves, each value comes back as it went in.
+  const read = (rows: unknown) => (rows as Record<string, number>[]).map((r) => ({ r: r.r, u: r.u, m: r.m, sign: Object.is(r.r, -0) && Object.is(r.u, -0) }));
+  const sqlite3 = driver("sqlite3");
+  const db3 = new sqlite3.Database(":memory:");
+  const client = driver("@libsql/client").createClient({ url: ":memory:" });
+  const turso = await driver("@tursodatabase/database").connect(":memory:");
+  try {
+    for (const db of [db3, client, turso, new DatabaseSync(":memory:")]) {
+      assert.deepEqual(read(await execute(db, lq, { r: -0, u: -0, i: 0, n: 0 })), [{ r: -0, u: -0, m: 1, sign: true }]);
+      assert.deepEqual(read(await execute(db, lq, { r: Infinity, u: -Infinity, i: 0, n: 0 })), [{ r: Infinity, u: -Infinity, m: -Infinity, sign: false }]);
+    }
+  } finally {
+    db3.close();
+    client.close();
+    await turso.close();
+  }
+});
+
 test("mysql and sqlite: every driver gets a JSON parameter as its JSON text, and null as NULL", async () => {
   const json = { type: { kind: "json" } } as const;
   const mq: QueryModule<"mysql"> = { dialect: "mysql", sql: "select cast(:a as json), cast(:b as json), :name, cast(:a as json), cast(:z as json)", params: ["a", "b", "name", "z"], inputs: { a: json, b: json, z: json, name: { type: myType("varchar") } } };

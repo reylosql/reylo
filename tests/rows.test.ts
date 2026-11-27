@@ -89,6 +89,13 @@ test("NaN, an infinity and -0, which JSON has no number for, go in where the mem
   // A NUMERIC takes -0 as its float, which keeps the sign its integer would drop.
   assert.equal(prepareRows("t", reals, [{ x: Infinity, n: -Infinity }, { x: -Infinity }, { x: -0, n: -0 }, { x: 1, n: 2 }], "sqlite", false).value, `[{"x":9e999,"n":-9e999},{"x":-9e999},{"x":-0e0,"n":-0e0},{"x":1,"n":2}]`);
   assert.throws(() => prepareRows("t", reals, [{ x: NaN }], "sqlite", false), /"x" is real, a number other than NaN; got NaN\./);
+  // A JSON member, and a member of a type the run time has no rule for, hold their numbers as a
+  // JSON parameter does: as each database's JSON reads them, or refused where it holds none.
+  const docs = structured(false, [["doc", { kind: "json" }, "json", false, false], ["v", { kind: "unknown" }, "blob", true, true]]).rows;
+  assert.equal(prepareRows("d", docs, [{ doc: { z: -0, inf: Infinity } }], "sqlite", false).value, `[{"doc":{"z":-0e0,"inf":9e999}}]`);
+  assert.equal(prepareRows("d", docs, [{ doc: [-0] }], "mysql", false).value, `[{"doc":[-0e0]}]`);
+  assert.throws(() => prepareRows("d", docs, [{ doc: { n: [NaN] } }], "mysql", false), /^TypeError: Parameter "d": row 1: "doc" at \/n\/0 is NaN, which MySQL holds no value for/);
+  assert.throws(() => prepareRows("d", docs, [{ doc: 1, v: NaN }], "sqlite", false), /^TypeError: Parameter "d": at \/0\/v is NaN, which SQLite holds no value for/);
 });
 
 test("a member is read from the row's own keys: a column named after a member of every object is left out when the row leaves it out, and a JSON member is written as JSON.stringify writes it", () => {
