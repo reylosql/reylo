@@ -427,13 +427,12 @@ function plainSchema(t: EngineType, dialect: Dialect, input: boolean, inJson: bo
       const items = (input && dialect !== "clickhouse" ? inRow : t.element.nullable) ? nullable(each) : each;
       // An array the project lets nest holds its elements, or arrays of them at any depth. A
       // parameter's names its element at each level, to the six dimensions Postgres holds at most
-      // (MAXDIM); a result's leaves the levels below the first open, which keeps a module's schema
-      // from repeating a row's schema at each.
+      // (MAXDIM), each level and the element once in the input's `$defs`, so that an array inside
+      // a row inside an array adds to the schema rather than multiplying it; a result's leaves the
+      // levels below the first open.
       if (!nestsAnyDeep(t)) return { type: "array", items };
       if (!input) return { type: "array", items: { anyOf: [items, { type: "array" }] } };
-      let deep = items;
-      for (let level = 1; level < 6; level++) deep = { anyOf: [items, { type: "array", items: deep }] };
-      return { type: "array", items: deep };
+      return nestedLevels(items);
     }
     case "struct": {
       // A built-in geometric type is its text inside a document.
@@ -497,7 +496,21 @@ const CODEC_SCHEMA: Readonly<Record<Codec, Schema>> = {
   geometry: { type: "object", properties: { type: { type: "string" }, srid: { type: "integer", minimum: 0 } }, required: ["type", "srid"], description: "a GeoJSON geometry, with its SRID as srid" },
 };
 
+/** The input's `$defs` while it is built: each nested array's element and levels below the first (`nestedLevels`). */
+let inputDefs: Record<string, Schema | JsonSchema> | undefined;
+
+/** A nested array parameter's schema: its element, or an array of it, at each of six levels, the element and the levels below the first in the input's `$defs`. */
+function nestedLevels(items: Schema | JsonSchema): Schema {
+  const defs = (inputDefs ??= {});
+  const id = `nested${Object.keys(defs).length / 6}`;
+  const ref = (name: string) => ({ $ref: `#/$defs/${name}` });
+  defs[id] = items;
+  for (let level = 6; level >= 2; level--) defs[`${id}_${level}`] = { type: "array", items: level === 6 ? ref(id) : { anyOf: [ref(id), ref(`${id}_${level + 1}`)] } };
+  return { type: "array", items: { anyOf: [ref(id), ref(`${id}_2`)] } };
+}
+
 export function querySchemas(analysis: Analysis, dialect: Dialect, codecs: Codecs = {}): { input: Schema; output: Schema } {
+  inputDefs = undefined;
   // A typed JSON parameter's schema as written, with its defaults; one with a `default` at its root may be left out, as may one that takes null.
   const input = object(analysis.params, (i) => {
     const p = analysis.params[i]!;
@@ -517,5 +530,7 @@ export function querySchemas(analysis: Analysis, dialect: Dialect, codecs: Codec
   const row = value ? (column(value) as Schema) : object(analysis.columns, (i) => column(analysis.columns[i]!));
   const output: Schema = analysis.cardinality === "many" ? { type: "array", items: row } : analysis.cardinality === "one" ? row : analysis.cardinality === "at_most_one" ? (value?.nullable ? row : { anyOf: [row, { type: "null" }] }) : { type: "null" };
   const about = analysis.comment === undefined ? {} : { description: analysis.comment };
-  return { input: { $schema: "https://json-schema.org/draft/2020-12/schema", ...about, ...input }, output: { $schema: "https://json-schema.org/draft/2020-12/schema", ...about, ...output } };
+  const defs = inputDefs;
+  inputDefs = undefined;
+  return { input: { $schema: "https://json-schema.org/draft/2020-12/schema", ...about, ...input, ...(defs === undefined ? {} : { $defs: defs }) }, output: { $schema: "https://json-schema.org/draft/2020-12/schema", ...about, ...output } };
 }
