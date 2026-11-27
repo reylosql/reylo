@@ -888,6 +888,7 @@ What Reylo can't type on SQLite, and what to do instead:
 | --- | --- |
 | Declared types outside a `STRICT` table, which SQLite doesn't enforce, so a value of another kind makes `.run()` throw | Make tables `strict` where you can |
 | Functions your app registers, or an extension's, which Reylo's SQLite doesn't have: the type check fails with "no such function" | Call the function in TypeScript on what `.run()` returns |
+| A function your app registers under a built-in's name, such as `lower`, which your connection then calls: Reylo types it as SQLite's built-in | Register it under a name of its own |
 | Attached databases and `TEMP` tables, since the type check reads one database file | None: a query on one is an error in the type check |
 | Virtual table modules on a driver the type check doesn't run the query on, such as `bun:sqlite`, SQLite Wasm or a Durable Object: Reylo's SQLite has FTS3, FTS4, FTS5, R-tree, Geopoly and `dbstat` | Check that driver's SQLite yourself |
 | `REAL` arithmetic with no answer, such as `1e999 * 0`, which SQLite returns as `NULL` where Reylo types a number | Write `coalesce(price * qty, 0)` where a `REAL` may hold an infinity |
