@@ -4,8 +4,8 @@
     python3 engine/syntax/gen/postgres.py --postgres <checkout> --libpg-query <checkout> --pg-query <checkout of pg_query.rs>
 
 Takes `gram.y` and `kwlist.h` at the tag below, applies the parser patches libpg_query carries, so
-that the grammar is the one that tree was defined by, removes the C actions and runs Bison over
-what is left. Needs Bison 3.8.2 (BISON names it) and writes `src/postgres/generated/`.
+that the grammar is the one that tree was defined by, and Reylo's own in `gen/patches/`, removes
+the C actions and runs Bison over what is left. Needs Bison 3.8.2 (BISON names it) and writes `src/postgres/generated/`.
 """
 import argparse, hashlib, json, os, re, struct, subprocess, sys, tempfile
 
@@ -13,16 +13,44 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.dont_write_bytecode = True
 import postgres_actions
 
-TAG = "REL_18_6"
+TAG = "REL_19_0"
 LIBPG_QUERY = "c1546e7e97edc93fe8474d7a59881e91fbf48cfc"
 PG_QUERY = "ad0c87ed59c84ec6b42c970bb42d7985b7b5878b"
+# libpg_query and pg_query.rs have no Postgres 19 yet: these patches bring the files read from them to the nodes, deparser and types of the Postgres tag they were made from (gen/patches/README.md says how).
+PATCHED_TAG = "REL_19_0"
+LIBPG_QUERY_PATCH = "libpg_query-postgres-19.patch"
+PG_QUERY_PATCH = "pg_query-postgres-19.patch"
 PATCHES = ["01_parser_additional_param_ref_support", "03_lexer_track_yyllocend", "04_lexer_comments_as_tokens", "09_allow_param_junk", "14_avoid_quadratic_memory_dotted_names", "15_node_string_constant_locations"]
+# Reylo's own changes to the grammar, after libpg_query's: each keeps a statement an older Postgres accepts readable by a newer grammar.
+GRAMMAR_PATCHES = ["ignore_respect_bare_labels.patch"]
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.join(HERE, "..", "src", "postgres", "generated")
 
 
 def git(repo, *args):
     return subprocess.run(["git", "-C", repo, *args], check=True, capture_output=True).stdout
+
+
+class Patched:
+    """A pinned checkout's files, with a patch of Reylo's applied over the ones it touches."""
+
+    def __init__(self, repo, commit, patch):
+        self.repo, self.commit, self.files = repo, commit, {}
+        with open(os.path.join(HERE, "patches", patch), "rb") as f:
+            text = f.read()
+        paths = [p.decode() for p in re.findall(rb"^\+\+\+ b/(\S+)", text, flags=re.M)]
+        with tempfile.TemporaryDirectory() as tmp:
+            for path in paths:
+                os.makedirs(os.path.dirname(os.path.join(tmp, path)), exist_ok=True)
+                with open(os.path.join(tmp, path), "wb") as f:
+                    f.write(git(repo, "show", f"{commit}:{path}"))
+            subprocess.run(["patch", "-s", "-p1", "--fuzz=0", "--batch", "--no-backup-if-mismatch"], cwd=tmp, input=text, check=True)
+            for path in paths:
+                with open(os.path.join(tmp, path), "rb") as f:
+                    self.files[path] = f.read()
+
+    def read(self, path):
+        return self.files[path] if path in self.files else git(self.repo, "show", f"{self.commit}:{path}")
 
 
 def grammar_patch(text):
@@ -36,17 +64,20 @@ def grammar_patch(text):
     return "".join(out)
 
 
-def patched_grammar(args):
+def patched_grammar(args, libpg_query):
     with tempfile.TemporaryDirectory() as tmp:
         path = os.path.join(tmp, "src/backend/parser")
         os.makedirs(path)
         with open(os.path.join(path, "gram.y"), "wb") as f:
             f.write(git(args.postgres, "show", f"{TAG}:src/backend/parser/gram.y"))
         for name in PATCHES:
-            text = git(args.libpg_query, "show", f"{LIBPG_QUERY}:patches/{name}.patch").decode("utf8", "replace")
+            text = libpg_query.read(f"patches/{name}.patch").decode("utf8", "replace")
             hunks = grammar_patch(text)
             if hunks:
                 subprocess.run(["patch", "-s", "-p1", "--no-backup-if-mismatch"], cwd=tmp, input=hunks.encode(), check=True)
+        for name in GRAMMAR_PATCHES:
+            with open(os.path.join(HERE, "patches", name), "rb") as f:
+                subprocess.run(["patch", "-s", "-p1", "--fuzz=0", "--batch", "--no-backup-if-mismatch"], cwd=tmp, input=f.read(), check=True)
         with open(os.path.join(path, "gram.y"), encoding="utf8", errors="replace") as f:
             return f.read()
 
@@ -177,7 +208,7 @@ class Constants:
 
 
 # The constants `helpers.rs` names.
-HELPER_CONSTANTS = ["AEXPR_OP", "AND_EXPR", "OR_EXPR", "NOT_EXPR", "DEFELEM_UNSPEC", "RELPERSISTENCE_PERMANENT", "FUNC_PARAM_OUT", "FUNC_PARAM_TABLE", "FUNC_PARAM_VARIADIC", "FUNC_PARAM_DEFAULT", "FUNC_PARAM_IN", "LIMIT_OPTION_WITH_TIES", "LockWaitSkip", "PARTITION_STRATEGY_LIST", "PARTITION_STRATEGY_RANGE", "PARTITION_STRATEGY_HASH", "PUBLICATIONOBJ_CONTINUATION", "PUBLICATIONOBJ_TABLE", "PUBLICATIONOBJ_TABLES_IN_SCHEMA", "PUBLICATIONOBJ_TABLES_IN_CUR_SCHEMA", "CTEMaterializeDefault", "CAS_DEFERRABLE", "CAS_INITIALLY_DEFERRED", "CAS_NOT_VALID", "CAS_NO_INHERIT", "CAS_NOT_ENFORCED", "CAS_ENFORCED"]
+HELPER_CONSTANTS = ["AEXPR_OP", "AND_EXPR", "OR_EXPR", "NOT_EXPR", "DEFELEM_UNSPEC", "RELPERSISTENCE_PERMANENT", "FUNC_PARAM_OUT", "FUNC_PARAM_TABLE", "FUNC_PARAM_VARIADIC", "FUNC_PARAM_DEFAULT", "FUNC_PARAM_IN", "LIMIT_OPTION_WITH_TIES", "LockWaitSkip", "PARTITION_STRATEGY_LIST", "PARTITION_STRATEGY_RANGE", "PARTITION_STRATEGY_HASH", "PUBLICATIONOBJ_CONTINUATION", "PUBLICATIONOBJ_TABLE", "PUBLICATIONOBJ_TABLES_IN_SCHEMA", "PUBLICATIONOBJ_TABLES_IN_CUR_SCHEMA", "CTEMaterializeDefault", "CAS_DEFERRABLE", "CAS_INITIALLY_DEFERRED", "CAS_NOT_VALID", "CAS_NO_INHERIT", "CAS_NOT_ENFORCED", "CAS_ENFORCED", "PUBLICATION_ALL_TABLES", "PUBLICATION_ALL_SEQUENCES"]
 # The fields `helpers.rs` names that no action or schema entry does.
 HELPER_FIELDS = ["parsetree", "val", "fval", "sval", "ival", "boolval", "bsval", "isnull"]
 
@@ -251,7 +282,7 @@ impl TryFrom<i32> for {name} {{
             body += f"    pub fn {raw}(&self) -> {enum} {{\n        {enum}::try_from(self.{raw}).unwrap_or_default()\n    }}\n"
             body += f"    pub fn set_{plain}(&mut self, value: {enum}) {{\n        self.{raw} = value as i32;\n    }}\n"
         body += "}\n"
-    return "// Generated by engine/syntax/gen/postgres.py from pg_query's protobuf definitions: the tree's types, with no wire format.\n#![allow(clippy::all, non_camel_case_types)]\n" + body
+    return "// Generated by engine/syntax/gen/postgres.py from pg_query's protobuf definitions with gen/patches/pg_query-postgres-19.patch: the tree's types, with no wire format.\n#![allow(clippy::all, non_camel_case_types)]\n" + body
 
 
 class Schema:
@@ -308,7 +339,7 @@ class Schema:
 
     def reader(self, constants, int_enums):
         """From the tree's structs back to nodes, for the deparser."""
-        out = ["// Generated by engine/syntax/gen/postgres.py from libpg_query's description of each node.", ""]
+        out = ["// Generated by engine/syntax/gen/postgres.py from libpg_query's description of each node, with gen/patches/libpg_query-postgres-19.patch.", ""]
         for enum, (arms, default) in sorted(int_enums.items()):
             rendered = " ".join(f"{number} => {constants(c)}," for number, c in arms)
             out.append(f"#[allow(non_snake_case, unreachable_patterns)]\nfn c_{enum}(v: i32) -> i64 {{\n    match v {{ {rendered} _ => {constants(default)} }}\n}}\n")
@@ -359,7 +390,7 @@ class Schema:
         return "\n".join(out)
 
     def converter(self, constants, headers_text):
-        out = ["// Generated by engine/syntax/gen/postgres.py from libpg_query's description of each node. Included where `pb` names the tree's types.", ""]
+        out = ["// Generated by engine/syntax/gen/postgres.py from libpg_query's description of each node, with gen/patches/libpg_query-postgres-19.patch. Included where `pb` names the tree's types.", ""]
         for enum in sorted(constants.enums):
             arms = " ".join(f"{value} => {number}," for value, number in constants.proto_arms(enum))
             out.append(f"#[allow(non_snake_case, unreachable_patterns)]\nfn enum_{enum}(v: i64) -> i32 {{\n    match v {{ {arms} _ => -1 }}\n}}\n")
@@ -597,7 +628,7 @@ def walker(crate_file):
     variants = re.findall(r"^    (\w+)\(&'a protobuf::(\w+)\),", ref_rs, flags=re.M)
     nodes = braced(enum_rs, enum_rs.index("pub fn nodes(&self)"))
     to_ref = braced(enum_rs, enum_rs.index("pub fn to_ref(&self)"))
-    out = ["// Generated by engine/syntax/gen/postgres.py from the pg_query crate's node walker, under its license:"]
+    out = ["// Generated by engine/syntax/gen/postgres.py from the pg_query crate's node walker, with gen/patches/pg_query-postgres-19.patch, under its license:"]
     out += ["// " + line if line else "//" for line in notice.strip().split("\n")]
     out += ["", "#![allow(clippy::all)]", "use super::pb as protobuf;", "use super::pb::node::Node as NodeEnum;", "use std::collections::VecDeque;", ""]
     out.append("#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, serde::Serialize)]\npub enum Context {\n    None,\n    Select,\n    DML,\n    DDL,\n    Call,\n}\n")
@@ -617,7 +648,11 @@ def main():
     parser.add_argument("--libpg-query", required=True)
     parser.add_argument("--pg-query", required=True)
     args = parser.parse_args()
-    source = patched_grammar(args)
+    if TAG != PATCHED_TAG:
+        raise SystemExit(f"gen/patches bring libpg_query and pg_query.rs to {PATCHED_TAG}'s nodes, not {TAG}'s: remake them as gen/patches/README.md says")
+    libpg_query = Patched(args.libpg_query, LIBPG_QUERY, LIBPG_QUERY_PATCH)
+    pg_query = Patched(args.pg_query, PG_QUERY, PG_QUERY_PATCH)
+    source = patched_grammar(args, libpg_query)
     stripped = without_actions(source)
     bison = os.environ.get("BISON", "/opt/homebrew/opt/bison/bin/bison")
     with tempfile.TemporaryDirectory() as tmp:
@@ -633,16 +668,16 @@ def main():
     files = git(args.postgres, "ls-tree", "-r", "--name-only", TAG, tree).decode().split()
     headers = [git(args.postgres, "show", f"{TAG}:{p}").decode("utf8", "replace") for p in files if p.endswith(".h")]
     prologue = source[: source.index("%}")]
-    limit_patch = git(args.libpg_query, "show", f"{LIBPG_QUERY}:patches/05_limit_option_enum_value_default.patch").decode("utf8", "replace")
+    limit_patch = libpg_query.read("patches/05_limit_option_enum_value_default.patch").decode("utf8", "replace")
     nodes_h = next(h for p, h in zip([p for p in files if p.endswith(".h")], headers) if p.endswith("nodes/nodes.h"))
     if "LIMIT_OPTION_DEFAULT" in limit_patch:
         nodes_h = nodes_h.replace("typedef enum LimitOption\n{\n", "typedef enum LimitOption\n{\n\tLIMIT_OPTION_DEFAULT,\n")
     headers.append(nodes_h)
     headers.append(prologue)
-    lib = lambda p: git(args.libpg_query, "show", f"{LIBPG_QUERY}:{p}").decode("utf8", "replace")
+    lib = lambda p: libpg_query.read(p).decode("utf8", "replace")
     deparser = lib("src/postgres_deparse.c")
     c_constants = Constants(lib("src/include/pg_query_enum_defs.c"), [nodes_h] + headers + [prologue, deparser])
-    crate_file = lambda p: git(args.pg_query, "show", f"{PG_QUERY}:{p}").decode("utf8")
+    crate_file = lambda p: pg_query.read(p).decode("utf8")
     pb_source = crate_file("src/protobuf.rs")
     pb = plain_protobuf(pb_source)
     open(os.path.join(OUT, "pb.rs"), "w").write(pb)
@@ -711,7 +746,7 @@ def main():
     categories = {"UNRESERVED_KEYWORD": 0, "COL_NAME_KEYWORD": 1, "TYPE_FUNC_NAME_KEYWORD": 2, "RESERVED_KEYWORD": 3}
     ntokens = constants["ntokens"]
     index = {n: i for i, n in enumerate(names)}
-    L = [f"// Generated by engine/syntax/gen/postgres.py from Postgres {TAG}'s gram.y and kwlist.h, with libpg_query {LIBPG_QUERY}'s parser patches.", f"// gram.y sha256 {hashlib.sha256(source.encode()).hexdigest()}", ""]
+    L = [f"// Generated by engine/syntax/gen/postgres.py from Postgres {TAG}'s gram.y and kwlist.h, with libpg_query {LIBPG_QUERY}'s parser patches and gen/patches/{", gen/patches/".join(GRAMMAR_PATCHES)}.", f"// gram.y sha256 {hashlib.sha256(source.encode()).hexdigest()}", ""]
     for k, v in constants.items():
         L.append(f"pub const {k.upper()}: i32 = {v};")
     major, minor = re.fullmatch(r"REL_(\d+)_(\d+)", TAG).groups()

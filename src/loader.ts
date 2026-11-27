@@ -242,19 +242,19 @@ export function moduleDefinition(m: ModuleInput, names: { raw: string; sql: stri
     ["order", JSON.stringify(analysis.rewritten.order)],
     ["marks", m.marks && JSON.stringify(m.marks)],
     ["sqlMode", analysis.sqlMode && JSON.stringify(analysis.sqlMode)],
-    ["inputs", JSON.stringify(inputs)],
-    ["columns", JSON.stringify(columns)],
-    ["codecs", Object.keys(codecs).length ? JSON.stringify(codecs) : undefined],
+    ["inputs", literal(inputs)],
+    ["columns", literal(columns)],
+    ["codecs", Object.keys(codecs).length ? literal(codecs) : undefined],
     ["libraries", handed.length ? `{ ${handed.join(", ")} }` : undefined],
     ["row", columns.length ? rowSource(columns.map(([name]) => name as string)) : undefined],
-    ["nonFinite", nonFinite.some((at) => at !== null) ? JSON.stringify(nonFinite) : undefined],
+    ["nonFinite", nonFinite.some((at) => at !== null) ? literal(nonFinite) : undefined],
     ["key", analysis.key && JSON.stringify(analysis.key)],
     ["ordered", analysis.ordered ? "true" : undefined],
-    ["structured", structured.length ? JSON.stringify(structured) : undefined],
+    ["structured", structured.length ? literal(structured) : undefined],
     ["source", JSON.stringify(m.source)],
     ["sqlcommenter", m.sqlcommenter ? "true" : undefined],
     ["nestedArrays", m.allowNestedArrays && dialect === "postgres" ? "true" : undefined],
-    ["jsonSchema", JSON.stringify(querySchemas(m.allowNestedArrays ? analysisWithNestedArrays(analysis) : analysis, dialect, m.codecs))],
+    ["jsonSchema", literal(querySchemas(m.allowNestedArrays ? analysisWithNestedArrays(analysis) : analysis, dialect, m.codecs))],
     ["checks", checked ? names.checks : undefined],
   ];
   const written = fields.flatMap(([name, value]) => (value === undefined ? [] : [value === name ? name : `${name}: ${value}`]));
@@ -299,6 +299,16 @@ export async function marksOf(analysis: Analysis, text: string, dialect: Dialect
     marks.push([utf16(text, start + p.start), utf16(text, start + p.end)]);
   }
   return marks;
+}
+
+/**
+ * A JSON value as the module's source writes it: its JSON, a JavaScript literal of the same value,
+ * but where a key is `__proto__`, which a literal takes as the object's prototype (a column of that
+ * name, a key of a schema), the JSON read by `JSON.parse`, which keeps it a key.
+ */
+function literal(value: unknown): string {
+  const text = JSON.stringify(value);
+  return text.includes('"__proto__"') ? `JSON.parse(${JSON.stringify(text)})` : text;
 }
 
 /** The line and column, from 1, of a UTF-8 byte offset into `text`. */

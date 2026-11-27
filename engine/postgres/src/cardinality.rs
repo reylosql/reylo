@@ -3310,6 +3310,8 @@ fn dml_node(node: &NodeEnum, trust: &Trust, catalog: &Catalog) -> Option<Result<
                 Some(c) if c.action == protobuf::OnConflictAction::OnconflictNothing as i32 => Ok(Cardinality::AtMostOne),
                 // `DO UPDATE … WHERE` leaves a conflicting row alone, and returns nothing for it.
                 Some(c) if c.action == protobuf::OnConflictAction::OnconflictUpdate as i32 && (c.where_clause.is_some() || written_before || skipped(TRIGGER_ROW_INSERT | TRIGGER_ROW_UPDATE)) => Ok(Cardinality::AtMostOne),
+                // `DO SELECT` returns the conflicting row as it stands, but `DO SELECT … WHERE` returns nothing for one the condition rejects. With no lock it returns that row again for each row that conflicts with it, so a unique column in its RETURNING need not be distinct.
+                Some(c) if c.action == protobuf::OnConflictAction::OnconflictSelect as i32 && c.where_clause.is_some() => Ok(Cardinality::AtMostOne),
                 _ if skipped(TRIGGER_ROW_INSERT) => Ok(Cardinality::AtMostOne),
                 _ => Ok(Cardinality::One),
             }

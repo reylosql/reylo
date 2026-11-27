@@ -440,10 +440,10 @@ test("ClickHouse: a select is typed from the server's own description, nullabili
     assert.throws(() => standard.output([{ id: "1" }]), /A Standard Query maps no values on ClickHouse/);
     assert.doesNotMatch(out["user.sql"]!, /~standard/);
     // A query's JSON Schema is of what its parameters take: a wide whole number is a number or a
-    // BigInt and no digits, of no named format past 64 bits, and an array's element is null where
-    // its type says so.
+    // BigInt and no digits, of no named format past a signed 64 bits, a UInt64 among them, and an
+    // array's element is null where its type says so.
     const schemas = await built(root, "schemas", "SELECT {ids:Array(Nullable(UInt8))} AS ids, {wide:UInt128} AS wide, {count:UInt64} AS count");
-    assert.deepEqual(schemas.inputSchema.properties, { ids: { type: "array", items: { anyOf: [{ type: "integer", format: "int32" }, { type: "null" }] } }, wide: { type: "integer" }, count: { type: "integer", format: "int64" } });
+    assert.deepEqual(schemas.inputSchema.properties, { ids: { type: "array", items: { anyOf: [{ type: "integer", format: "int32" }, { type: "null" }] } }, wide: { type: "integer" }, count: { type: "integer" } });
     assert.deepEqual(schemas.outputSchema.items.properties, schemas.inputSchema.properties);
     assert.deepEqual(await schemas.run(db.client, { ids: [1, null], wide: 2n ** 100n, count: 3 }), [{ ids: [1, null], wide: 2n ** 100n, count: 3n }]);
     // A value that is always null admits null alone, which `type` names once.

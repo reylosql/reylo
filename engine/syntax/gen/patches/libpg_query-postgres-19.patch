@@ -1,0 +1,2400 @@
+diff --git a/protobuf/pg_query.proto b/protobuf/pg_query.proto
+index d562840..0950532 100644
+--- a/protobuf/pg_query.proto
++++ b/protobuf/pg_query.proto
+@@ -250,9 +250,9 @@ message Node {
+     AlterDatabaseSetStmt alter_database_set_stmt = 232 [json_name="AlterDatabaseSetStmt"];
+     DropdbStmt dropdb_stmt = 233 [json_name="DropdbStmt"];
+     AlterSystemStmt alter_system_stmt = 234 [json_name="AlterSystemStmt"];
+-    ClusterStmt cluster_stmt = 235 [json_name="ClusterStmt"];
+-    VacuumStmt vacuum_stmt = 236 [json_name="VacuumStmt"];
+-    VacuumRelation vacuum_relation = 237 [json_name="VacuumRelation"];
++    VacuumStmt vacuum_stmt = 235 [json_name="VacuumStmt"];
++    VacuumRelation vacuum_relation = 236 [json_name="VacuumRelation"];
++    RepackStmt repack_stmt = 237 [json_name="RepackStmt"];
+     ExplainStmt explain_stmt = 238 [json_name="ExplainStmt"];
+     CreateTableAsStmt create_table_as_stmt = 239 [json_name="CreateTableAsStmt"];
+     RefreshMatViewStmt refresh_mat_view_stmt = 240 [json_name="RefreshMatViewStmt"];
+@@ -273,20 +273,22 @@ message Node {
+     AlterTSConfigurationStmt alter_tsconfiguration_stmt = 255 [json_name="AlterTSConfigurationStmt"];
+     PublicationTable publication_table = 256 [json_name="PublicationTable"];
+     PublicationObjSpec publication_obj_spec = 257 [json_name="PublicationObjSpec"];
+-    CreatePublicationStmt create_publication_stmt = 258 [json_name="CreatePublicationStmt"];
+-    AlterPublicationStmt alter_publication_stmt = 259 [json_name="AlterPublicationStmt"];
+-    CreateSubscriptionStmt create_subscription_stmt = 260 [json_name="CreateSubscriptionStmt"];
+-    AlterSubscriptionStmt alter_subscription_stmt = 261 [json_name="AlterSubscriptionStmt"];
+-    DropSubscriptionStmt drop_subscription_stmt = 262 [json_name="DropSubscriptionStmt"];
+-    Integer integer = 263 [json_name="Integer"];
+-    Float float = 264 [json_name="Float"];
+-    Boolean boolean = 265 [json_name="Boolean"];
+-    String string = 266 [json_name="String"];
+-    BitString bit_string = 267 [json_name="BitString"];
+-    List list = 268 [json_name="List"];
+-    IntList int_list = 269 [json_name="IntList"];
+-    OidList oid_list = 270 [json_name="OidList"];
+-    A_Const a_const = 271 [json_name="A_Const"];
++    PublicationAllObjSpec publication_all_obj_spec = 258 [json_name="PublicationAllObjSpec"];
++    CreatePublicationStmt create_publication_stmt = 259 [json_name="CreatePublicationStmt"];
++    AlterPublicationStmt alter_publication_stmt = 260 [json_name="AlterPublicationStmt"];
++    CreateSubscriptionStmt create_subscription_stmt = 261 [json_name="CreateSubscriptionStmt"];
++    AlterSubscriptionStmt alter_subscription_stmt = 262 [json_name="AlterSubscriptionStmt"];
++    DropSubscriptionStmt drop_subscription_stmt = 263 [json_name="DropSubscriptionStmt"];
++    WaitStmt wait_stmt = 264 [json_name="WaitStmt"];
++    Integer integer = 265 [json_name="Integer"];
++    Float float = 266 [json_name="Float"];
++    Boolean boolean = 267 [json_name="Boolean"];
++    String string = 268 [json_name="String"];
++    BitString bit_string = 269 [json_name="BitString"];
++    List list = 270 [json_name="List"];
++    IntList int_list = 271 [json_name="IntList"];
++    OidList oid_list = 272 [json_name="OidList"];
++    A_Const a_const = 273 [json_name="A_Const"];
+   }
+ }
+ 
+@@ -463,7 +465,8 @@ message WindowFunc
+   uint32 winref = 9 [json_name="winref"];
+   bool winstar = 10 [json_name="winstar"];
+   bool winagg = 11 [json_name="winagg"];
+-  int32 location = 12 [json_name="location"];
++  int32 ignore_nulls = 12 [json_name="ignore_nulls"];
++  int32 location = 13 [json_name="location"];
+ }
+ 
+ message WindowFuncRunCondition
+@@ -596,14 +599,16 @@ message SubPlan
+   uint32 first_col_type = 7 [json_name="firstColType"];
+   int32 first_col_typmod = 8 [json_name="firstColTypmod"];
+   uint32 first_col_collation = 9 [json_name="firstColCollation"];
+-  bool use_hash_table = 10 [json_name="useHashTable"];
+-  bool unknown_eq_false = 11 [json_name="unknownEqFalse"];
+-  bool parallel_safe = 12 [json_name="parallel_safe"];
+-  repeated Node set_param = 13 [json_name="setParam"];
+-  repeated Node par_param = 14 [json_name="parParam"];
+-  repeated Node args = 15 [json_name="args"];
+-  double startup_cost = 16 [json_name="startup_cost"];
+-  double per_call_cost = 17 [json_name="per_call_cost"];
++  bool is_init_plan = 10 [json_name="isInitPlan"];
++  bool use_hash_table = 11 [json_name="useHashTable"];
++  bool unknown_eq_false = 12 [json_name="unknownEqFalse"];
++  bool parallel_safe = 13 [json_name="parallel_safe"];
++  repeated Node set_param = 14 [json_name="setParam"];
++  repeated Node par_param = 15 [json_name="parParam"];
++  repeated Node args = 16 [json_name="args"];
++  int32 disabled_nodes = 17 [json_name="disabled_nodes"];
++  double startup_cost = 18 [json_name="startup_cost"];
++  double per_call_cost = 19 [json_name="per_call_cost"];
+ }
+ 
+ message AlternativeSubPlan
+@@ -815,9 +820,11 @@ message JsonConstructorExpr
+   Node func = 4 [json_name="func"];
+   Node coercion = 5 [json_name="coercion"];
+   JsonReturning returning = 6 [json_name="returning"];
+-  bool absent_on_null = 7 [json_name="absent_on_null"];
+-  bool unique = 8 [json_name="unique"];
+-  int32 location = 9 [json_name="location"];
++  Node orig_query = 7 [json_name="orig_query"];
++  JsonFormat format = 8 [json_name="format"];
++  bool absent_on_null = 9 [json_name="absent_on_null"];
++  bool unique = 10 [json_name="unique"];
++  int32 location = 11 [json_name="location"];
+ }
+ 
+ message JsonIsPredicate
+@@ -826,7 +833,8 @@ message JsonIsPredicate
+   JsonFormat format = 2 [json_name="format"];
+   JsonValueType item_type = 3 [json_name="item_type"];
+   bool unique_keys = 4 [json_name="unique_keys"];
+-  int32 location = 5 [json_name="location"];
++  uint32 expr_base_type = 5 [json_name="exprBaseType"];
++  int32 location = 6 [json_name="location"];
+ }
+ 
+ message JsonBehavior
+@@ -1009,10 +1017,11 @@ message OnConflictExpr
+   repeated Node arbiter_elems = 2 [json_name="arbiterElems"];
+   Node arbiter_where = 3 [json_name="arbiterWhere"];
+   uint32 constraint = 4 [json_name="constraint"];
+-  repeated Node on_conflict_set = 5 [json_name="onConflictSet"];
+-  Node on_conflict_where = 6 [json_name="onConflictWhere"];
+-  int32 excl_rel_index = 7 [json_name="exclRelIndex"];
+-  repeated Node excl_rel_tlist = 8 [json_name="exclRelTlist"];
++  LockClauseStrength lock_strength = 5 [json_name="lockStrength"];
++  repeated Node on_conflict_set = 6 [json_name="onConflictSet"];
++  Node on_conflict_where = 7 [json_name="onConflictWhere"];
++  int32 excl_rel_index = 8 [json_name="exclRelIndex"];
++  repeated Node excl_rel_tlist = 9 [json_name="exclRelTlist"];
+ }
+ 
+ message Query
+@@ -1127,12 +1136,13 @@ message FuncCall
+   repeated Node agg_order = 3 [json_name="agg_order"];
+   Node agg_filter = 4 [json_name="agg_filter"];
+   WindowDef over = 5 [json_name="over"];
+-  bool agg_within_group = 6 [json_name="agg_within_group"];
+-  bool agg_star = 7 [json_name="agg_star"];
+-  bool agg_distinct = 8 [json_name="agg_distinct"];
+-  bool func_variadic = 9 [json_name="func_variadic"];
+-  CoercionForm funcformat = 10 [json_name="funcformat"];
+-  int32 location = 11 [json_name="location"];
++  int32 ignore_nulls = 6 [json_name="ignore_nulls"];
++  bool agg_within_group = 7 [json_name="agg_within_group"];
++  bool agg_star = 8 [json_name="agg_star"];
++  bool agg_distinct = 9 [json_name="agg_distinct"];
++  bool func_variadic = 10 [json_name="func_variadic"];
++  CoercionForm funcformat = 11 [json_name="funcformat"];
++  int32 location = 12 [json_name="location"];
+ }
+ 
+ message A_Star
+@@ -1284,6 +1294,7 @@ message IndexElem
+   repeated Node opclassopts = 6 [json_name="opclassopts"];
+   SortByDir ordering = 7 [json_name="ordering"];
+   SortByNulls nulls_ordering = 8 [json_name="nulls_ordering"];
++  int32 location = 9 [json_name="location"];
+ }
+ 
+ message DefElem
+@@ -1491,9 +1502,10 @@ message OnConflictClause
+ {
+   OnConflictAction action = 1 [json_name="action"];
+   InferClause infer = 2 [json_name="infer"];
+-  repeated Node target_list = 3 [json_name="targetList"];
+-  Node where_clause = 4 [json_name="whereClause"];
+-  int32 location = 5 [json_name="location"];
++  LockClauseStrength lock_strength = 3 [json_name="lockStrength"];
++  repeated Node target_list = 4 [json_name="targetList"];
++  Node where_clause = 5 [json_name="whereClause"];
++  int32 location = 6 [json_name="location"];
+ }
+ 
+ message CTESearchClause
+@@ -1855,7 +1867,7 @@ message AlterCollationStmt
+ 
+ message AlterDomainStmt
+ {
+-  string subtype = 1 [json_name="subtype"];
++  AlterDomainType subtype = 1 [json_name="subtype"];
+   repeated Node type_name = 2 [json_name="typeName"];
+   string name = 3 [json_name="name"];
+   Node def = 4 [json_name="def"];
+@@ -2327,6 +2339,8 @@ message FetchStmt
+   int64 how_many = 2 [json_name="howMany"];
+   string portalname = 3 [json_name="portalname"];
+   bool ismove = 4 [json_name="ismove"];
++  FetchDirectionKeywords direction_keyword = 5 [json_name="direction_keyword"];
++  int32 location = 6 [json_name="location"];
+ }
+ 
+ message IndexStmt
+@@ -2367,6 +2381,7 @@ message CreateStatsStmt
+   string stxcomment = 5 [json_name="stxcomment"];
+   bool transformed = 6 [json_name="transformed"];
+   bool if_not_exists = 7 [json_name="if_not_exists"];
++  uint32 owner = 8 [json_name="owner"];
+ }
+ 
+ message StatsElem
+@@ -2600,13 +2615,6 @@ message AlterSystemStmt
+   VariableSetStmt setstmt = 1 [json_name="setstmt"];
+ }
+ 
+-message ClusterStmt
+-{
+-  RangeVar relation = 1 [json_name="relation"];
+-  string indexname = 2 [json_name="indexname"];
+-  repeated Node params = 3 [json_name="params"];
+-}
+-
+ message VacuumStmt
+ {
+   repeated Node options = 1 [json_name="options"];
+@@ -2621,6 +2629,15 @@ message VacuumRelation
+   repeated Node va_cols = 3 [json_name="va_cols"];
+ }
+ 
++message RepackStmt
++{
++  RepackCommand command = 1 [json_name="command"];
++  VacuumRelation relation = 2 [json_name="relation"];
++  string indexname = 3 [json_name="indexname"];
++  bool usingindex = 4 [json_name="usingindex"];
++  repeated Node params = 5 [json_name="params"];
++}
++
+ message ExplainStmt
+ {
+   Node query = 1 [json_name="query"];
+@@ -2645,6 +2662,7 @@ message RefreshMatViewStmt
+ 
+ message CheckPointStmt
+ {
++  repeated Node options = 1 [json_name="options"];
+ }
+ 
+ message DiscardStmt
+@@ -2754,6 +2772,7 @@ message PublicationTable
+   RangeVar relation = 1 [json_name="relation"];
+   Node where_clause = 2 [json_name="whereClause"];
+   repeated Node columns = 3 [json_name="columns"];
++  bool except = 4 [json_name="except"];
+ }
+ 
+ message PublicationObjSpec
+@@ -2764,12 +2783,20 @@ message PublicationObjSpec
+   int32 location = 4 [json_name="location"];
+ }
+ 
++message PublicationAllObjSpec
++{
++  PublicationAllObjType pubobjtype = 1 [json_name="pubobjtype"];
++  repeated Node except_tables = 2 [json_name="except_tables"];
++  int32 location = 3 [json_name="location"];
++}
++
+ message CreatePublicationStmt
+ {
+   string pubname = 1 [json_name="pubname"];
+   repeated Node options = 2 [json_name="options"];
+   repeated Node pubobjects = 3 [json_name="pubobjects"];
+   bool for_all_tables = 4 [json_name="for_all_tables"];
++  bool for_all_sequences = 5 [json_name="for_all_sequences"];
+ }
+ 
+ message AlterPublicationStmt
+@@ -2777,27 +2804,30 @@ message AlterPublicationStmt
+   string pubname = 1 [json_name="pubname"];
+   repeated Node options = 2 [json_name="options"];
+   repeated Node pubobjects = 3 [json_name="pubobjects"];
+-  bool for_all_tables = 4 [json_name="for_all_tables"];
+-  AlterPublicationAction action = 5 [json_name="action"];
++  AlterPublicationAction action = 4 [json_name="action"];
++  bool for_all_tables = 5 [json_name="for_all_tables"];
++  bool for_all_sequences = 6 [json_name="for_all_sequences"];
+ }
+ 
+ message CreateSubscriptionStmt
+ {
+   string subname = 1 [json_name="subname"];
+-  string conninfo = 2 [json_name="conninfo"];
+-  repeated Node publication = 3 [json_name="publication"];
+-  repeated Node options = 4 [json_name="options"];
+-  int32 conninfo_location = 5 [json_name="conninfo_location"];
++  string servername = 2 [json_name="servername"];
++  string conninfo = 3 [json_name="conninfo"];
++  repeated Node publication = 4 [json_name="publication"];
++  repeated Node options = 5 [json_name="options"];
++  int32 conninfo_location = 6 [json_name="conninfo_location"];
+ }
+ 
+ message AlterSubscriptionStmt
+ {
+   AlterSubscriptionType kind = 1 [json_name="kind"];
+   string subname = 2 [json_name="subname"];
+-  string conninfo = 3 [json_name="conninfo"];
+-  repeated Node publication = 4 [json_name="publication"];
+-  repeated Node options = 5 [json_name="options"];
+-  int32 conninfo_location = 6 [json_name="conninfo_location"];
++  string servername = 3 [json_name="servername"];
++  string conninfo = 4 [json_name="conninfo"];
++  repeated Node publication = 5 [json_name="publication"];
++  repeated Node options = 6 [json_name="options"];
++  int32 conninfo_location = 7 [json_name="conninfo_location"];
+ }
+ 
+ message DropSubscriptionStmt
+@@ -2807,6 +2837,13 @@ message DropSubscriptionStmt
+   DropBehavior behavior = 3 [json_name="behavior"];
+ }
+ 
++message WaitStmt
++{
++  string lsn_literal = 1 [json_name="lsn_literal"];
++  repeated Node options = 2 [json_name="options"];
++  int32 lsn_location = 3 [json_name="lsn_location"];
++}
++
+ enum QuerySource
+ {
+   QUERY_SOURCE_UNDEFINED = 0;
+@@ -2935,6 +2972,7 @@ enum WCOKind
+   WCO_RLS_CONFLICT_CHECK = 4;
+   WCO_RLS_MERGE_UPDATE_CHECK = 5;
+   WCO_RLS_MERGE_DELETE_CHECK = 6;
++  WCO_VIEW_CONFLICT_CHECK = 7;
+ }
+ 
+ enum GroupingSetKind
+@@ -3023,27 +3061,28 @@ enum ObjectType
+   OBJECT_POLICY = 29;
+   OBJECT_PROCEDURE = 30;
+   OBJECT_PUBLICATION = 31;
+-  OBJECT_PUBLICATION_NAMESPACE = 32;
+-  OBJECT_PUBLICATION_REL = 33;
+-  OBJECT_ROLE = 34;
+-  OBJECT_ROUTINE = 35;
+-  OBJECT_RULE = 36;
+-  OBJECT_SCHEMA = 37;
+-  OBJECT_SEQUENCE = 38;
+-  OBJECT_SUBSCRIPTION = 39;
+-  OBJECT_STATISTIC_EXT = 40;
+-  OBJECT_TABCONSTRAINT = 41;
+-  OBJECT_TABLE = 42;
+-  OBJECT_TABLESPACE = 43;
+-  OBJECT_TRANSFORM = 44;
+-  OBJECT_TRIGGER = 45;
+-  OBJECT_TSCONFIGURATION = 46;
+-  OBJECT_TSDICTIONARY = 47;
+-  OBJECT_TSPARSER = 48;
+-  OBJECT_TSTEMPLATE = 49;
+-  OBJECT_TYPE = 50;
+-  OBJECT_USER_MAPPING = 51;
+-  OBJECT_VIEW = 52;
++  OBJECT_PUBLICATION_EXCLUDED_REL = 32;
++  OBJECT_PUBLICATION_NAMESPACE = 33;
++  OBJECT_PUBLICATION_REL = 34;
++  OBJECT_ROLE = 35;
++  OBJECT_ROUTINE = 36;
++  OBJECT_RULE = 37;
++  OBJECT_SCHEMA = 38;
++  OBJECT_SEQUENCE = 39;
++  OBJECT_SUBSCRIPTION = 40;
++  OBJECT_STATISTIC_EXT = 41;
++  OBJECT_TABCONSTRAINT = 42;
++  OBJECT_TABLE = 43;
++  OBJECT_TABLESPACE = 44;
++  OBJECT_TRANSFORM = 45;
++  OBJECT_TRIGGER = 46;
++  OBJECT_TSCONFIGURATION = 47;
++  OBJECT_TSDICTIONARY = 48;
++  OBJECT_TSPARSER = 49;
++  OBJECT_TSTEMPLATE = 50;
++  OBJECT_TYPE = 51;
++  OBJECT_USER_MAPPING = 52;
++  OBJECT_VIEW = 53;
+ }
+ 
+ enum DropBehavior
+@@ -3124,6 +3163,17 @@ enum AlterTableType
+   AT_ReAddStatistics = 66;
+ }
+ 
++enum AlterDomainType
++{
++  ALTER_DOMAIN_TYPE_UNDEFINED = 0;
++  AD_AlterDefault = 1;
++  AD_DropNotNull = 2;
++  AD_SetNotNull = 3;
++  AD_AddConstraint = 4;
++  AD_DropConstraint = 5;
++  AD_ValidateConstraint = 6;
++}
++
+ enum GrantTargetType
+ {
+   GRANT_TARGET_TYPE_UNDEFINED = 0;
+@@ -3189,6 +3239,23 @@ enum FetchDirection
+   FETCH_RELATIVE = 4;
+ }
+ 
++enum FetchDirectionKeywords
++{
++  FETCH_DIRECTION_KEYWORDS_UNDEFINED = 0;
++  FETCH_KEYWORD_NONE = 1;
++  FETCH_KEYWORD_NEXT = 2;
++  FETCH_KEYWORD_PRIOR = 3;
++  FETCH_KEYWORD_FIRST = 4;
++  FETCH_KEYWORD_LAST = 5;
++  FETCH_KEYWORD_ABSOLUTE = 6;
++  FETCH_KEYWORD_RELATIVE = 7;
++  FETCH_KEYWORD_ALL = 8;
++  FETCH_KEYWORD_FORWARD = 9;
++  FETCH_KEYWORD_FORWARD_ALL = 10;
++  FETCH_KEYWORD_BACKWARD = 11;
++  FETCH_KEYWORD_BACKWARD_ALL = 12;
++}
++
+ enum FunctionParameterMode
+ {
+   FUNCTION_PARAMETER_MODE_UNDEFINED = 0;
+@@ -3223,6 +3290,14 @@ enum ViewCheckOption
+   CASCADED_CHECK_OPTION = 3;
+ }
+ 
++enum RepackCommand
++{
++  REPACK_COMMAND_UNDEFINED = 0;
++  REPACK_COMMAND_CLUSTER = 1;
++  REPACK_COMMAND_REPACK = 2;
++  REPACK_COMMAND_VACUUMFULL = 3;
++}
++
+ enum DiscardMode
+ {
+   DISCARD_MODE_UNDEFINED = 0;
+@@ -3256,9 +3331,17 @@ enum PublicationObjSpecType
+ {
+   PUBLICATION_OBJ_SPEC_TYPE_UNDEFINED = 0;
+   PUBLICATIONOBJ_TABLE = 1;
+-  PUBLICATIONOBJ_TABLES_IN_SCHEMA = 2;
+-  PUBLICATIONOBJ_TABLES_IN_CUR_SCHEMA = 3;
+-  PUBLICATIONOBJ_CONTINUATION = 4;
++  PUBLICATIONOBJ_EXCEPT_TABLE = 2;
++  PUBLICATIONOBJ_TABLES_IN_SCHEMA = 3;
++  PUBLICATIONOBJ_TABLES_IN_CUR_SCHEMA = 4;
++  PUBLICATIONOBJ_CONTINUATION = 5;
++}
++
++enum PublicationAllObjType
++{
++  PUBLICATION_ALL_OBJ_TYPE_UNDEFINED = 0;
++  PUBLICATION_ALL_TABLES = 1;
++  PUBLICATION_ALL_SEQUENCES = 2;
+ }
+ 
+ enum AlterPublicationAction
+@@ -3273,13 +3356,15 @@ enum AlterSubscriptionType
+ {
+   ALTER_SUBSCRIPTION_TYPE_UNDEFINED = 0;
+   ALTER_SUBSCRIPTION_OPTIONS = 1;
+-  ALTER_SUBSCRIPTION_CONNECTION = 2;
+-  ALTER_SUBSCRIPTION_SET_PUBLICATION = 3;
+-  ALTER_SUBSCRIPTION_ADD_PUBLICATION = 4;
+-  ALTER_SUBSCRIPTION_DROP_PUBLICATION = 5;
+-  ALTER_SUBSCRIPTION_REFRESH = 6;
+-  ALTER_SUBSCRIPTION_ENABLED = 7;
+-  ALTER_SUBSCRIPTION_SKIP = 8;
++  ALTER_SUBSCRIPTION_SERVER = 2;
++  ALTER_SUBSCRIPTION_CONNECTION = 3;
++  ALTER_SUBSCRIPTION_SET_PUBLICATION = 4;
++  ALTER_SUBSCRIPTION_ADD_PUBLICATION = 5;
++  ALTER_SUBSCRIPTION_DROP_PUBLICATION = 6;
++  ALTER_SUBSCRIPTION_REFRESH_PUBLICATION = 7;
++  ALTER_SUBSCRIPTION_REFRESH_SEQUENCES = 8;
++  ALTER_SUBSCRIPTION_ENABLED = 9;
++  ALTER_SUBSCRIPTION_SKIP = 10;
+ }
+ 
+ enum OverridingKind
+@@ -3431,11 +3516,12 @@ enum JsonConstructorType
+   JSON_CONSTRUCTOR_TYPE_UNDEFINED = 0;
+   JSCTOR_JSON_OBJECT = 1;
+   JSCTOR_JSON_ARRAY = 2;
+-  JSCTOR_JSON_OBJECTAGG = 3;
+-  JSCTOR_JSON_ARRAYAGG = 4;
+-  JSCTOR_JSON_PARSE = 5;
+-  JSCTOR_JSON_SCALAR = 6;
+-  JSCTOR_JSON_SERIALIZE = 7;
++  JSCTOR_JSON_ARRAY_QUERY = 3;
++  JSCTOR_JSON_OBJECTAGG = 4;
++  JSCTOR_JSON_ARRAYAGG = 5;
++  JSCTOR_JSON_PARSE = 6;
++  JSCTOR_JSON_SCALAR = 7;
++  JSCTOR_JSON_SERIALIZE = 8;
+ }
+ 
+ enum JsonValueType
+@@ -3572,6 +3658,7 @@ enum OnConflictAction
+   ONCONFLICT_NONE = 1;
+   ONCONFLICT_NOTHING = 2;
+   ONCONFLICT_UPDATE = 3;
++  ONCONFLICT_SELECT = 4;
+ }
+ 
+ enum LimitOption
+@@ -3860,334 +3947,339 @@ enum Token {
+   HOUR_P = 451;
+   IDENTITY_P = 452;
+   IF_P = 453;
+-  ILIKE = 454;
+-  IMMEDIATE = 455;
+-  IMMUTABLE = 456;
+-  IMPLICIT_P = 457;
+-  IMPORT_P = 458;
+-  IN_P = 459;
+-  INCLUDE = 460;
+-  INCLUDING = 461;
+-  INCREMENT = 462;
+-  INDENT = 463;
+-  INDEX = 464;
+-  INDEXES = 465;
+-  INHERIT = 466;
+-  INHERITS = 467;
+-  INITIALLY = 468;
+-  INLINE_P = 469;
+-  INNER_P = 470;
+-  INOUT = 471;
+-  INPUT_P = 472;
+-  INSENSITIVE = 473;
+-  INSERT = 474;
+-  INSTEAD = 475;
+-  INT_P = 476;
+-  INTEGER = 477;
+-  INTERSECT = 478;
+-  INTERVAL = 479;
+-  INTO = 480;
+-  INVOKER = 481;
+-  IS = 482;
+-  ISNULL = 483;
+-  ISOLATION = 484;
+-  JOIN = 485;
+-  JSON = 486;
+-  JSON_ARRAY = 487;
+-  JSON_ARRAYAGG = 488;
+-  JSON_EXISTS = 489;
+-  JSON_OBJECT = 490;
+-  JSON_OBJECTAGG = 491;
+-  JSON_QUERY = 492;
+-  JSON_SCALAR = 493;
+-  JSON_SERIALIZE = 494;
+-  JSON_TABLE = 495;
+-  JSON_VALUE = 496;
+-  KEEP = 497;
+-  KEY = 498;
+-  KEYS = 499;
+-  LABEL = 500;
+-  LANGUAGE = 501;
+-  LARGE_P = 502;
+-  LAST_P = 503;
+-  LATERAL_P = 504;
+-  LEADING = 505;
+-  LEAKPROOF = 506;
+-  LEAST = 507;
+-  LEFT = 508;
+-  LEVEL = 509;
+-  LIKE = 510;
+-  LIMIT = 511;
+-  LISTEN = 512;
+-  LOAD = 513;
+-  LOCAL = 514;
+-  LOCALTIME = 515;
+-  LOCALTIMESTAMP = 516;
+-  LOCATION = 517;
+-  LOCK_P = 518;
+-  LOCKED = 519;
+-  LOGGED = 520;
+-  MAPPING = 521;
+-  MATCH = 522;
+-  MATCHED = 523;
+-  MATERIALIZED = 524;
+-  MAXVALUE = 525;
+-  MERGE = 526;
+-  MERGE_ACTION = 527;
+-  METHOD = 528;
+-  MINUTE_P = 529;
+-  MINVALUE = 530;
+-  MODE = 531;
+-  MONTH_P = 532;
+-  MOVE = 533;
+-  NAME_P = 534;
+-  NAMES = 535;
+-  NATIONAL = 536;
+-  NATURAL = 537;
+-  NCHAR = 538;
+-  NESTED = 539;
+-  NEW = 540;
+-  NEXT = 541;
+-  NFC = 542;
+-  NFD = 543;
+-  NFKC = 544;
+-  NFKD = 545;
+-  NO = 546;
+-  NONE = 547;
+-  NORMALIZE = 548;
+-  NORMALIZED = 549;
+-  NOT = 550;
+-  NOTHING = 551;
+-  NOTIFY = 552;
+-  NOTNULL = 553;
+-  NOWAIT = 554;
+-  NULL_P = 555;
+-  NULLIF = 556;
+-  NULLS_P = 557;
+-  NUMERIC = 558;
+-  OBJECT_P = 559;
+-  OBJECTS_P = 560;
+-  OF = 561;
+-  OFF = 562;
+-  OFFSET = 563;
+-  OIDS = 564;
+-  OLD = 565;
+-  OMIT = 566;
+-  ON = 567;
+-  ONLY = 568;
+-  OPERATOR = 569;
+-  OPTION = 570;
+-  OPTIONS = 571;
+-  OR = 572;
+-  ORDER = 573;
+-  ORDINALITY = 574;
+-  OTHERS = 575;
+-  OUT_P = 576;
+-  OUTER_P = 577;
+-  OVER = 578;
+-  OVERLAPS = 579;
+-  OVERLAY = 580;
+-  OVERRIDING = 581;
+-  OWNED = 582;
+-  OWNER = 583;
+-  PARALLEL = 584;
+-  PARAMETER = 585;
+-  PARSER = 586;
+-  PARTIAL = 587;
+-  PARTITION = 588;
+-  PASSING = 589;
+-  PASSWORD = 590;
+-  PATH = 591;
+-  PERIOD = 592;
+-  PLACING = 593;
+-  PLAN = 594;
+-  PLANS = 595;
+-  POLICY = 596;
+-  POSITION = 597;
+-  PRECEDING = 598;
+-  PRECISION = 599;
+-  PRESERVE = 600;
+-  PREPARE = 601;
+-  PREPARED = 602;
+-  PRIMARY = 603;
+-  PRIOR = 604;
+-  PRIVILEGES = 605;
+-  PROCEDURAL = 606;
+-  PROCEDURE = 607;
+-  PROCEDURES = 608;
+-  PROGRAM = 609;
+-  PUBLICATION = 610;
+-  QUOTE = 611;
+-  QUOTES = 612;
+-  RANGE = 613;
+-  READ = 614;
+-  REAL = 615;
+-  REASSIGN = 616;
+-  RECURSIVE = 617;
+-  REF_P = 618;
+-  REFERENCES = 619;
+-  REFERENCING = 620;
+-  REFRESH = 621;
+-  REINDEX = 622;
+-  RELATIVE_P = 623;
+-  RELEASE = 624;
+-  RENAME = 625;
+-  REPEATABLE = 626;
+-  REPLACE = 627;
+-  REPLICA = 628;
+-  RESET = 629;
+-  RESTART = 630;
+-  RESTRICT = 631;
+-  RETURN = 632;
+-  RETURNING = 633;
+-  RETURNS = 634;
+-  REVOKE = 635;
+-  RIGHT = 636;
+-  ROLE = 637;
+-  ROLLBACK = 638;
+-  ROLLUP = 639;
+-  ROUTINE = 640;
+-  ROUTINES = 641;
+-  ROW = 642;
+-  ROWS = 643;
+-  RULE = 644;
+-  SAVEPOINT = 645;
+-  SCALAR = 646;
+-  SCHEMA = 647;
+-  SCHEMAS = 648;
+-  SCROLL = 649;
+-  SEARCH = 650;
+-  SECOND_P = 651;
+-  SECURITY = 652;
+-  SELECT = 653;
+-  SEQUENCE = 654;
+-  SEQUENCES = 655;
+-  SERIALIZABLE = 656;
+-  SERVER = 657;
+-  SESSION = 658;
+-  SESSION_USER = 659;
+-  SET = 660;
+-  SETS = 661;
+-  SETOF = 662;
+-  SHARE = 663;
+-  SHOW = 664;
+-  SIMILAR = 665;
+-  SIMPLE = 666;
+-  SKIP = 667;
+-  SMALLINT = 668;
+-  SNAPSHOT = 669;
+-  SOME = 670;
+-  SOURCE = 671;
+-  SQL_P = 672;
+-  STABLE = 673;
+-  STANDALONE_P = 674;
+-  START = 675;
+-  STATEMENT = 676;
+-  STATISTICS = 677;
+-  STDIN = 678;
+-  STDOUT = 679;
+-  STORAGE = 680;
+-  STORED = 681;
+-  STRICT_P = 682;
+-  STRING_P = 683;
+-  STRIP_P = 684;
+-  SUBSCRIPTION = 685;
+-  SUBSTRING = 686;
+-  SUPPORT = 687;
+-  SYMMETRIC = 688;
+-  SYSID = 689;
+-  SYSTEM_P = 690;
+-  SYSTEM_USER = 691;
+-  TABLE = 692;
+-  TABLES = 693;
+-  TABLESAMPLE = 694;
+-  TABLESPACE = 695;
+-  TARGET = 696;
+-  TEMP = 697;
+-  TEMPLATE = 698;
+-  TEMPORARY = 699;
+-  TEXT_P = 700;
+-  THEN = 701;
+-  TIES = 702;
+-  TIME = 703;
+-  TIMESTAMP = 704;
+-  TO = 705;
+-  TRAILING = 706;
+-  TRANSACTION = 707;
+-  TRANSFORM = 708;
+-  TREAT = 709;
+-  TRIGGER = 710;
+-  TRIM = 711;
+-  TRUE_P = 712;
+-  TRUNCATE = 713;
+-  TRUSTED = 714;
+-  TYPE_P = 715;
+-  TYPES_P = 716;
+-  UESCAPE = 717;
+-  UNBOUNDED = 718;
+-  UNCONDITIONAL = 719;
+-  UNCOMMITTED = 720;
+-  UNENCRYPTED = 721;
+-  UNION = 722;
+-  UNIQUE = 723;
+-  UNKNOWN = 724;
+-  UNLISTEN = 725;
+-  UNLOGGED = 726;
+-  UNTIL = 727;
+-  UPDATE = 728;
+-  USER = 729;
+-  USING = 730;
+-  VACUUM = 731;
+-  VALID = 732;
+-  VALIDATE = 733;
+-  VALIDATOR = 734;
+-  VALUE_P = 735;
+-  VALUES = 736;
+-  VARCHAR = 737;
+-  VARIADIC = 738;
+-  VARYING = 739;
+-  VERBOSE = 740;
+-  VERSION_P = 741;
+-  VIEW = 742;
+-  VIEWS = 743;
+-  VIRTUAL = 744;
+-  VOLATILE = 745;
+-  WHEN = 746;
+-  WHERE = 747;
+-  WHITESPACE_P = 748;
+-  WINDOW = 749;
+-  WITH = 750;
+-  WITHIN = 751;
+-  WITHOUT = 752;
+-  WORK = 753;
+-  WRAPPER = 754;
+-  WRITE = 755;
+-  XML_P = 756;
+-  XMLATTRIBUTES = 757;
+-  XMLCONCAT = 758;
+-  XMLELEMENT = 759;
+-  XMLEXISTS = 760;
+-  XMLFOREST = 761;
+-  XMLNAMESPACES = 762;
+-  XMLPARSE = 763;
+-  XMLPI = 764;
+-  XMLROOT = 765;
+-  XMLSERIALIZE = 766;
+-  XMLTABLE = 767;
+-  YEAR_P = 768;
+-  YES_P = 769;
+-  ZONE = 770;
+-  FORMAT_LA = 771;
+-  NOT_LA = 772;
+-  NULLS_LA = 773;
+-  WITH_LA = 774;
+-  WITHOUT_LA = 775;
+-  MODE_TYPE_NAME = 776;
+-  MODE_PLPGSQL_EXPR = 777;
+-  MODE_PLPGSQL_ASSIGN1 = 778;
+-  MODE_PLPGSQL_ASSIGN2 = 779;
+-  MODE_PLPGSQL_ASSIGN3 = 780;
+-  UMINUS = 781;
++  IGNORE_P = 454;
++  ILIKE = 455;
++  IMMEDIATE = 456;
++  IMMUTABLE = 457;
++  IMPLICIT_P = 458;
++  IMPORT_P = 459;
++  IN_P = 460;
++  INCLUDE = 461;
++  INCLUDING = 462;
++  INCREMENT = 463;
++  INDENT = 464;
++  INDEX = 465;
++  INDEXES = 466;
++  INHERIT = 467;
++  INHERITS = 468;
++  INITIALLY = 469;
++  INLINE_P = 470;
++  INNER_P = 471;
++  INOUT = 472;
++  INPUT_P = 473;
++  INSENSITIVE = 474;
++  INSERT = 475;
++  INSTEAD = 476;
++  INT_P = 477;
++  INTEGER = 478;
++  INTERSECT = 479;
++  INTERVAL = 480;
++  INTO = 481;
++  INVOKER = 482;
++  IS = 483;
++  ISNULL = 484;
++  ISOLATION = 485;
++  JOIN = 486;
++  JSON = 487;
++  JSON_ARRAY = 488;
++  JSON_ARRAYAGG = 489;
++  JSON_EXISTS = 490;
++  JSON_OBJECT = 491;
++  JSON_OBJECTAGG = 492;
++  JSON_QUERY = 493;
++  JSON_SCALAR = 494;
++  JSON_SERIALIZE = 495;
++  JSON_TABLE = 496;
++  JSON_VALUE = 497;
++  KEEP = 498;
++  KEY = 499;
++  KEYS = 500;
++  LABEL = 501;
++  LANGUAGE = 502;
++  LARGE_P = 503;
++  LAST_P = 504;
++  LATERAL_P = 505;
++  LEADING = 506;
++  LEAKPROOF = 507;
++  LEAST = 508;
++  LEFT = 509;
++  LEVEL = 510;
++  LIKE = 511;
++  LIMIT = 512;
++  LISTEN = 513;
++  LOAD = 514;
++  LOCAL = 515;
++  LOCALTIME = 516;
++  LOCALTIMESTAMP = 517;
++  LOCATION = 518;
++  LOCK_P = 519;
++  LOCKED = 520;
++  LOGGED = 521;
++  LSN_P = 522;
++  MAPPING = 523;
++  MATCH = 524;
++  MATCHED = 525;
++  MATERIALIZED = 526;
++  MAXVALUE = 527;
++  MERGE = 528;
++  MERGE_ACTION = 529;
++  METHOD = 530;
++  MINUTE_P = 531;
++  MINVALUE = 532;
++  MODE = 533;
++  MONTH_P = 534;
++  MOVE = 535;
++  NAME_P = 536;
++  NAMES = 537;
++  NATIONAL = 538;
++  NATURAL = 539;
++  NCHAR = 540;
++  NESTED = 541;
++  NEW = 542;
++  NEXT = 543;
++  NFC = 544;
++  NFD = 545;
++  NFKC = 546;
++  NFKD = 547;
++  NO = 548;
++  NONE = 549;
++  NORMALIZE = 550;
++  NORMALIZED = 551;
++  NOT = 552;
++  NOTHING = 553;
++  NOTIFY = 554;
++  NOTNULL = 555;
++  NOWAIT = 556;
++  NULL_P = 557;
++  NULLIF = 558;
++  NULLS_P = 559;
++  NUMERIC = 560;
++  OBJECT_P = 561;
++  OBJECTS_P = 562;
++  OF = 563;
++  OFF = 564;
++  OFFSET = 565;
++  OIDS = 566;
++  OLD = 567;
++  OMIT = 568;
++  ON = 569;
++  ONLY = 570;
++  OPERATOR = 571;
++  OPTION = 572;
++  OPTIONS = 573;
++  OR = 574;
++  ORDER = 575;
++  ORDINALITY = 576;
++  OTHERS = 577;
++  OUT_P = 578;
++  OUTER_P = 579;
++  OVER = 580;
++  OVERLAPS = 581;
++  OVERLAY = 582;
++  OVERRIDING = 583;
++  OWNED = 584;
++  OWNER = 585;
++  PARALLEL = 586;
++  PARAMETER = 587;
++  PARSER = 588;
++  PARTIAL = 589;
++  PARTITION = 590;
++  PASSING = 591;
++  PASSWORD = 592;
++  PATH = 593;
++  PERIOD = 594;
++  PLACING = 595;
++  PLAN = 596;
++  PLANS = 597;
++  POLICY = 598;
++  POSITION = 599;
++  PRECEDING = 600;
++  PRECISION = 601;
++  PRESERVE = 602;
++  PREPARE = 603;
++  PREPARED = 604;
++  PRIMARY = 605;
++  PRIOR = 606;
++  PRIVILEGES = 607;
++  PROCEDURAL = 608;
++  PROCEDURE = 609;
++  PROCEDURES = 610;
++  PROGRAM = 611;
++  PUBLICATION = 612;
++  QUOTE = 613;
++  QUOTES = 614;
++  RANGE = 615;
++  READ = 616;
++  REAL = 617;
++  REASSIGN = 618;
++  RECURSIVE = 619;
++  REF_P = 620;
++  REFERENCES = 621;
++  REFERENCING = 622;
++  REFRESH = 623;
++  REINDEX = 624;
++  RELATIVE_P = 625;
++  RELEASE = 626;
++  RENAME = 627;
++  REPACK = 628;
++  REPEATABLE = 629;
++  REPLACE = 630;
++  REPLICA = 631;
++  RESET = 632;
++  RESPECT_P = 633;
++  RESTART = 634;
++  RESTRICT = 635;
++  RETURN = 636;
++  RETURNING = 637;
++  RETURNS = 638;
++  REVOKE = 639;
++  RIGHT = 640;
++  ROLE = 641;
++  ROLLBACK = 642;
++  ROLLUP = 643;
++  ROUTINE = 644;
++  ROUTINES = 645;
++  ROW = 646;
++  ROWS = 647;
++  RULE = 648;
++  SAVEPOINT = 649;
++  SCALAR = 650;
++  SCHEMA = 651;
++  SCHEMAS = 652;
++  SCROLL = 653;
++  SEARCH = 654;
++  SECOND_P = 655;
++  SECURITY = 656;
++  SELECT = 657;
++  SEQUENCE = 658;
++  SEQUENCES = 659;
++  SERIALIZABLE = 660;
++  SERVER = 661;
++  SESSION = 662;
++  SESSION_USER = 663;
++  SET = 664;
++  SETS = 665;
++  SETOF = 666;
++  SHARE = 667;
++  SHOW = 668;
++  SIMILAR = 669;
++  SIMPLE = 670;
++  SKIP = 671;
++  SMALLINT = 672;
++  SNAPSHOT = 673;
++  SOME = 674;
++  SOURCE = 675;
++  SQL_P = 676;
++  STABLE = 677;
++  STANDALONE_P = 678;
++  START = 679;
++  STATEMENT = 680;
++  STATISTICS = 681;
++  STDIN = 682;
++  STDOUT = 683;
++  STORAGE = 684;
++  STORED = 685;
++  STRICT_P = 686;
++  STRING_P = 687;
++  STRIP_P = 688;
++  SUBSCRIPTION = 689;
++  SUBSTRING = 690;
++  SUPPORT = 691;
++  SYMMETRIC = 692;
++  SYSID = 693;
++  SYSTEM_P = 694;
++  SYSTEM_USER = 695;
++  TABLE = 696;
++  TABLES = 697;
++  TABLESAMPLE = 698;
++  TABLESPACE = 699;
++  TARGET = 700;
++  TEMP = 701;
++  TEMPLATE = 702;
++  TEMPORARY = 703;
++  TEXT_P = 704;
++  THEN = 705;
++  TIES = 706;
++  TIME = 707;
++  TIMESTAMP = 708;
++  TO = 709;
++  TRAILING = 710;
++  TRANSACTION = 711;
++  TRANSFORM = 712;
++  TREAT = 713;
++  TRIGGER = 714;
++  TRIM = 715;
++  TRUE_P = 716;
++  TRUNCATE = 717;
++  TRUSTED = 718;
++  TYPE_P = 719;
++  TYPES_P = 720;
++  UESCAPE = 721;
++  UNBOUNDED = 722;
++  UNCONDITIONAL = 723;
++  UNCOMMITTED = 724;
++  UNENCRYPTED = 725;
++  UNION = 726;
++  UNIQUE = 727;
++  UNKNOWN = 728;
++  UNLISTEN = 729;
++  UNLOGGED = 730;
++  UNTIL = 731;
++  UPDATE = 732;
++  USER = 733;
++  USING = 734;
++  VACUUM = 735;
++  VALID = 736;
++  VALIDATE = 737;
++  VALIDATOR = 738;
++  VALUE_P = 739;
++  VALUES = 740;
++  VARCHAR = 741;
++  VARIADIC = 742;
++  VARYING = 743;
++  VERBOSE = 744;
++  VERSION_P = 745;
++  VIEW = 746;
++  VIEWS = 747;
++  VIRTUAL = 748;
++  VOLATILE = 749;
++  WAIT = 750;
++  WHEN = 751;
++  WHERE = 752;
++  WHITESPACE_P = 753;
++  WINDOW = 754;
++  WITH = 755;
++  WITHIN = 756;
++  WITHOUT = 757;
++  WORK = 758;
++  WRAPPER = 759;
++  WRITE = 760;
++  XML_P = 761;
++  XMLATTRIBUTES = 762;
++  XMLCONCAT = 763;
++  XMLELEMENT = 764;
++  XMLEXISTS = 765;
++  XMLFOREST = 766;
++  XMLNAMESPACES = 767;
++  XMLPARSE = 768;
++  XMLPI = 769;
++  XMLROOT = 770;
++  XMLSERIALIZE = 771;
++  XMLTABLE = 772;
++  YEAR_P = 773;
++  YES_P = 774;
++  ZONE = 775;
++  FORMAT_LA = 776;
++  NOT_LA = 777;
++  NULLS_LA = 778;
++  WITH_LA = 779;
++  WITHOUT_LA = 780;
++  MODE_TYPE_NAME = 781;
++  MODE_PLPGSQL_EXPR = 782;
++  MODE_PLPGSQL_ASSIGN1 = 783;
++  MODE_PLPGSQL_ASSIGN2 = 784;
++  MODE_PLPGSQL_ASSIGN3 = 785;
++  UMINUS = 786;
+ }
+ 
+ 
+diff --git a/src/include/pg_query_enum_defs.c b/src/include/pg_query_enum_defs.c
+index 4a756ab..18bddbf 100644
+--- a/src/include/pg_query_enum_defs.c
++++ b/src/include/pg_query_enum_defs.c
+@@ -161,6 +161,7 @@ _enumToStringWCOKind(WCOKind value) {
+     case WCO_RLS_CONFLICT_CHECK: return "WCO_RLS_CONFLICT_CHECK";
+     case WCO_RLS_MERGE_UPDATE_CHECK: return "WCO_RLS_MERGE_UPDATE_CHECK";
+     case WCO_RLS_MERGE_DELETE_CHECK: return "WCO_RLS_MERGE_DELETE_CHECK";
++    case WCO_VIEW_CONFLICT_CHECK: return "WCO_VIEW_CONFLICT_CHECK";
+   }
+   Assert(false);
+   return NULL;
+@@ -270,6 +271,7 @@ _enumToStringObjectType(ObjectType value) {
+     case OBJECT_POLICY: return "OBJECT_POLICY";
+     case OBJECT_PROCEDURE: return "OBJECT_PROCEDURE";
+     case OBJECT_PUBLICATION: return "OBJECT_PUBLICATION";
++    case OBJECT_PUBLICATION_EXCLUDED_REL: return "OBJECT_PUBLICATION_EXCLUDED_REL";
+     case OBJECT_PUBLICATION_NAMESPACE: return "OBJECT_PUBLICATION_NAMESPACE";
+     case OBJECT_PUBLICATION_REL: return "OBJECT_PUBLICATION_REL";
+     case OBJECT_ROLE: return "OBJECT_ROLE";
+@@ -380,6 +382,20 @@ _enumToStringAlterTableType(AlterTableType value) {
+   return NULL;
+ }
+ 
++static const char*
++_enumToStringAlterDomainType(AlterDomainType value) {
++  switch(value) {
++    case AD_AlterDefault: return "AD_AlterDefault";
++    case AD_DropNotNull: return "AD_DropNotNull";
++    case AD_SetNotNull: return "AD_SetNotNull";
++    case AD_AddConstraint: return "AD_AddConstraint";
++    case AD_DropConstraint: return "AD_DropConstraint";
++    case AD_ValidateConstraint: return "AD_ValidateConstraint";
++  }
++  Assert(false);
++  return NULL;
++}
++
+ static const char*
+ _enumToStringGrantTargetType(GrantTargetType value) {
+   switch(value) {
+@@ -463,6 +479,26 @@ _enumToStringFetchDirection(FetchDirection value) {
+   return NULL;
+ }
+ 
++static const char*
++_enumToStringFetchDirectionKeywords(FetchDirectionKeywords value) {
++  switch(value) {
++    case FETCH_KEYWORD_NONE: return "FETCH_KEYWORD_NONE";
++    case FETCH_KEYWORD_NEXT: return "FETCH_KEYWORD_NEXT";
++    case FETCH_KEYWORD_PRIOR: return "FETCH_KEYWORD_PRIOR";
++    case FETCH_KEYWORD_FIRST: return "FETCH_KEYWORD_FIRST";
++    case FETCH_KEYWORD_LAST: return "FETCH_KEYWORD_LAST";
++    case FETCH_KEYWORD_ABSOLUTE: return "FETCH_KEYWORD_ABSOLUTE";
++    case FETCH_KEYWORD_RELATIVE: return "FETCH_KEYWORD_RELATIVE";
++    case FETCH_KEYWORD_ALL: return "FETCH_KEYWORD_ALL";
++    case FETCH_KEYWORD_FORWARD: return "FETCH_KEYWORD_FORWARD";
++    case FETCH_KEYWORD_FORWARD_ALL: return "FETCH_KEYWORD_FORWARD_ALL";
++    case FETCH_KEYWORD_BACKWARD: return "FETCH_KEYWORD_BACKWARD";
++    case FETCH_KEYWORD_BACKWARD_ALL: return "FETCH_KEYWORD_BACKWARD_ALL";
++  }
++  Assert(false);
++  return NULL;
++}
++
+ static const char*
+ _enumToStringFunctionParameterMode(FunctionParameterMode value) {
+   switch(value) {
+@@ -506,6 +542,17 @@ _enumToStringViewCheckOption(ViewCheckOption value) {
+   return NULL;
+ }
+ 
++static const char*
++_enumToStringRepackCommand(RepackCommand value) {
++  switch(value) {
++    case REPACK_COMMAND_CLUSTER: return "REPACK_COMMAND_CLUSTER";
++    case REPACK_COMMAND_REPACK: return "REPACK_COMMAND_REPACK";
++    case REPACK_COMMAND_VACUUMFULL: return "REPACK_COMMAND_VACUUMFULL";
++  }
++  Assert(false);
++  return NULL;
++}
++
+ static const char*
+ _enumToStringDiscardMode(DiscardMode value) {
+   switch(value) {
+@@ -548,6 +595,7 @@ static const char*
+ _enumToStringPublicationObjSpecType(PublicationObjSpecType value) {
+   switch(value) {
+     case PUBLICATIONOBJ_TABLE: return "PUBLICATIONOBJ_TABLE";
++    case PUBLICATIONOBJ_EXCEPT_TABLE: return "PUBLICATIONOBJ_EXCEPT_TABLE";
+     case PUBLICATIONOBJ_TABLES_IN_SCHEMA: return "PUBLICATIONOBJ_TABLES_IN_SCHEMA";
+     case PUBLICATIONOBJ_TABLES_IN_CUR_SCHEMA: return "PUBLICATIONOBJ_TABLES_IN_CUR_SCHEMA";
+     case PUBLICATIONOBJ_CONTINUATION: return "PUBLICATIONOBJ_CONTINUATION";
+@@ -556,6 +604,16 @@ _enumToStringPublicationObjSpecType(PublicationObjSpecType value) {
+   return NULL;
+ }
+ 
++static const char*
++_enumToStringPublicationAllObjType(PublicationAllObjType value) {
++  switch(value) {
++    case PUBLICATION_ALL_TABLES: return "PUBLICATION_ALL_TABLES";
++    case PUBLICATION_ALL_SEQUENCES: return "PUBLICATION_ALL_SEQUENCES";
++  }
++  Assert(false);
++  return NULL;
++}
++
+ static const char*
+ _enumToStringAlterPublicationAction(AlterPublicationAction value) {
+   switch(value) {
+@@ -571,11 +629,13 @@ static const char*
+ _enumToStringAlterSubscriptionType(AlterSubscriptionType value) {
+   switch(value) {
+     case ALTER_SUBSCRIPTION_OPTIONS: return "ALTER_SUBSCRIPTION_OPTIONS";
++    case ALTER_SUBSCRIPTION_SERVER: return "ALTER_SUBSCRIPTION_SERVER";
+     case ALTER_SUBSCRIPTION_CONNECTION: return "ALTER_SUBSCRIPTION_CONNECTION";
+     case ALTER_SUBSCRIPTION_SET_PUBLICATION: return "ALTER_SUBSCRIPTION_SET_PUBLICATION";
+     case ALTER_SUBSCRIPTION_ADD_PUBLICATION: return "ALTER_SUBSCRIPTION_ADD_PUBLICATION";
+     case ALTER_SUBSCRIPTION_DROP_PUBLICATION: return "ALTER_SUBSCRIPTION_DROP_PUBLICATION";
+-    case ALTER_SUBSCRIPTION_REFRESH: return "ALTER_SUBSCRIPTION_REFRESH";
++    case ALTER_SUBSCRIPTION_REFRESH_PUBLICATION: return "ALTER_SUBSCRIPTION_REFRESH_PUBLICATION";
++    case ALTER_SUBSCRIPTION_REFRESH_SEQUENCES: return "ALTER_SUBSCRIPTION_REFRESH_SEQUENCES";
+     case ALTER_SUBSCRIPTION_ENABLED: return "ALTER_SUBSCRIPTION_ENABLED";
+     case ALTER_SUBSCRIPTION_SKIP: return "ALTER_SUBSCRIPTION_SKIP";
+   }
+@@ -777,6 +837,7 @@ _enumToStringJsonConstructorType(JsonConstructorType value) {
+   switch(value) {
+     case JSCTOR_JSON_OBJECT: return "JSCTOR_JSON_OBJECT";
+     case JSCTOR_JSON_ARRAY: return "JSCTOR_JSON_ARRAY";
++    case JSCTOR_JSON_ARRAY_QUERY: return "JSCTOR_JSON_ARRAY_QUERY";
+     case JSCTOR_JSON_OBJECTAGG: return "JSCTOR_JSON_OBJECTAGG";
+     case JSCTOR_JSON_ARRAYAGG: return "JSCTOR_JSON_ARRAYAGG";
+     case JSCTOR_JSON_PARSE: return "JSCTOR_JSON_PARSE";
+@@ -960,6 +1021,7 @@ _enumToStringOnConflictAction(OnConflictAction value) {
+     case ONCONFLICT_NONE: return "ONCONFLICT_NONE";
+     case ONCONFLICT_NOTHING: return "ONCONFLICT_NOTHING";
+     case ONCONFLICT_UPDATE: return "ONCONFLICT_UPDATE";
++    case ONCONFLICT_SELECT: return "ONCONFLICT_SELECT";
+   }
+   Assert(false);
+   return NULL;
+@@ -1188,6 +1250,7 @@ _enumToIntWCOKind(WCOKind value) {
+     case WCO_RLS_CONFLICT_CHECK: return 4;
+     case WCO_RLS_MERGE_UPDATE_CHECK: return 5;
+     case WCO_RLS_MERGE_DELETE_CHECK: return 6;
++    case WCO_VIEW_CONFLICT_CHECK: return 7;
+   }
+   Assert(false);
+   return -1;
+@@ -1297,27 +1360,28 @@ _enumToIntObjectType(ObjectType value) {
+     case OBJECT_POLICY: return 29;
+     case OBJECT_PROCEDURE: return 30;
+     case OBJECT_PUBLICATION: return 31;
+-    case OBJECT_PUBLICATION_NAMESPACE: return 32;
+-    case OBJECT_PUBLICATION_REL: return 33;
+-    case OBJECT_ROLE: return 34;
+-    case OBJECT_ROUTINE: return 35;
+-    case OBJECT_RULE: return 36;
+-    case OBJECT_SCHEMA: return 37;
+-    case OBJECT_SEQUENCE: return 38;
+-    case OBJECT_SUBSCRIPTION: return 39;
+-    case OBJECT_STATISTIC_EXT: return 40;
+-    case OBJECT_TABCONSTRAINT: return 41;
+-    case OBJECT_TABLE: return 42;
+-    case OBJECT_TABLESPACE: return 43;
+-    case OBJECT_TRANSFORM: return 44;
+-    case OBJECT_TRIGGER: return 45;
+-    case OBJECT_TSCONFIGURATION: return 46;
+-    case OBJECT_TSDICTIONARY: return 47;
+-    case OBJECT_TSPARSER: return 48;
+-    case OBJECT_TSTEMPLATE: return 49;
+-    case OBJECT_TYPE: return 50;
+-    case OBJECT_USER_MAPPING: return 51;
+-    case OBJECT_VIEW: return 52;
++    case OBJECT_PUBLICATION_EXCLUDED_REL: return 32;
++    case OBJECT_PUBLICATION_NAMESPACE: return 33;
++    case OBJECT_PUBLICATION_REL: return 34;
++    case OBJECT_ROLE: return 35;
++    case OBJECT_ROUTINE: return 36;
++    case OBJECT_RULE: return 37;
++    case OBJECT_SCHEMA: return 38;
++    case OBJECT_SEQUENCE: return 39;
++    case OBJECT_SUBSCRIPTION: return 40;
++    case OBJECT_STATISTIC_EXT: return 41;
++    case OBJECT_TABCONSTRAINT: return 42;
++    case OBJECT_TABLE: return 43;
++    case OBJECT_TABLESPACE: return 44;
++    case OBJECT_TRANSFORM: return 45;
++    case OBJECT_TRIGGER: return 46;
++    case OBJECT_TSCONFIGURATION: return 47;
++    case OBJECT_TSDICTIONARY: return 48;
++    case OBJECT_TSPARSER: return 49;
++    case OBJECT_TSTEMPLATE: return 50;
++    case OBJECT_TYPE: return 51;
++    case OBJECT_USER_MAPPING: return 52;
++    case OBJECT_VIEW: return 53;
+   }
+   Assert(false);
+   return -1;
+@@ -1407,6 +1471,20 @@ _enumToIntAlterTableType(AlterTableType value) {
+   return -1;
+ }
+ 
++static int
++_enumToIntAlterDomainType(AlterDomainType value) {
++  switch(value) {
++    case AD_AlterDefault: return 1;
++    case AD_DropNotNull: return 2;
++    case AD_SetNotNull: return 3;
++    case AD_AddConstraint: return 4;
++    case AD_DropConstraint: return 5;
++    case AD_ValidateConstraint: return 6;
++  }
++  Assert(false);
++  return -1;
++}
++
+ static int
+ _enumToIntGrantTargetType(GrantTargetType value) {
+   switch(value) {
+@@ -1490,6 +1568,26 @@ _enumToIntFetchDirection(FetchDirection value) {
+   return -1;
+ }
+ 
++static int
++_enumToIntFetchDirectionKeywords(FetchDirectionKeywords value) {
++  switch(value) {
++    case FETCH_KEYWORD_NONE: return 1;
++    case FETCH_KEYWORD_NEXT: return 2;
++    case FETCH_KEYWORD_PRIOR: return 3;
++    case FETCH_KEYWORD_FIRST: return 4;
++    case FETCH_KEYWORD_LAST: return 5;
++    case FETCH_KEYWORD_ABSOLUTE: return 6;
++    case FETCH_KEYWORD_RELATIVE: return 7;
++    case FETCH_KEYWORD_ALL: return 8;
++    case FETCH_KEYWORD_FORWARD: return 9;
++    case FETCH_KEYWORD_FORWARD_ALL: return 10;
++    case FETCH_KEYWORD_BACKWARD: return 11;
++    case FETCH_KEYWORD_BACKWARD_ALL: return 12;
++  }
++  Assert(false);
++  return -1;
++}
++
+ static int
+ _enumToIntFunctionParameterMode(FunctionParameterMode value) {
+   switch(value) {
+@@ -1533,6 +1631,17 @@ _enumToIntViewCheckOption(ViewCheckOption value) {
+   return -1;
+ }
+ 
++static int
++_enumToIntRepackCommand(RepackCommand value) {
++  switch(value) {
++    case REPACK_COMMAND_CLUSTER: return 1;
++    case REPACK_COMMAND_REPACK: return 2;
++    case REPACK_COMMAND_VACUUMFULL: return 3;
++  }
++  Assert(false);
++  return -1;
++}
++
+ static int
+ _enumToIntDiscardMode(DiscardMode value) {
+   switch(value) {
+@@ -1575,9 +1684,20 @@ static int
+ _enumToIntPublicationObjSpecType(PublicationObjSpecType value) {
+   switch(value) {
+     case PUBLICATIONOBJ_TABLE: return 1;
+-    case PUBLICATIONOBJ_TABLES_IN_SCHEMA: return 2;
+-    case PUBLICATIONOBJ_TABLES_IN_CUR_SCHEMA: return 3;
+-    case PUBLICATIONOBJ_CONTINUATION: return 4;
++    case PUBLICATIONOBJ_EXCEPT_TABLE: return 2;
++    case PUBLICATIONOBJ_TABLES_IN_SCHEMA: return 3;
++    case PUBLICATIONOBJ_TABLES_IN_CUR_SCHEMA: return 4;
++    case PUBLICATIONOBJ_CONTINUATION: return 5;
++  }
++  Assert(false);
++  return -1;
++}
++
++static int
++_enumToIntPublicationAllObjType(PublicationAllObjType value) {
++  switch(value) {
++    case PUBLICATION_ALL_TABLES: return 1;
++    case PUBLICATION_ALL_SEQUENCES: return 2;
+   }
+   Assert(false);
+   return -1;
+@@ -1598,13 +1718,15 @@ static int
+ _enumToIntAlterSubscriptionType(AlterSubscriptionType value) {
+   switch(value) {
+     case ALTER_SUBSCRIPTION_OPTIONS: return 1;
+-    case ALTER_SUBSCRIPTION_CONNECTION: return 2;
+-    case ALTER_SUBSCRIPTION_SET_PUBLICATION: return 3;
+-    case ALTER_SUBSCRIPTION_ADD_PUBLICATION: return 4;
+-    case ALTER_SUBSCRIPTION_DROP_PUBLICATION: return 5;
+-    case ALTER_SUBSCRIPTION_REFRESH: return 6;
+-    case ALTER_SUBSCRIPTION_ENABLED: return 7;
+-    case ALTER_SUBSCRIPTION_SKIP: return 8;
++    case ALTER_SUBSCRIPTION_SERVER: return 2;
++    case ALTER_SUBSCRIPTION_CONNECTION: return 3;
++    case ALTER_SUBSCRIPTION_SET_PUBLICATION: return 4;
++    case ALTER_SUBSCRIPTION_ADD_PUBLICATION: return 5;
++    case ALTER_SUBSCRIPTION_DROP_PUBLICATION: return 6;
++    case ALTER_SUBSCRIPTION_REFRESH_PUBLICATION: return 7;
++    case ALTER_SUBSCRIPTION_REFRESH_SEQUENCES: return 8;
++    case ALTER_SUBSCRIPTION_ENABLED: return 9;
++    case ALTER_SUBSCRIPTION_SKIP: return 10;
+   }
+   Assert(false);
+   return -1;
+@@ -1804,11 +1926,12 @@ _enumToIntJsonConstructorType(JsonConstructorType value) {
+   switch(value) {
+     case JSCTOR_JSON_OBJECT: return 1;
+     case JSCTOR_JSON_ARRAY: return 2;
+-    case JSCTOR_JSON_OBJECTAGG: return 3;
+-    case JSCTOR_JSON_ARRAYAGG: return 4;
+-    case JSCTOR_JSON_PARSE: return 5;
+-    case JSCTOR_JSON_SCALAR: return 6;
+-    case JSCTOR_JSON_SERIALIZE: return 7;
++    case JSCTOR_JSON_ARRAY_QUERY: return 3;
++    case JSCTOR_JSON_OBJECTAGG: return 4;
++    case JSCTOR_JSON_ARRAYAGG: return 5;
++    case JSCTOR_JSON_PARSE: return 6;
++    case JSCTOR_JSON_SCALAR: return 7;
++    case JSCTOR_JSON_SERIALIZE: return 8;
+   }
+   Assert(false);
+   return -1;
+@@ -1987,6 +2110,7 @@ _enumToIntOnConflictAction(OnConflictAction value) {
+     case ONCONFLICT_NONE: return 1;
+     case ONCONFLICT_NOTHING: return 2;
+     case ONCONFLICT_UPDATE: return 3;
++    case ONCONFLICT_SELECT: return 4;
+   }
+   Assert(false);
+   return -1;
+@@ -2215,6 +2339,7 @@ _intToEnumWCOKind(int value) {
+     case 4: return WCO_RLS_CONFLICT_CHECK;
+     case 5: return WCO_RLS_MERGE_UPDATE_CHECK;
+     case 6: return WCO_RLS_MERGE_DELETE_CHECK;
++    case 7: return WCO_VIEW_CONFLICT_CHECK;
+   }
+   Assert(false);
+   return WCO_VIEW_CHECK;
+@@ -2324,27 +2449,28 @@ _intToEnumObjectType(int value) {
+     case 29: return OBJECT_POLICY;
+     case 30: return OBJECT_PROCEDURE;
+     case 31: return OBJECT_PUBLICATION;
+-    case 32: return OBJECT_PUBLICATION_NAMESPACE;
+-    case 33: return OBJECT_PUBLICATION_REL;
+-    case 34: return OBJECT_ROLE;
+-    case 35: return OBJECT_ROUTINE;
+-    case 36: return OBJECT_RULE;
+-    case 37: return OBJECT_SCHEMA;
+-    case 38: return OBJECT_SEQUENCE;
+-    case 39: return OBJECT_SUBSCRIPTION;
+-    case 40: return OBJECT_STATISTIC_EXT;
+-    case 41: return OBJECT_TABCONSTRAINT;
+-    case 42: return OBJECT_TABLE;
+-    case 43: return OBJECT_TABLESPACE;
+-    case 44: return OBJECT_TRANSFORM;
+-    case 45: return OBJECT_TRIGGER;
+-    case 46: return OBJECT_TSCONFIGURATION;
+-    case 47: return OBJECT_TSDICTIONARY;
+-    case 48: return OBJECT_TSPARSER;
+-    case 49: return OBJECT_TSTEMPLATE;
+-    case 50: return OBJECT_TYPE;
+-    case 51: return OBJECT_USER_MAPPING;
+-    case 52: return OBJECT_VIEW;
++    case 32: return OBJECT_PUBLICATION_EXCLUDED_REL;
++    case 33: return OBJECT_PUBLICATION_NAMESPACE;
++    case 34: return OBJECT_PUBLICATION_REL;
++    case 35: return OBJECT_ROLE;
++    case 36: return OBJECT_ROUTINE;
++    case 37: return OBJECT_RULE;
++    case 38: return OBJECT_SCHEMA;
++    case 39: return OBJECT_SEQUENCE;
++    case 40: return OBJECT_SUBSCRIPTION;
++    case 41: return OBJECT_STATISTIC_EXT;
++    case 42: return OBJECT_TABCONSTRAINT;
++    case 43: return OBJECT_TABLE;
++    case 44: return OBJECT_TABLESPACE;
++    case 45: return OBJECT_TRANSFORM;
++    case 46: return OBJECT_TRIGGER;
++    case 47: return OBJECT_TSCONFIGURATION;
++    case 48: return OBJECT_TSDICTIONARY;
++    case 49: return OBJECT_TSPARSER;
++    case 50: return OBJECT_TSTEMPLATE;
++    case 51: return OBJECT_TYPE;
++    case 52: return OBJECT_USER_MAPPING;
++    case 53: return OBJECT_VIEW;
+   }
+   Assert(false);
+   return OBJECT_ACCESS_METHOD;
+@@ -2434,6 +2560,20 @@ _intToEnumAlterTableType(int value) {
+   return AT_AddColumn;
+ }
+ 
++static AlterDomainType
++_intToEnumAlterDomainType(int value) {
++  switch(value) {
++    case 1: return AD_AlterDefault;
++    case 2: return AD_DropNotNull;
++    case 3: return AD_SetNotNull;
++    case 4: return AD_AddConstraint;
++    case 5: return AD_DropConstraint;
++    case 6: return AD_ValidateConstraint;
++  }
++  Assert(false);
++  return AD_AlterDefault;
++}
++
+ static GrantTargetType
+ _intToEnumGrantTargetType(int value) {
+   switch(value) {
+@@ -2517,6 +2657,26 @@ _intToEnumFetchDirection(int value) {
+   return FETCH_FORWARD;
+ }
+ 
++static FetchDirectionKeywords
++_intToEnumFetchDirectionKeywords(int value) {
++  switch(value) {
++    case 1: return FETCH_KEYWORD_NONE;
++    case 2: return FETCH_KEYWORD_NEXT;
++    case 3: return FETCH_KEYWORD_PRIOR;
++    case 4: return FETCH_KEYWORD_FIRST;
++    case 5: return FETCH_KEYWORD_LAST;
++    case 6: return FETCH_KEYWORD_ABSOLUTE;
++    case 7: return FETCH_KEYWORD_RELATIVE;
++    case 8: return FETCH_KEYWORD_ALL;
++    case 9: return FETCH_KEYWORD_FORWARD;
++    case 10: return FETCH_KEYWORD_FORWARD_ALL;
++    case 11: return FETCH_KEYWORD_BACKWARD;
++    case 12: return FETCH_KEYWORD_BACKWARD_ALL;
++  }
++  Assert(false);
++  return FETCH_KEYWORD_NONE;
++}
++
+ static FunctionParameterMode
+ _intToEnumFunctionParameterMode(int value) {
+   switch(value) {
+@@ -2560,6 +2720,17 @@ _intToEnumViewCheckOption(int value) {
+   return NO_CHECK_OPTION;
+ }
+ 
++static RepackCommand
++_intToEnumRepackCommand(int value) {
++  switch(value) {
++    case 1: return REPACK_COMMAND_CLUSTER;
++    case 2: return REPACK_COMMAND_REPACK;
++    case 3: return REPACK_COMMAND_VACUUMFULL;
++  }
++  Assert(false);
++  return REPACK_COMMAND_CLUSTER;
++}
++
+ static DiscardMode
+ _intToEnumDiscardMode(int value) {
+   switch(value) {
+@@ -2602,14 +2773,25 @@ static PublicationObjSpecType
+ _intToEnumPublicationObjSpecType(int value) {
+   switch(value) {
+     case 1: return PUBLICATIONOBJ_TABLE;
+-    case 2: return PUBLICATIONOBJ_TABLES_IN_SCHEMA;
+-    case 3: return PUBLICATIONOBJ_TABLES_IN_CUR_SCHEMA;
+-    case 4: return PUBLICATIONOBJ_CONTINUATION;
++    case 2: return PUBLICATIONOBJ_EXCEPT_TABLE;
++    case 3: return PUBLICATIONOBJ_TABLES_IN_SCHEMA;
++    case 4: return PUBLICATIONOBJ_TABLES_IN_CUR_SCHEMA;
++    case 5: return PUBLICATIONOBJ_CONTINUATION;
+   }
+   Assert(false);
+   return PUBLICATIONOBJ_TABLE;
+ }
+ 
++static PublicationAllObjType
++_intToEnumPublicationAllObjType(int value) {
++  switch(value) {
++    case 1: return PUBLICATION_ALL_TABLES;
++    case 2: return PUBLICATION_ALL_SEQUENCES;
++  }
++  Assert(false);
++  return PUBLICATION_ALL_TABLES;
++}
++
+ static AlterPublicationAction
+ _intToEnumAlterPublicationAction(int value) {
+   switch(value) {
+@@ -2625,13 +2807,15 @@ static AlterSubscriptionType
+ _intToEnumAlterSubscriptionType(int value) {
+   switch(value) {
+     case 1: return ALTER_SUBSCRIPTION_OPTIONS;
+-    case 2: return ALTER_SUBSCRIPTION_CONNECTION;
+-    case 3: return ALTER_SUBSCRIPTION_SET_PUBLICATION;
+-    case 4: return ALTER_SUBSCRIPTION_ADD_PUBLICATION;
+-    case 5: return ALTER_SUBSCRIPTION_DROP_PUBLICATION;
+-    case 6: return ALTER_SUBSCRIPTION_REFRESH;
+-    case 7: return ALTER_SUBSCRIPTION_ENABLED;
+-    case 8: return ALTER_SUBSCRIPTION_SKIP;
++    case 2: return ALTER_SUBSCRIPTION_SERVER;
++    case 3: return ALTER_SUBSCRIPTION_CONNECTION;
++    case 4: return ALTER_SUBSCRIPTION_SET_PUBLICATION;
++    case 5: return ALTER_SUBSCRIPTION_ADD_PUBLICATION;
++    case 6: return ALTER_SUBSCRIPTION_DROP_PUBLICATION;
++    case 7: return ALTER_SUBSCRIPTION_REFRESH_PUBLICATION;
++    case 8: return ALTER_SUBSCRIPTION_REFRESH_SEQUENCES;
++    case 9: return ALTER_SUBSCRIPTION_ENABLED;
++    case 10: return ALTER_SUBSCRIPTION_SKIP;
+   }
+   Assert(false);
+   return ALTER_SUBSCRIPTION_OPTIONS;
+@@ -2831,11 +3015,12 @@ _intToEnumJsonConstructorType(int value) {
+   switch(value) {
+     case 1: return JSCTOR_JSON_OBJECT;
+     case 2: return JSCTOR_JSON_ARRAY;
+-    case 3: return JSCTOR_JSON_OBJECTAGG;
+-    case 4: return JSCTOR_JSON_ARRAYAGG;
+-    case 5: return JSCTOR_JSON_PARSE;
+-    case 6: return JSCTOR_JSON_SCALAR;
+-    case 7: return JSCTOR_JSON_SERIALIZE;
++    case 3: return JSCTOR_JSON_ARRAY_QUERY;
++    case 4: return JSCTOR_JSON_OBJECTAGG;
++    case 5: return JSCTOR_JSON_ARRAYAGG;
++    case 6: return JSCTOR_JSON_PARSE;
++    case 7: return JSCTOR_JSON_SCALAR;
++    case 8: return JSCTOR_JSON_SERIALIZE;
+   }
+   Assert(false);
+   return JSCTOR_JSON_OBJECT;
+@@ -3014,6 +3199,7 @@ _intToEnumOnConflictAction(int value) {
+     case 1: return ONCONFLICT_NONE;
+     case 2: return ONCONFLICT_NOTHING;
+     case 3: return ONCONFLICT_UPDATE;
++    case 4: return ONCONFLICT_SELECT;
+   }
+   Assert(false);
+   return ONCONFLICT_NONE;
+diff --git a/src/include/pg_query_outfuncs_conds.c b/src/include/pg_query_outfuncs_conds.c
+index 576940c..e9541cd 100644
+--- a/src/include/pg_query_outfuncs_conds.c
++++ b/src/include/pg_query_outfuncs_conds.c
+@@ -729,15 +729,15 @@ case T_DropdbStmt:
+ case T_AlterSystemStmt:
+   OUT_NODE(AlterSystemStmt, AlterSystemStmt, alter_system_stmt, ALTER_SYSTEM_STMT, AlterSystemStmt, alter_system_stmt);
+   break;
+-case T_ClusterStmt:
+-  OUT_NODE(ClusterStmt, ClusterStmt, cluster_stmt, CLUSTER_STMT, ClusterStmt, cluster_stmt);
+-  break;
+ case T_VacuumStmt:
+   OUT_NODE(VacuumStmt, VacuumStmt, vacuum_stmt, VACUUM_STMT, VacuumStmt, vacuum_stmt);
+   break;
+ case T_VacuumRelation:
+   OUT_NODE(VacuumRelation, VacuumRelation, vacuum_relation, VACUUM_RELATION, VacuumRelation, vacuum_relation);
+   break;
++case T_RepackStmt:
++  OUT_NODE(RepackStmt, RepackStmt, repack_stmt, REPACK_STMT, RepackStmt, repack_stmt);
++  break;
+ case T_ExplainStmt:
+   OUT_NODE(ExplainStmt, ExplainStmt, explain_stmt, EXPLAIN_STMT, ExplainStmt, explain_stmt);
+   break;
+@@ -798,6 +798,9 @@ case T_PublicationTable:
+ case T_PublicationObjSpec:
+   OUT_NODE(PublicationObjSpec, PublicationObjSpec, publication_obj_spec, PUBLICATION_OBJ_SPEC, PublicationObjSpec, publication_obj_spec);
+   break;
++case T_PublicationAllObjSpec:
++  OUT_NODE(PublicationAllObjSpec, PublicationAllObjSpec, publication_all_obj_spec, PUBLICATION_ALL_OBJ_SPEC, PublicationAllObjSpec, publication_all_obj_spec);
++  break;
+ case T_CreatePublicationStmt:
+   OUT_NODE(CreatePublicationStmt, CreatePublicationStmt, create_publication_stmt, CREATE_PUBLICATION_STMT, CreatePublicationStmt, create_publication_stmt);
+   break;
+@@ -813,3 +816,6 @@ case T_AlterSubscriptionStmt:
+ case T_DropSubscriptionStmt:
+   OUT_NODE(DropSubscriptionStmt, DropSubscriptionStmt, drop_subscription_stmt, DROP_SUBSCRIPTION_STMT, DropSubscriptionStmt, drop_subscription_stmt);
+   break;
++case T_WaitStmt:
++  OUT_NODE(WaitStmt, WaitStmt, wait_stmt, WAIT_STMT, WaitStmt, wait_stmt);
++  break;
+diff --git a/src/include/pg_query_outfuncs_defs.c b/src/include/pg_query_outfuncs_defs.c
+index 17ced0d..5df8d57 100644
+--- a/src/include/pg_query_outfuncs_defs.c
++++ b/src/include/pg_query_outfuncs_defs.c
+@@ -234,9 +234,9 @@ static void _outAlterDatabaseRefreshCollStmt(OUT_TYPE(AlterDatabaseRefreshCollSt
+ static void _outAlterDatabaseSetStmt(OUT_TYPE(AlterDatabaseSetStmt, AlterDatabaseSetStmt) out_node, const AlterDatabaseSetStmt *node);
+ static void _outDropdbStmt(OUT_TYPE(DropdbStmt, DropdbStmt) out_node, const DropdbStmt *node);
+ static void _outAlterSystemStmt(OUT_TYPE(AlterSystemStmt, AlterSystemStmt) out_node, const AlterSystemStmt *node);
+-static void _outClusterStmt(OUT_TYPE(ClusterStmt, ClusterStmt) out_node, const ClusterStmt *node);
+ static void _outVacuumStmt(OUT_TYPE(VacuumStmt, VacuumStmt) out_node, const VacuumStmt *node);
+ static void _outVacuumRelation(OUT_TYPE(VacuumRelation, VacuumRelation) out_node, const VacuumRelation *node);
++static void _outRepackStmt(OUT_TYPE(RepackStmt, RepackStmt) out_node, const RepackStmt *node);
+ static void _outExplainStmt(OUT_TYPE(ExplainStmt, ExplainStmt) out_node, const ExplainStmt *node);
+ static void _outCreateTableAsStmt(OUT_TYPE(CreateTableAsStmt, CreateTableAsStmt) out_node, const CreateTableAsStmt *node);
+ static void _outRefreshMatViewStmt(OUT_TYPE(RefreshMatViewStmt, RefreshMatViewStmt) out_node, const RefreshMatViewStmt *node);
+@@ -257,11 +257,13 @@ static void _outAlterTSDictionaryStmt(OUT_TYPE(AlterTSDictionaryStmt, AlterTSDic
+ static void _outAlterTSConfigurationStmt(OUT_TYPE(AlterTSConfigurationStmt, AlterTSConfigurationStmt) out_node, const AlterTSConfigurationStmt *node);
+ static void _outPublicationTable(OUT_TYPE(PublicationTable, PublicationTable) out_node, const PublicationTable *node);
+ static void _outPublicationObjSpec(OUT_TYPE(PublicationObjSpec, PublicationObjSpec) out_node, const PublicationObjSpec *node);
++static void _outPublicationAllObjSpec(OUT_TYPE(PublicationAllObjSpec, PublicationAllObjSpec) out_node, const PublicationAllObjSpec *node);
+ static void _outCreatePublicationStmt(OUT_TYPE(CreatePublicationStmt, CreatePublicationStmt) out_node, const CreatePublicationStmt *node);
+ static void _outAlterPublicationStmt(OUT_TYPE(AlterPublicationStmt, AlterPublicationStmt) out_node, const AlterPublicationStmt *node);
+ static void _outCreateSubscriptionStmt(OUT_TYPE(CreateSubscriptionStmt, CreateSubscriptionStmt) out_node, const CreateSubscriptionStmt *node);
+ static void _outAlterSubscriptionStmt(OUT_TYPE(AlterSubscriptionStmt, AlterSubscriptionStmt) out_node, const AlterSubscriptionStmt *node);
+ static void _outDropSubscriptionStmt(OUT_TYPE(DropSubscriptionStmt, DropSubscriptionStmt) out_node, const DropSubscriptionStmt *node);
++static void _outWaitStmt(OUT_TYPE(WaitStmt, WaitStmt) out_node, const WaitStmt *node);
+ 
+ 
+ static void
+@@ -388,6 +390,7 @@ _outWindowFunc(OUT_TYPE(WindowFunc, WindowFunc) out, const WindowFunc *node)
+   WRITE_UINT_FIELD(WindowFunc, winref, winref, winref);
+   WRITE_BOOL_FIELD(WindowFunc, winstar, winstar, winstar);
+   WRITE_BOOL_FIELD(WindowFunc, winagg, winagg, winagg);
++  WRITE_INT_FIELD(WindowFunc, ignore_nulls, ignore_nulls, ignore_nulls);
+   WRITE_INT_FIELD(WindowFunc, location, location, location);
+ }
+ 
+@@ -521,12 +524,14 @@ _outSubPlan(OUT_TYPE(SubPlan, SubPlan) out, const SubPlan *node)
+   WRITE_UINT_FIELD(SubPlan, first_col_type, firstColType, firstColType);
+   WRITE_INT_FIELD(SubPlan, first_col_typmod, firstColTypmod, firstColTypmod);
+   WRITE_UINT_FIELD(SubPlan, first_col_collation, firstColCollation, firstColCollation);
++  WRITE_BOOL_FIELD(SubPlan, is_init_plan, isInitPlan, isInitPlan);
+   WRITE_BOOL_FIELD(SubPlan, use_hash_table, useHashTable, useHashTable);
+   WRITE_BOOL_FIELD(SubPlan, unknown_eq_false, unknownEqFalse, unknownEqFalse);
+   WRITE_BOOL_FIELD(SubPlan, parallel_safe, parallel_safe, parallel_safe);
+   WRITE_LIST_FIELD(SubPlan, set_param, setParam, setParam);
+   WRITE_LIST_FIELD(SubPlan, par_param, parParam, parParam);
+   WRITE_LIST_FIELD(SubPlan, args, args, args);
++  WRITE_INT_FIELD(SubPlan, disabled_nodes, disabled_nodes, disabled_nodes);
+   WRITE_FLOAT_FIELD(SubPlan, startup_cost, startup_cost, startup_cost);
+   WRITE_FLOAT_FIELD(SubPlan, per_call_cost, per_call_cost, per_call_cost);
+ }
+@@ -743,6 +748,8 @@ _outJsonConstructorExpr(OUT_TYPE(JsonConstructorExpr, JsonConstructorExpr) out,
+   WRITE_NODE_PTR_FIELD(JsonConstructorExpr, func, func, func);
+   WRITE_NODE_PTR_FIELD(JsonConstructorExpr, coercion, coercion, coercion);
+   WRITE_SPECIFIC_NODE_PTR_FIELD(JsonConstructorExpr, JsonReturning, json_returning, returning, returning, returning);
++  WRITE_NODE_PTR_FIELD(JsonConstructorExpr, orig_query, orig_query, orig_query);
++  WRITE_SPECIFIC_NODE_PTR_FIELD(JsonConstructorExpr, JsonFormat, json_format, format, format, format);
+   WRITE_BOOL_FIELD(JsonConstructorExpr, absent_on_null, absent_on_null, absent_on_null);
+   WRITE_BOOL_FIELD(JsonConstructorExpr, unique, unique, unique);
+   WRITE_INT_FIELD(JsonConstructorExpr, location, location, location);
+@@ -755,6 +762,7 @@ _outJsonIsPredicate(OUT_TYPE(JsonIsPredicate, JsonIsPredicate) out, const JsonIs
+   WRITE_SPECIFIC_NODE_PTR_FIELD(JsonIsPredicate, JsonFormat, json_format, format, format, format);
+   WRITE_ENUM_FIELD(JsonIsPredicate, JsonValueType, item_type, item_type, item_type);
+   WRITE_BOOL_FIELD(JsonIsPredicate, unique_keys, unique_keys, unique_keys);
++  WRITE_UINT_FIELD(JsonIsPredicate, expr_base_type, exprBaseType, exprBaseType);
+   WRITE_INT_FIELD(JsonIsPredicate, location, location, location);
+ }
+ 
+@@ -945,6 +953,7 @@ _outOnConflictExpr(OUT_TYPE(OnConflictExpr, OnConflictExpr) out, const OnConflic
+   WRITE_LIST_FIELD(OnConflictExpr, arbiter_elems, arbiterElems, arbiterElems);
+   WRITE_NODE_PTR_FIELD(OnConflictExpr, arbiter_where, arbiterWhere, arbiterWhere);
+   WRITE_UINT_FIELD(OnConflictExpr, constraint, constraint, constraint);
++  WRITE_ENUM_FIELD(OnConflictExpr, LockClauseStrength, lock_strength, lockStrength, lockStrength);
+   WRITE_LIST_FIELD(OnConflictExpr, on_conflict_set, onConflictSet, onConflictSet);
+   WRITE_NODE_PTR_FIELD(OnConflictExpr, on_conflict_where, onConflictWhere, onConflictWhere);
+   WRITE_INT_FIELD(OnConflictExpr, excl_rel_index, exclRelIndex, exclRelIndex);
+@@ -1072,6 +1081,7 @@ _outFuncCall(OUT_TYPE(FuncCall, FuncCall) out, const FuncCall *node)
+   WRITE_LIST_FIELD(FuncCall, agg_order, agg_order, agg_order);
+   WRITE_NODE_PTR_FIELD(FuncCall, agg_filter, agg_filter, agg_filter);
+   WRITE_SPECIFIC_NODE_PTR_FIELD(FuncCall, WindowDef, window_def, over, over, over);
++  WRITE_INT_FIELD(FuncCall, ignore_nulls, ignore_nulls, ignore_nulls);
+   WRITE_BOOL_FIELD(FuncCall, agg_within_group, agg_within_group, agg_within_group);
+   WRITE_BOOL_FIELD(FuncCall, agg_star, agg_star, agg_star);
+   WRITE_BOOL_FIELD(FuncCall, agg_distinct, agg_distinct, agg_distinct);
+@@ -1245,6 +1255,7 @@ _outIndexElem(OUT_TYPE(IndexElem, IndexElem) out, const IndexElem *node)
+   WRITE_LIST_FIELD(IndexElem, opclassopts, opclassopts, opclassopts);
+   WRITE_ENUM_FIELD(IndexElem, SortByDir, ordering, ordering, ordering);
+   WRITE_ENUM_FIELD(IndexElem, SortByNulls, nulls_ordering, nulls_ordering, nulls_ordering);
++  WRITE_INT_FIELD(IndexElem, location, location, location);
+ }
+ 
+ static void
+@@ -1472,6 +1483,7 @@ _outOnConflictClause(OUT_TYPE(OnConflictClause, OnConflictClause) out, const OnC
+ {
+   WRITE_ENUM_FIELD(OnConflictClause, OnConflictAction, action, action, action);
+   WRITE_SPECIFIC_NODE_PTR_FIELD(OnConflictClause, InferClause, infer_clause, infer, infer, infer);
++  WRITE_ENUM_FIELD(OnConflictClause, LockClauseStrength, lock_strength, lockStrength, lockStrength);
+   WRITE_LIST_FIELD(OnConflictClause, target_list, targetList, targetList);
+   WRITE_NODE_PTR_FIELD(OnConflictClause, where_clause, whereClause, whereClause);
+   WRITE_INT_FIELD(OnConflictClause, location, location, location);
+@@ -1875,7 +1887,7 @@ _outAlterCollationStmt(OUT_TYPE(AlterCollationStmt, AlterCollationStmt) out, con
+ static void
+ _outAlterDomainStmt(OUT_TYPE(AlterDomainStmt, AlterDomainStmt) out, const AlterDomainStmt *node)
+ {
+-  WRITE_CHAR_FIELD(AlterDomainStmt, subtype, subtype, subtype);
++  WRITE_ENUM_FIELD(AlterDomainStmt, AlterDomainType, subtype, subtype, subtype);
+   WRITE_LIST_FIELD(AlterDomainStmt, type_name, typeName, typeName);
+   WRITE_STRING_FIELD(AlterDomainStmt, name, name, name);
+   WRITE_NODE_PTR_FIELD(AlterDomainStmt, def, def, def);
+@@ -2399,6 +2411,8 @@ _outFetchStmt(OUT_TYPE(FetchStmt, FetchStmt) out, const FetchStmt *node)
+   WRITE_LONG_FIELD(FetchStmt, how_many, howMany, howMany);
+   WRITE_STRING_FIELD(FetchStmt, portalname, portalname, portalname);
+   WRITE_BOOL_FIELD(FetchStmt, ismove, ismove, ismove);
++  WRITE_ENUM_FIELD(FetchStmt, FetchDirectionKeywords, direction_keyword, direction_keyword, direction_keyword);
++  WRITE_INT_FIELD(FetchStmt, location, location, location);
+ }
+ 
+ static void
+@@ -2441,6 +2455,7 @@ _outCreateStatsStmt(OUT_TYPE(CreateStatsStmt, CreateStatsStmt) out, const Create
+   WRITE_STRING_FIELD(CreateStatsStmt, stxcomment, stxcomment, stxcomment);
+   WRITE_BOOL_FIELD(CreateStatsStmt, transformed, transformed, transformed);
+   WRITE_BOOL_FIELD(CreateStatsStmt, if_not_exists, if_not_exists, if_not_exists);
++  WRITE_UINT_FIELD(CreateStatsStmt, owner, owner, owner);
+ }
+ 
+ static void
+@@ -2706,14 +2721,6 @@ _outAlterSystemStmt(OUT_TYPE(AlterSystemStmt, AlterSystemStmt) out, const AlterS
+   WRITE_SPECIFIC_NODE_PTR_FIELD(AlterSystemStmt, VariableSetStmt, variable_set_stmt, setstmt, setstmt, setstmt);
+ }
+ 
+-static void
+-_outClusterStmt(OUT_TYPE(ClusterStmt, ClusterStmt) out, const ClusterStmt *node)
+-{
+-  WRITE_SPECIFIC_NODE_PTR_FIELD(ClusterStmt, RangeVar, range_var, relation, relation, relation);
+-  WRITE_STRING_FIELD(ClusterStmt, indexname, indexname, indexname);
+-  WRITE_LIST_FIELD(ClusterStmt, params, params, params);
+-}
+-
+ static void
+ _outVacuumStmt(OUT_TYPE(VacuumStmt, VacuumStmt) out, const VacuumStmt *node)
+ {
+@@ -2730,6 +2737,16 @@ _outVacuumRelation(OUT_TYPE(VacuumRelation, VacuumRelation) out, const VacuumRel
+   WRITE_LIST_FIELD(VacuumRelation, va_cols, va_cols, va_cols);
+ }
+ 
++static void
++_outRepackStmt(OUT_TYPE(RepackStmt, RepackStmt) out, const RepackStmt *node)
++{
++  WRITE_ENUM_FIELD(RepackStmt, RepackCommand, command, command, command);
++  WRITE_SPECIFIC_NODE_PTR_FIELD(RepackStmt, VacuumRelation, vacuum_relation, relation, relation, relation);
++  WRITE_STRING_FIELD(RepackStmt, indexname, indexname, indexname);
++  WRITE_BOOL_FIELD(RepackStmt, usingindex, usingindex, usingindex);
++  WRITE_LIST_FIELD(RepackStmt, params, params, params);
++}
++
+ static void
+ _outExplainStmt(OUT_TYPE(ExplainStmt, ExplainStmt) out, const ExplainStmt *node)
+ {
+@@ -2758,6 +2775,7 @@ _outRefreshMatViewStmt(OUT_TYPE(RefreshMatViewStmt, RefreshMatViewStmt) out, con
+ static void
+ _outCheckPointStmt(OUT_TYPE(CheckPointStmt, CheckPointStmt) out, const CheckPointStmt *node)
+ {
++  WRITE_LIST_FIELD(CheckPointStmt, options, options, options);
+ }
+ 
+ static void
+@@ -2882,6 +2900,7 @@ _outPublicationTable(OUT_TYPE(PublicationTable, PublicationTable) out, const Pub
+   WRITE_SPECIFIC_NODE_PTR_FIELD(PublicationTable, RangeVar, range_var, relation, relation, relation);
+   WRITE_NODE_PTR_FIELD(PublicationTable, where_clause, whereClause, whereClause);
+   WRITE_LIST_FIELD(PublicationTable, columns, columns, columns);
++  WRITE_BOOL_FIELD(PublicationTable, except, except, except);
+ }
+ 
+ static void
+@@ -2893,6 +2912,14 @@ _outPublicationObjSpec(OUT_TYPE(PublicationObjSpec, PublicationObjSpec) out, con
+   WRITE_INT_FIELD(PublicationObjSpec, location, location, location);
+ }
+ 
++static void
++_outPublicationAllObjSpec(OUT_TYPE(PublicationAllObjSpec, PublicationAllObjSpec) out, const PublicationAllObjSpec *node)
++{
++  WRITE_ENUM_FIELD(PublicationAllObjSpec, PublicationAllObjType, pubobjtype, pubobjtype, pubobjtype);
++  WRITE_LIST_FIELD(PublicationAllObjSpec, except_tables, except_tables, except_tables);
++  WRITE_INT_FIELD(PublicationAllObjSpec, location, location, location);
++}
++
+ static void
+ _outCreatePublicationStmt(OUT_TYPE(CreatePublicationStmt, CreatePublicationStmt) out, const CreatePublicationStmt *node)
+ {
+@@ -2900,6 +2927,7 @@ _outCreatePublicationStmt(OUT_TYPE(CreatePublicationStmt, CreatePublicationStmt)
+   WRITE_LIST_FIELD(CreatePublicationStmt, options, options, options);
+   WRITE_LIST_FIELD(CreatePublicationStmt, pubobjects, pubobjects, pubobjects);
+   WRITE_BOOL_FIELD(CreatePublicationStmt, for_all_tables, for_all_tables, for_all_tables);
++  WRITE_BOOL_FIELD(CreatePublicationStmt, for_all_sequences, for_all_sequences, for_all_sequences);
+ }
+ 
+ static void
+@@ -2908,14 +2936,16 @@ _outAlterPublicationStmt(OUT_TYPE(AlterPublicationStmt, AlterPublicationStmt) ou
+   WRITE_STRING_FIELD(AlterPublicationStmt, pubname, pubname, pubname);
+   WRITE_LIST_FIELD(AlterPublicationStmt, options, options, options);
+   WRITE_LIST_FIELD(AlterPublicationStmt, pubobjects, pubobjects, pubobjects);
+-  WRITE_BOOL_FIELD(AlterPublicationStmt, for_all_tables, for_all_tables, for_all_tables);
+   WRITE_ENUM_FIELD(AlterPublicationStmt, AlterPublicationAction, action, action, action);
++  WRITE_BOOL_FIELD(AlterPublicationStmt, for_all_tables, for_all_tables, for_all_tables);
++  WRITE_BOOL_FIELD(AlterPublicationStmt, for_all_sequences, for_all_sequences, for_all_sequences);
+ }
+ 
+ static void
+ _outCreateSubscriptionStmt(OUT_TYPE(CreateSubscriptionStmt, CreateSubscriptionStmt) out, const CreateSubscriptionStmt *node)
+ {
+   WRITE_STRING_FIELD(CreateSubscriptionStmt, subname, subname, subname);
++  WRITE_STRING_FIELD(CreateSubscriptionStmt, servername, servername, servername);
+   WRITE_STRING_FIELD(CreateSubscriptionStmt, conninfo, conninfo, conninfo);
+   WRITE_LIST_FIELD(CreateSubscriptionStmt, publication, publication, publication);
+   WRITE_LIST_FIELD(CreateSubscriptionStmt, options, options, options);
+@@ -2927,6 +2957,7 @@ _outAlterSubscriptionStmt(OUT_TYPE(AlterSubscriptionStmt, AlterSubscriptionStmt)
+ {
+   WRITE_ENUM_FIELD(AlterSubscriptionStmt, AlterSubscriptionType, kind, kind, kind);
+   WRITE_STRING_FIELD(AlterSubscriptionStmt, subname, subname, subname);
++  WRITE_STRING_FIELD(AlterSubscriptionStmt, servername, servername, servername);
+   WRITE_STRING_FIELD(AlterSubscriptionStmt, conninfo, conninfo, conninfo);
+   WRITE_LIST_FIELD(AlterSubscriptionStmt, publication, publication, publication);
+   WRITE_LIST_FIELD(AlterSubscriptionStmt, options, options, options);
+@@ -2941,3 +2972,11 @@ _outDropSubscriptionStmt(OUT_TYPE(DropSubscriptionStmt, DropSubscriptionStmt) ou
+   WRITE_ENUM_FIELD(DropSubscriptionStmt, DropBehavior, behavior, behavior, behavior);
+ }
+ 
++static void
++_outWaitStmt(OUT_TYPE(WaitStmt, WaitStmt) out, const WaitStmt *node)
++{
++  WRITE_STRING_FIELD(WaitStmt, lsn_literal, lsn_literal, lsn_literal);
++  WRITE_LIST_FIELD(WaitStmt, options, options, options);
++  WRITE_INT_FIELD(WaitStmt, lsn_location, lsn_location, lsn_location);
++}
++
+diff --git a/src/include/pg_query_pg_type.c b/src/include/pg_query_pg_type.c
+index 5f8b012..e6607bc 100644
+--- a/src/include/pg_query_pg_type.c
++++ b/src/include/pg_query_pg_type.c
+@@ -26,7 +26,7 @@ static const PgQueryBuiltinType pg_query_builtin_types[] = {
+ 	{ BYTEAOID, "bytea", -1, false, TYPTYPE_BASE, TYPCATEGORY_USER, TYPALIGN_INT, BYTEAARRAYOID, InvalidOid },
+ 	{ CHAROID, "char", 1, true, TYPTYPE_BASE, TYPCATEGORY_INTERNAL, TYPALIGN_CHAR, CHARARRAYOID, InvalidOid },
+ 	{ NAMEOID, "name", NAMEDATALEN, false, TYPTYPE_BASE, TYPCATEGORY_STRING, TYPALIGN_CHAR, NAMEARRAYOID, C_COLLATION_OID },
+-	{ INT8OID, "int8", 8, FLOAT8PASSBYVAL, TYPTYPE_BASE, TYPCATEGORY_NUMERIC, TYPALIGN_DOUBLE, INT8ARRAYOID, InvalidOid },
++	{ INT8OID, "int8", 8, true, TYPTYPE_BASE, TYPCATEGORY_NUMERIC, TYPALIGN_DOUBLE, INT8ARRAYOID, InvalidOid },
+ 	{ INT2OID, "int2", 2, true, TYPTYPE_BASE, TYPCATEGORY_NUMERIC, TYPALIGN_SHORT, INT2ARRAYOID, InvalidOid },
+ 	{ INT2VECTOROID, "int2vector", -1, false, TYPTYPE_BASE, TYPCATEGORY_ARRAY, TYPALIGN_INT, INT2VECTORARRAYOID, InvalidOid },
+ 	{ INT4OID, "int4", 4, true, TYPTYPE_BASE, TYPCATEGORY_NUMERIC, TYPALIGN_INT, INT4ARRAYOID, InvalidOid },
+@@ -48,7 +48,7 @@ static const PgQueryBuiltinType pg_query_builtin_types[] = {
+ 	{ PG_DEPENDENCIESOID, "pg_dependencies", -1, false, TYPTYPE_BASE, TYPCATEGORY_INTERNAL, TYPALIGN_INT, InvalidOid, DEFAULT_COLLATION_OID },
+ 	{ PG_MCV_LISTOID, "pg_mcv_list", -1, false, TYPTYPE_BASE, TYPCATEGORY_INTERNAL, TYPALIGN_INT, InvalidOid, DEFAULT_COLLATION_OID },
+ 	{ PG_DDL_COMMANDOID, "pg_ddl_command", sizeof(void *), true, TYPTYPE_PSEUDO, TYPCATEGORY_PSEUDOTYPE, (SIZEOF_VOID_P == 8 ? TYPALIGN_DOUBLE : TYPALIGN_INT), InvalidOid, InvalidOid },
+-	{ XID8OID, "xid8", 8, FLOAT8PASSBYVAL, TYPTYPE_BASE, TYPCATEGORY_USER, TYPALIGN_DOUBLE, XID8ARRAYOID, InvalidOid },
++	{ XID8OID, "xid8", 8, true, TYPTYPE_BASE, TYPCATEGORY_USER, TYPALIGN_DOUBLE, XID8ARRAYOID, InvalidOid },
+ 	{ POINTOID, "point", 16, false, TYPTYPE_BASE, TYPCATEGORY_GEOMETRIC, TYPALIGN_DOUBLE, POINTARRAYOID, InvalidOid },
+ 	{ LSEGOID, "lseg", 32, false, TYPTYPE_BASE, TYPCATEGORY_GEOMETRIC, TYPALIGN_DOUBLE, LSEGARRAYOID, InvalidOid },
+ 	{ PATHOID, "path", -1, false, TYPTYPE_BASE, TYPCATEGORY_GEOMETRIC, TYPALIGN_DOUBLE, PATHARRAYOID, InvalidOid },
+@@ -56,10 +56,10 @@ static const PgQueryBuiltinType pg_query_builtin_types[] = {
+ 	{ POLYGONOID, "polygon", -1, false, TYPTYPE_BASE, TYPCATEGORY_GEOMETRIC, TYPALIGN_DOUBLE, POLYGONARRAYOID, InvalidOid },
+ 	{ LINEOID, "line", 24, false, TYPTYPE_BASE, TYPCATEGORY_GEOMETRIC, TYPALIGN_DOUBLE, LINEARRAYOID, InvalidOid },
+ 	{ FLOAT4OID, "float4", 4, true, TYPTYPE_BASE, TYPCATEGORY_NUMERIC, TYPALIGN_INT, FLOAT4ARRAYOID, InvalidOid },
+-	{ FLOAT8OID, "float8", 8, FLOAT8PASSBYVAL, TYPTYPE_BASE, TYPCATEGORY_NUMERIC, TYPALIGN_DOUBLE, FLOAT8ARRAYOID, InvalidOid },
++	{ FLOAT8OID, "float8", 8, true, TYPTYPE_BASE, TYPCATEGORY_NUMERIC, TYPALIGN_DOUBLE, FLOAT8ARRAYOID, InvalidOid },
+ 	{ UNKNOWNOID, "unknown", -2, false, TYPTYPE_PSEUDO, TYPCATEGORY_UNKNOWN, TYPALIGN_CHAR, InvalidOid, InvalidOid },
+ 	{ CIRCLEOID, "circle", 24, false, TYPTYPE_BASE, TYPCATEGORY_GEOMETRIC, TYPALIGN_DOUBLE, CIRCLEARRAYOID, InvalidOid },
+-	{ MONEYOID, "money", 8, FLOAT8PASSBYVAL, TYPTYPE_BASE, TYPCATEGORY_NUMERIC, TYPALIGN_DOUBLE, MONEYARRAYOID, InvalidOid },
++	{ MONEYOID, "money", 8, true, TYPTYPE_BASE, TYPCATEGORY_NUMERIC, TYPALIGN_DOUBLE, MONEYARRAYOID, InvalidOid },
+ 	{ MACADDROID, "macaddr", 6, false, TYPTYPE_BASE, TYPCATEGORY_USER, TYPALIGN_INT, MACADDRARRAYOID, InvalidOid },
+ 	{ INETOID, "inet", -1, false, TYPTYPE_BASE, TYPCATEGORY_NETWORK, TYPALIGN_INT, INETARRAYOID, InvalidOid },
+ 	{ CIDROID, "cidr", -1, false, TYPTYPE_BASE, TYPCATEGORY_NETWORK, TYPALIGN_INT, CIDRARRAYOID, InvalidOid },
+@@ -68,9 +68,9 @@ static const PgQueryBuiltinType pg_query_builtin_types[] = {
+ 	{ BPCHAROID, "bpchar", -1, false, TYPTYPE_BASE, TYPCATEGORY_STRING, TYPALIGN_INT, BPCHARARRAYOID, DEFAULT_COLLATION_OID },
+ 	{ VARCHAROID, "varchar", -1, false, TYPTYPE_BASE, TYPCATEGORY_STRING, TYPALIGN_INT, VARCHARARRAYOID, DEFAULT_COLLATION_OID },
+ 	{ DATEOID, "date", 4, true, TYPTYPE_BASE, TYPCATEGORY_DATETIME, TYPALIGN_INT, DATEARRAYOID, InvalidOid },
+-	{ TIMEOID, "time", 8, FLOAT8PASSBYVAL, TYPTYPE_BASE, TYPCATEGORY_DATETIME, TYPALIGN_DOUBLE, TIMEARRAYOID, InvalidOid },
+-	{ TIMESTAMPOID, "timestamp", 8, FLOAT8PASSBYVAL, TYPTYPE_BASE, TYPCATEGORY_DATETIME, TYPALIGN_DOUBLE, TIMESTAMPARRAYOID, InvalidOid },
+-	{ TIMESTAMPTZOID, "timestamptz", 8, FLOAT8PASSBYVAL, TYPTYPE_BASE, TYPCATEGORY_DATETIME, TYPALIGN_DOUBLE, TIMESTAMPTZARRAYOID, InvalidOid },
++	{ TIMEOID, "time", 8, true, TYPTYPE_BASE, TYPCATEGORY_DATETIME, TYPALIGN_DOUBLE, TIMEARRAYOID, InvalidOid },
++	{ TIMESTAMPOID, "timestamp", 8, true, TYPTYPE_BASE, TYPCATEGORY_DATETIME, TYPALIGN_DOUBLE, TIMESTAMPARRAYOID, InvalidOid },
++	{ TIMESTAMPTZOID, "timestamptz", 8, true, TYPTYPE_BASE, TYPCATEGORY_DATETIME, TYPALIGN_DOUBLE, TIMESTAMPTZARRAYOID, InvalidOid },
+ 	{ INTERVALOID, "interval", 16, false, TYPTYPE_BASE, TYPCATEGORY_TIMESPAN, TYPALIGN_DOUBLE, INTERVALARRAYOID, InvalidOid },
+ 	{ TIMETZOID, "timetz", 12, false, TYPTYPE_BASE, TYPCATEGORY_DATETIME, TYPALIGN_DOUBLE, TIMETZARRAYOID, InvalidOid },
+ 	{ BITOID, "bit", -1, false, TYPTYPE_BASE, TYPCATEGORY_BITSTRING, TYPALIGN_INT, BITARRAYOID, InvalidOid },
+@@ -85,8 +85,9 @@ static const PgQueryBuiltinType pg_query_builtin_types[] = {
+ 	{ REGTYPEOID, "regtype", 4, true, TYPTYPE_BASE, TYPCATEGORY_NUMERIC, TYPALIGN_INT, REGTYPEARRAYOID, InvalidOid },
+ 	{ REGROLEOID, "regrole", 4, true, TYPTYPE_BASE, TYPCATEGORY_NUMERIC, TYPALIGN_INT, REGROLEARRAYOID, InvalidOid },
+ 	{ REGNAMESPACEOID, "regnamespace", 4, true, TYPTYPE_BASE, TYPCATEGORY_NUMERIC, TYPALIGN_INT, REGNAMESPACEARRAYOID, InvalidOid },
++	{ REGDATABASEOID, "regdatabase", 4, true, TYPTYPE_BASE, TYPCATEGORY_NUMERIC, TYPALIGN_INT, REGDATABASEARRAYOID, InvalidOid },
+ 	{ UUIDOID, "uuid", 16, false, TYPTYPE_BASE, TYPCATEGORY_USER, TYPALIGN_CHAR, UUIDARRAYOID, InvalidOid },
+-	{ PG_LSNOID, "pg_lsn", 8, FLOAT8PASSBYVAL, TYPTYPE_BASE, TYPCATEGORY_USER, TYPALIGN_DOUBLE, PG_LSNARRAYOID, InvalidOid },
++	{ PG_LSNOID, "pg_lsn", 8, true, TYPTYPE_BASE, TYPCATEGORY_USER, TYPALIGN_DOUBLE, PG_LSNARRAYOID, InvalidOid },
+ 	{ TSVECTOROID, "tsvector", -1, false, TYPTYPE_BASE, TYPCATEGORY_USER, TYPALIGN_INT, TSVECTORARRAYOID, InvalidOid },
+ 	{ GTSVECTOROID, "gtsvector", -1, false, TYPTYPE_BASE, TYPCATEGORY_USER, TYPALIGN_INT, GTSVECTORARRAYOID, InvalidOid },
+ 	{ TSQUERYOID, "tsquery", -1, false, TYPTYPE_BASE, TYPCATEGORY_USER, TYPALIGN_INT, TSQUERYARRAYOID, InvalidOid },
+@@ -134,6 +135,7 @@ static const PgQueryBuiltinType pg_query_builtin_types[] = {
+ 	{ ANYCOMPATIBLEMULTIRANGEOID, "anycompatiblemultirange", -1, false, TYPTYPE_PSEUDO, TYPCATEGORY_PSEUDOTYPE, TYPALIGN_DOUBLE, InvalidOid, InvalidOid },
+ 	{ PG_BRIN_BLOOM_SUMMARYOID, "pg_brin_bloom_summary", -1, false, TYPTYPE_BASE, TYPCATEGORY_INTERNAL, TYPALIGN_INT, InvalidOid, DEFAULT_COLLATION_OID },
+ 	{ PG_BRIN_MINMAX_MULTI_SUMMARYOID, "pg_brin_minmax_multi_summary", -1, false, TYPTYPE_BASE, TYPCATEGORY_INTERNAL, TYPALIGN_INT, InvalidOid, DEFAULT_COLLATION_OID },
++	{ OID8OID, "oid8", 8, true, TYPTYPE_BASE, TYPCATEGORY_NUMERIC, TYPALIGN_DOUBLE, OID8ARRAYOID, InvalidOid },
+ 	{ BOOLARRAYOID, "_bool", -1, false, TYPTYPE_BASE, TYPCATEGORY_ARRAY, TYPALIGN_INT, InvalidOid, InvalidOid },
+ 	{ BYTEAARRAYOID, "_bytea", -1, false, TYPTYPE_BASE, TYPCATEGORY_ARRAY, TYPALIGN_INT, InvalidOid, InvalidOid },
+ 	{ CHARARRAYOID, "_char", -1, false, TYPTYPE_BASE, TYPCATEGORY_ARRAY, TYPALIGN_INT, InvalidOid, InvalidOid },
+@@ -191,6 +193,7 @@ static const PgQueryBuiltinType pg_query_builtin_types[] = {
+ 	{ REGTYPEARRAYOID, "_regtype", -1, false, TYPTYPE_BASE, TYPCATEGORY_ARRAY, TYPALIGN_INT, InvalidOid, InvalidOid },
+ 	{ REGROLEARRAYOID, "_regrole", -1, false, TYPTYPE_BASE, TYPCATEGORY_ARRAY, TYPALIGN_INT, InvalidOid, InvalidOid },
+ 	{ REGNAMESPACEARRAYOID, "_regnamespace", -1, false, TYPTYPE_BASE, TYPCATEGORY_ARRAY, TYPALIGN_INT, InvalidOid, InvalidOid },
++	{ REGDATABASEARRAYOID, "_regdatabase", -1, false, TYPTYPE_BASE, TYPCATEGORY_ARRAY, TYPALIGN_INT, InvalidOid, InvalidOid },
+ 	{ UUIDARRAYOID, "_uuid", -1, false, TYPTYPE_BASE, TYPCATEGORY_ARRAY, TYPALIGN_INT, InvalidOid, InvalidOid },
+ 	{ PG_LSNARRAYOID, "_pg_lsn", -1, false, TYPTYPE_BASE, TYPCATEGORY_ARRAY, TYPALIGN_DOUBLE, InvalidOid, InvalidOid },
+ 	{ TSVECTORARRAYOID, "_tsvector", -1, false, TYPTYPE_BASE, TYPCATEGORY_ARRAY, TYPALIGN_INT, InvalidOid, InvalidOid },
+@@ -215,6 +218,7 @@ static const PgQueryBuiltinType pg_query_builtin_types[] = {
+ 	{ DATEMULTIRANGEARRAYOID, "_datemultirange", -1, false, TYPTYPE_BASE, TYPCATEGORY_ARRAY, TYPALIGN_INT, InvalidOid, InvalidOid },
+ 	{ INT8MULTIRANGEARRAYOID, "_int8multirange", -1, false, TYPTYPE_BASE, TYPCATEGORY_ARRAY, TYPALIGN_DOUBLE, InvalidOid, InvalidOid },
+ 	{ CSTRINGARRAYOID, "_cstring", -1, false, TYPTYPE_BASE, TYPCATEGORY_ARRAY, TYPALIGN_INT, InvalidOid, InvalidOid },
++	{ OID8ARRAYOID, "_oid8", -1, false, TYPTYPE_BASE, TYPCATEGORY_ARRAY, TYPALIGN_DOUBLE, InvalidOid, InvalidOid },
+ };
+ 
+ static const PgQueryBuiltinType *
+diff --git a/src/postgres_deparse.c b/src/postgres_deparse.c
+index 2129a5b..0ef2426 100644
+--- a/src/postgres_deparse.c
++++ b/src/postgres_deparse.c
+@@ -2149,6 +2149,15 @@ static void deparseFdwOptions(DeparseState *state, List *fdw_options)
+ 		{
+ 			deparseAppendStringInfoString(state, "NO VALIDATOR ");
+ 		}
++		else if (strcmp(def_elem->defname, "connection") == 0 && def_elem->arg != NULL)
++		{
++			deparseAppendStringInfoString(state, "CONNECTION ");
++			deparseHandlerName(state, castNode(List, def_elem->arg));
++		}
++		else if (strcmp(def_elem->defname, "connection") == 0 && def_elem->arg == NULL)
++		{
++			deparseAppendStringInfoString(state, "NO CONNECTION ");
++		}
+ 		else
+ 		{
+ 			Assert(false);
+@@ -2268,7 +2277,9 @@ static void deparseVarList(DeparseState *state, List *l)
+ 		else if (IsA(lfirst(lc), A_Const))
+ 		{
+ 			A_Const *a_const = castNode(A_Const, lfirst(lc));
+-			if (IsA(&a_const->val, Integer) || IsA(&a_const->val, Float))
++			if (a_const->isnull)
++				deparseAppendStringInfoString(state, "NULL");
++			else if (IsA(&a_const->val, Integer) || IsA(&a_const->val, Float))
+ 				deparseNumericOnly(state, (union ValUnion *) &a_const->val);
+ 			else if (IsA(&a_const->val, String))
+ 				deparseOptBooleanOrString(state, strVal(&a_const->val));
+@@ -3771,6 +3782,11 @@ static void deparseFuncCall(DeparseState *state, FuncCall *func_call)
+ 		deparseAppendStringInfoString(state, ") ");
+ 	}
+ 
++	if (func_call->ignore_nulls == PARSER_IGNORE_NULLS)
++		deparseAppendStringInfoString(state, "IGNORE NULLS ");
++	else if (func_call->ignore_nulls == PARSER_RESPECT_NULLS)
++		deparseAppendStringInfoString(state, "RESPECT NULLS ");
++
+ 	if (func_call->over)
+ 	{
+ 		deparseAppendStringInfoString(state, "OVER ");
+@@ -5337,6 +5353,26 @@ static void deparseOnConflictClause(DeparseState *state, OnConflictClause *on_co
+ 		case ONCONFLICT_UPDATE:
+ 			deparseAppendStringInfoString(state, "DO UPDATE ");
+ 			break;
++		case ONCONFLICT_SELECT:
++			deparseAppendStringInfoString(state, "DO SELECT ");
++			switch (on_conflict_clause->lockStrength)
++			{
++				case LCS_NONE:
++					break;
++				case LCS_FORKEYSHARE:
++					deparseAppendStringInfoString(state, "FOR KEY SHARE ");
++					break;
++				case LCS_FORSHARE:
++					deparseAppendStringInfoString(state, "FOR SHARE ");
++					break;
++				case LCS_FORNOKEYUPDATE:
++					deparseAppendStringInfoString(state, "FOR NO KEY UPDATE ");
++					break;
++				case LCS_FORUPDATE:
++					deparseAppendStringInfoString(state, "FOR UPDATE ");
++					break;
++			}
++			break;
+ 	}
+ 
+ 	if (list_length(on_conflict_clause->targetList) > 0)
+@@ -6289,7 +6325,22 @@ static void deparseFunctionParameter(DeparseState *state, FunctionParameter *fun
+ 
+ static void deparseCheckPointStmt(DeparseState *state, CheckPointStmt *check_point_stmt)
+ {
+-	deparseAppendStringInfoString(state, "CHECKPOINT");
++	deparseAppendStringInfoString(state, "CHECKPOINT ");
++	deparseUtilityOptionList(state, check_point_stmt->options);
++	removeTrailingSpace(state);
++}
++
++static void deparseWaitStmt(DeparseState *state, WaitStmt *wait_stmt)
++{
++	deparseAppendStringInfoString(state, "WAIT FOR LSN ");
++	deparseStringLiteral(state, wait_stmt->lsn_literal);
++	deparseAppendStringInfoChar(state, ' ');
++	if (list_length(wait_stmt->options) > 0)
++	{
++		deparseAppendStringInfoString(state, "WITH ");
++		deparseUtilityOptionList(state, wait_stmt->options);
++	}
++	removeTrailingSpace(state);
+ }
+ 
+ static void deparseCreateSchemaStmt(DeparseState *state, CreateSchemaStmt *create_schema_stmt)
+@@ -7955,7 +8006,7 @@ static void deparseAlterDomainStmt(DeparseState *state, AlterDomainStmt *alter_d
+ 
+ 	switch (alter_domain_stmt->subtype)
+ 	{
+-		case 'T':
++		case AD_AlterDefault:
+ 			if (alter_domain_stmt->def != NULL)
+ 			{
+ 				deparseAppendStringInfoString(state, "SET DEFAULT ");
+@@ -7966,17 +8017,17 @@ static void deparseAlterDomainStmt(DeparseState *state, AlterDomainStmt *alter_d
+ 				deparseAppendStringInfoString(state, "DROP DEFAULT");
+ 			}
+ 			break;
+-		case 'N':
++		case AD_DropNotNull:
+ 			deparseAppendStringInfoString(state, "DROP NOT NULL");
+ 			break;
+-		case 'O':
++		case AD_SetNotNull:
+ 			deparseAppendStringInfoString(state, "SET NOT NULL");
+ 			break;
+-		case 'C':
++		case AD_AddConstraint:
+ 			deparseAppendStringInfoString(state, "ADD ");
+ 			deparseConstraint(state, castNode(Constraint, alter_domain_stmt->def), DEPARSE_NODE_CONTEXT_ALTER_DOMAIN);
+ 			break;
+-		case 'X':
++		case AD_DropConstraint:
+ 			deparseAppendStringInfoString(state, "DROP CONSTRAINT ");
+ 			if (alter_domain_stmt->missing_ok)
+ 				deparseAppendStringInfoString(state, "IF EXISTS ");
+@@ -7984,7 +8035,7 @@ static void deparseAlterDomainStmt(DeparseState *state, AlterDomainStmt *alter_d
+ 			if (alter_domain_stmt->behavior == DROP_CASCADE)
+ 				deparseAppendStringInfoString(state, " CASCADE");
+ 			break;
+-		case 'V':
++		case AD_ValidateConstraint:
+ 			deparseAppendStringInfoString(state, "VALIDATE CONSTRAINT ");
+ 			deparseAppendStringInfoString(state, quote_identifier(alter_domain_stmt->name));
+ 			break;
+@@ -8677,6 +8728,8 @@ static void deparseCopyStmt(DeparseState *state, CopyStmt *copy_stmt)
+ 						deparseAppendStringInfoString(state, "CSV");
+ 					else if (strcmp(format, "text") == 0)
+ 						deparseAppendStringInfoString(state, "TEXT");
++					else if (strcmp(format, "json") == 0)
++						deparseAppendStringInfoString(state, "JSON");
+ 					else
+ 						Assert(false);
+ 				}
+@@ -10376,6 +10429,34 @@ static void deparseCreateAmStmt(DeparseState *state, CreateAmStmt *create_am_stm
+ }
+ 
+ // "pub_obj_list" in gram.y
++// "ALL TABLES", with the tables an EXCEPT leaves out, and "ALL SEQUENCES": what Postgres 19's preprocess_pub_all_objtype_list reads into these fields.
++static void deparsePublicationAllObjects(DeparseState *state, bool all_tables, bool all_sequences, List *pubobjects)
++{
++	const ListCell *lc;
++	bool first = true;
++
++	if (all_tables)
++	{
++		deparseAppendStringInfoString(state, "ALL TABLES");
++		foreach(lc, pubobjects)
++		{
++			PublicationObjSpec *obj = lfirst(lc);
++			if (obj->pubobjtype != PUBLICATIONOBJ_EXCEPT_TABLE)
++				continue;
++			deparseAppendStringInfoString(state, first ? " EXCEPT (TABLE " : ", ");
++			deparseRangeVar(state, obj->pubtable->relation, DEPARSE_NODE_CONTEXT_NONE);
++			first = false;
++		}
++		if (!first)
++			deparseAppendStringInfoChar(state, ')');
++		if (all_sequences)
++			deparseAppendStringInfoString(state, ", ");
++	}
++	if (all_sequences)
++		deparseAppendStringInfoString(state, "ALL SEQUENCES");
++	deparseAppendStringInfoChar(state, ' ');
++}
++
+ static void deparsePublicationObjectList(DeparseState *state, List *pubobjects) {
+ 	const ListCell *lc;
+ 	foreach(lc, pubobjects) {
+@@ -10430,15 +10511,16 @@ static void deparseCreatePublicationStmt(DeparseState *state, CreatePublicationS
+ 	deparseAppendStringInfoString(state, quote_identifier(create_publication_stmt->pubname));
+ 	deparseAppendStringInfoChar(state, ' ');
+ 
+-	if (list_length(create_publication_stmt->pubobjects) > 0)
++	if (create_publication_stmt->for_all_tables || create_publication_stmt->for_all_sequences)
+ 	{
+ 		deparseAppendStringInfoString(state, "FOR ");
+-		deparsePublicationObjectList(state, create_publication_stmt->pubobjects);
+-		deparseAppendStringInfoChar(state, ' ');
++		deparsePublicationAllObjects(state, create_publication_stmt->for_all_tables, create_publication_stmt->for_all_sequences, create_publication_stmt->pubobjects);
+ 	}
+-	else if (create_publication_stmt->for_all_tables)
++	else if (list_length(create_publication_stmt->pubobjects) > 0)
+ 	{
+-		deparseAppendStringInfoString(state, "FOR ALL TABLES ");
++		deparseAppendStringInfoString(state, "FOR ");
++		deparsePublicationObjectList(state, create_publication_stmt->pubobjects);
++		deparseAppendStringInfoChar(state, ' ');
+ 	}
+ 
+ 	deparseOptDefinition(state, create_publication_stmt->options);
+@@ -10451,7 +10533,13 @@ static void deparseAlterPublicationStmt(DeparseState *state, AlterPublicationStm
+ 	deparseColId(state, alter_publication_stmt->pubname);
+ 	deparseAppendStringInfoChar(state, ' ');
+ 
+-	if (list_length(alter_publication_stmt->pubobjects) > 0)
++	if (alter_publication_stmt->for_all_tables || alter_publication_stmt->for_all_sequences)
++	{
++		deparseAppendStringInfoString(state, "SET ");
++		deparsePublicationAllObjects(state, alter_publication_stmt->for_all_tables, alter_publication_stmt->for_all_sequences, alter_publication_stmt->pubobjects);
++		removeTrailingSpace(state);
++	}
++	else if (list_length(alter_publication_stmt->pubobjects) > 0)
+ 	{
+ 		switch (alter_publication_stmt->action)
+ 		{
+@@ -10933,11 +11021,19 @@ static void deparseCreateSubscriptionStmt(DeparseState *state, CreateSubscriptio
+ 	deparseAppendStringInfoString(state, "CREATE SUBSCRIPTION ");
+ 	deparseAppendStringInfoString(state, quote_identifier(create_subscription_stmt->subname));
+ 
+-	deparseAppendStringInfoString(state, " CONNECTION ");
+-	if (create_subscription_stmt->conninfo != NULL)
+-		deparseStringLiteral(state, create_subscription_stmt->conninfo);
++	if (create_subscription_stmt->servername != NULL)
++	{
++		deparseAppendStringInfoString(state, " SERVER ");
++		deparseAppendStringInfoString(state, quote_identifier(create_subscription_stmt->servername));
++	}
+ 	else
+-		deparseAppendStringInfoString(state, "''");
++	{
++		deparseAppendStringInfoString(state, " CONNECTION ");
++		if (create_subscription_stmt->conninfo != NULL)
++			deparseStringLiteral(state, create_subscription_stmt->conninfo);
++		else
++			deparseAppendStringInfoString(state, "''");
++	}
+ 
+ 	deparseAppendStringInfoString(state, " PUBLICATION ");
+ 
+@@ -10976,10 +11072,18 @@ static void deparseAlterSubscriptionStmt(DeparseState *state, AlterSubscriptionS
+ 			deparseStringLiteral(state, alter_subscription_stmt->conninfo);
+ 			deparseAppendStringInfoChar(state, ' ');
+ 			break;
+-		case ALTER_SUBSCRIPTION_REFRESH:
++		case ALTER_SUBSCRIPTION_SERVER:
++			deparseAppendStringInfoString(state, "SERVER ");
++			deparseAppendStringInfoString(state, quote_identifier(alter_subscription_stmt->servername));
++			deparseAppendStringInfoChar(state, ' ');
++			break;
++		case ALTER_SUBSCRIPTION_REFRESH_PUBLICATION:
+ 			deparseAppendStringInfoString(state, "REFRESH PUBLICATION ");
+ 			deparseOptDefinition(state, alter_subscription_stmt->options);
+ 			break;
++		case ALTER_SUBSCRIPTION_REFRESH_SEQUENCES:
++			deparseAppendStringInfoString(state, "REFRESH SEQUENCES ");
++			break;
+ 		case ALTER_SUBSCRIPTION_ADD_PUBLICATION:
+ 			deparseAppendStringInfoString(state, "ADD PUBLICATION ");
+ 			foreach(lc, alter_subscription_stmt->publication)
+@@ -12089,23 +12193,44 @@ static void deparseGroupingFunc(DeparseState *state, GroupingFunc *grouping_func
+ 	deparseAppendStringInfoChar(state, ')');
+ }
+ 
+-static void deparseClusterStmt(DeparseState *state, ClusterStmt *cluster_stmt)
++static void deparseRepackStmt(DeparseState *state, RepackStmt *repack_stmt)
+ {
+-	deparseAppendStringInfoString(state, "CLUSTER ");
++	if (repack_stmt->command == REPACK_COMMAND_CLUSTER)
++		deparseAppendStringInfoString(state, "CLUSTER ");
++	else
++		deparseAppendStringInfoString(state, "REPACK ");
+ 
+-        deparseUtilityOptionList(state, cluster_stmt->params);
++	deparseUtilityOptionList(state, repack_stmt->params);
+ 
+-	if (cluster_stmt->relation != NULL)
++	if (repack_stmt->relation != NULL)
+ 	{
+-		deparseRangeVar(state, cluster_stmt->relation, DEPARSE_NODE_CONTEXT_NONE);
++		deparseRangeVar(state, repack_stmt->relation->relation, DEPARSE_NODE_CONTEXT_NONE);
+ 		deparseAppendStringInfoChar(state, ' ');
++		if (repack_stmt->command != REPACK_COMMAND_CLUSTER && list_length(repack_stmt->relation->va_cols) > 0)
++		{
++			deparseAppendStringInfoChar(state, '(');
++			deparseNameList(state, repack_stmt->relation->va_cols);
++			deparseAppendStringInfoString(state, ") ");
++		}
+ 	}
+ 
+-	if (cluster_stmt->indexname != NULL)
++	if (repack_stmt->command == REPACK_COMMAND_CLUSTER)
+ 	{
+-		deparseAppendStringInfoString(state, "USING ");
+-		deparseAppendStringInfoString(state, quote_identifier(cluster_stmt->indexname));
+-		deparseAppendStringInfoChar(state, ' ');
++		if (repack_stmt->indexname != NULL)
++		{
++			deparseAppendStringInfoString(state, "USING ");
++			deparseAppendStringInfoString(state, quote_identifier(repack_stmt->indexname));
++			deparseAppendStringInfoChar(state, ' ');
++		}
++	}
++	else if (repack_stmt->usingindex)
++	{
++		deparseAppendStringInfoString(state, "USING INDEX ");
++		if (repack_stmt->indexname != NULL)
++		{
++			deparseAppendStringInfoString(state, quote_identifier(repack_stmt->indexname));
++			deparseAppendStringInfoChar(state, ' ');
++		}
+ 	}
+ 
+ 	removeTrailingSpace(state);
+@@ -12435,8 +12560,11 @@ static void deparseStmt(DeparseState *state, Node *node)
+ 		case T_ClosePortalStmt:
+ 			deparseClosePortalStmt(state, castNode(ClosePortalStmt, node));
+ 			break;
+-		case T_ClusterStmt:
+-			deparseClusterStmt(state, castNode(ClusterStmt, node));
++		case T_RepackStmt:
++			deparseRepackStmt(state, castNode(RepackStmt, node));
++			break;
++		case T_WaitStmt:
++			deparseWaitStmt(state, castNode(WaitStmt, node));
+ 			break;
+ 		case T_CommentStmt:
+ 			deparseCommentStmt(state, castNode(CommentStmt, node));

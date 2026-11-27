@@ -1,0 +1,7 @@
+do_select.sql: one (k: int4, v: text(¬NUL)?) -> { k: int4, v: text(¬NUL)?, n: int4 }
+do_select_excluded.sql: at_most_one (k: int4, v: text(¬NUL)?) -> { k: int4, v: text(¬NUL)? }
+do_select_for_update.sql: one (k: int4, v: text(¬NUL)?) -> { k: int4, v: text(¬NUL)?, n: int4 }
+do_select_rows.sql: many (a: int4, b: int4) -> { k: int4 }
+do_select_where.sql: at_most_one (k: int4, v: text(¬NUL)?) -> { k: int4, v: text(¬NUL)? }
+ignore_nulls.sql: many () -> { k: int4, v: text(¬NUL)?, before: int4? } key (k)
+respect_nulls.sql: many () -> { v: text(¬NUL)? }

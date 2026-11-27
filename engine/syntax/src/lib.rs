@@ -214,6 +214,44 @@ mod tests {
     }
 
     #[test]
+    fn postgres_19_syntax_reads_into_its_nodes() {
+        use postgres::pb::{node::Node as N, OnConflictAction};
+        let insert = |text: &str| match postgres::parse(text, 0).unwrap().protobuf.stmts[0].stmt.as_ref().and_then(|s| s.node.clone()) {
+            Some(N::InsertStmt(i)) => *i.on_conflict_clause.unwrap(),
+            other => panic!("{other:?}"),
+        };
+        let plain = insert("insert into t (k) values (1) on conflict (k) do select returning *");
+        assert_eq!((plain.action(), plain.where_clause.is_some()), (OnConflictAction::OnconflictSelect, false));
+        let locked = insert("insert into t (k) values (1) on conflict (k) do select for update where t.v > 0 returning *");
+        assert_eq!((locked.action(), locked.lock_strength(), locked.where_clause.is_some()), (OnConflictAction::OnconflictSelect, postgres::pb::LockClauseStrength::LcsForupdate, true));
+        for (text, nulls) in [("select lag(v) ignore nulls over () from t", 1), ("select lag(v) respect nulls over () from t", 2), ("select lag(v) over () from t", 0), ("select sum(v) filter (where v > 0) ignore nulls over () from t", 1), ("select lag(v) /* a */ respect -- b\n nulls over w from t window w as ()", 2)] {
+            let tree = postgres::parse(text, 0).unwrap().protobuf;
+            let Some(N::SelectStmt(s)) = tree.stmts[0].stmt.as_ref().and_then(|s| s.node.clone()) else { panic!("{text}") };
+            let Some(N::ResTarget(rt)) = s.target_list[0].node.clone() else { panic!("{text}") };
+            let Some(N::FuncCall(f)) = rt.val.and_then(|v| v.node) else { panic!("{text}") };
+            assert_eq!(f.ignore_nulls, nulls, "{text}");
+        }
+        for text in ["repack t", "repack (verbose) t using index", "cluster t using t_pkey", "wait for lsn '0/16B3748' with (timeout '1s')", "checkpoint (flush_unlogged)"] {
+            assert!(postgres::parse(text, 0).is_ok(), "{text}");
+        }
+    }
+
+    #[test]
+    fn what_an_older_postgres_reads_as_an_alias_still_reads() {
+        // `ignore` and `respect` take `nulls` after them on 19, and on 14 to 18 they name a column with no `AS`.
+        for (text, alias) in [("select v ignore from t", "ignore"), ("select v respect from t", "respect"), ("select lag(v) over () ignore from t", "ignore"), ("select count(*) respect from t", "respect"), ("select ignore nulls from t", "nulls")] {
+            let tree = postgres::parse(text, 0).unwrap_or_else(|e| panic!("{text}: {e:?}")).protobuf;
+            let Some(postgres::pb::node::Node::SelectStmt(s)) = tree.stmts[0].stmt.as_ref().and_then(|s| s.node.clone()) else { panic!("{text}") };
+            let Some(postgres::pb::node::Node::ResTarget(rt)) = s.target_list[0].node.clone() else { panic!("{text}") };
+            assert_eq!(rt.name, alias, "{text}");
+        }
+        // And as a column's name before `nulls`, in an ordering, an index or a table's alias.
+        for text in ["select * from t order by ignore nulls first", "select * from t order by t.respect nulls last", "select lag(x) over (partition by a order by ignore nulls first) from t", "create index on t (respect nulls last)", "select * from ignore nulls", "select (v) ignore from t", "create index on t (lower(x) ignore nulls first)", "create index on t ((a + b) respect nulls last)"] {
+            assert!(postgres::parse(text, 0).is_ok(), "{text}");
+        }
+    }
+
+    #[test]
     fn the_parser_stack_limit_is_one_error_at_its_token() {
         let text = format!("select {}1", "(".repeat(12_000));
         let tree = parse(Dialect::Postgres, &text);
