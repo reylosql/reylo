@@ -833,6 +833,8 @@ fn prove(q: &Query, raw: Option<&MysqlDescribe>, views: &HashSet<String>, host: 
     let mut outcomes: Vec<Option<MysqlDescribe>> = Vec::with_capacity(plan.probes.len());
     // Per probe, the JSON Schema a CHECK holds each JSON column it reads to.
     let mut documents: Vec<Vec<Option<Value>>> = Vec::with_capacity(plan.probes.len());
+    // Per probe, the columns MySQL may write into a document unconverted.
+    let mut unconverted: Vec<Vec<bool>> = Vec::with_capacity(plan.probes.len());
     for probe in &plan.probes {
         let mut described = &probe.sql;
         let mut outcome = host.describe(&probe.sql);
@@ -850,16 +852,25 @@ fn prove(q: &Query, raw: Option<&MysqlDescribe>, views: &HashSet<String>, host: 
                         documents.push(Vec::new());
                     }
                 }
+                match self::unconverted(read.as_ref(), &d, views, host) {
+                    Some(found) => unconverted.push(found),
+                    None => {
+                        pending = true;
+                        unconverted.push(Vec::new());
+                    }
+                }
                 outcomes.push(Some(d));
             }
             Some(Err(_)) => {
                 outcomes.push(None);
                 documents.push(Vec::new());
+                unconverted.push(Vec::new());
             }
             None => {
                 pending = true;
                 outcomes.push(None);
                 documents.push(Vec::new());
+                unconverted.push(Vec::new());
             }
         }
     }
@@ -920,7 +931,7 @@ fn prove(q: &Query, raw: Option<&MysqlDescribe>, views: &HashSet<String>, host: 
         .columns
         .iter()
         .map(|(name, shape)| {
-            let (ty, non_null) = resolve(shape, &outcomes, &plan, &flows, &documents, views, false);
+            let (ty, non_null) = resolve(shape, &outcomes, &plan, &flows, &documents, &unconverted, views, false);
             (name.clone(), ty, non_null)
         })
         .collect();
@@ -2758,22 +2769,24 @@ fn param_type(code: u32, charset: u32) -> Type {
 
 /// One shape plus its probes' prepares as the column's type and whether it is never NULL. A leaf
 /// stored under its definition ([`stored_column`]) takes its narrowing, its `TEXT`'s capacity
-/// counted in code points, since the probe's origin may be a derived column's own name. `inside`
-/// says the shape stands inside a document, where a JSON value that is JSON's null is a null.
-fn resolve(shape: &Shape, outcomes: &[Option<MysqlDescribe>], plan: &crate::mysql_shape::Plan, flows: &[Vec<u8>], documents: &[Vec<Option<Value>>], views: &HashSet<String>, inside: bool) -> (Type, bool) {
+/// counted in code points, since the probe's origin may be a derived column's own name, and no
+/// length for a CHAR or VARCHAR whose bytes MySQL may write into the document ([`unconverted`]).
+/// `inside` says the shape stands inside a document, where a JSON value that is JSON's null is a null.
+#[allow(clippy::too_many_arguments)]
+fn resolve(shape: &Shape, outcomes: &[Option<MysqlDescribe>], plan: &crate::mysql_shape::Plan, flows: &[Vec<u8>], documents: &[Vec<Option<Value>>], unconverted: &[Vec<bool>], views: &HashSet<String>, inside: bool) -> (Type, bool) {
     match shape {
         Shape::Object { fields, non_null } => {
             let fields = fields
                 .iter()
                 .map(|(k, s)| {
-                    let (ty, nn) = resolve(s, outcomes, plan, flows, documents, views, true);
+                    let (ty, nn) = resolve(s, outcomes, plan, flows, documents, unconverted, views, true);
                     Field::new(k.clone(), ty, !nn)
                 })
                 .collect();
             (Type::structure(fields), *non_null)
         }
         Shape::Array { items, non_null, .. } => {
-            let (ty, nn) = resolve(items, outcomes, plan, flows, documents, views, true);
+            let (ty, nn) = resolve(items, outcomes, plan, flows, documents, unconverted, views, true);
             (Type::array(Slot::new(ty, !nn)), *non_null)
         }
         Shape::Column { probe, index } => match outcomes.get(*probe).and_then(|o| o.as_ref()).and_then(|o| o.columns.get(*index)) {
@@ -2782,7 +2795,7 @@ fn resolve(shape: &Shape, outcomes: &[Option<MysqlDescribe>], plan: &crate::mysq
             Some(c) if c.r#type == 16 && plan.digits.contains(&(*probe, *index)) => (Type::unknown(), c.flags & 1 != 0),
             // A truth value is an integer to the server, so no other type is in doubt.
             Some(c) => {
-                let ty = defined_type(c, Some(views), None);
+                let ty = if unconverted.get(*probe).and_then(|u| u.get(*index)) == Some(&true) { column_type(c) } else { defined_type(c, Some(views), None) };
                 let ty = flows.get(*probe).and_then(|f| f.get(*index)).and_then(|reached| widened(&ty, *reached)).unwrap_or(ty);
                 // A JSON column a CHECK holds to a JSON Schema: the values it admits.
                 let ty = match documents.get(*probe).and_then(|d| d.get(*index)).cloned().flatten() {
@@ -2804,7 +2817,7 @@ fn resolve(shape: &Shape, outcomes: &[Option<MysqlDescribe>], plan: &crate::mysq
             None => (Type::unknown(), false),
         },
         // A value the query may hand back NULL whatever its probe says ([`crate::mysql_shape`]).
-        Shape::Nullable(inner) => (resolve(inner, outcomes, plan, flows, documents, views, inside).0, false),
+        Shape::Nullable(inner) => (resolve(inner, outcomes, plan, flows, documents, unconverted, views, inside).0, false),
         _ => (Type::unknown(), false),
     }
 }
@@ -2973,6 +2986,53 @@ fn documents(statement: Option<&Statement>, raw: &MysqlDescribe, host: &Host) ->
         }
     }
     Some(out)
+}
+
+/// Per result column, whether it is a table's CHAR or VARCHAR column that may store its values in a
+/// character set MySQL writes into a document unconverted
+/// ([`crate::mysql_types::unconverted_in_json`]), where they hold more characters than its length.
+/// The catalog of the tables the probe reads, at any depth, says which: none where none of them
+/// holds a column of such a set. Else the column's own set decides where the prepare's origin of
+/// the column is the column itself ([`crate::mysql_params::traced_from`]), and any column may
+/// elsewhere: through a derived table or a WITH query the origin names the derived column, and may
+/// name an alias in place of the table. A table named by its schema is one the catalog does not
+/// list, and a probe the engine does not read may read any. A `TEXT`'s capacity is in bytes, which
+/// bound the characters a document holds of them too.
+fn unconverted(statement: Option<&Statement>, raw: &MysqlDescribe, views: &HashSet<String>, host: &Host) -> Lazy<Vec<bool>> {
+    let sized: Vec<bool> = raw.columns.iter().map(|c| stored_column(c, Some(views)) && matches!(column_type(c).label.as_deref(), Some("char" | "varchar"))).collect();
+    if !sized.contains(&true) {
+        return Some(sized);
+    }
+    let Some(statement) = statement else { return Some(sized) };
+    let mut tables = crate::mysql_params::tables(statement).read;
+    tables.sort();
+    tables.dedup();
+    let Ok(rows) = by_table(host, crate::mysql_params::TYPES_QUERY, &tables)? else { return Some(sized) };
+    // Per table, as the prepare names it, each column's character set, empty for none.
+    let mut charsets: HashMap<String, HashMap<String, String>> = HashMap::new();
+    for row in rows {
+        let (Some(table), Some(column)) = (row.first().and_then(as_str), row.get(1).and_then(as_str)) else { continue };
+        let charset = row.get(6).and_then(as_str).unwrap_or_default();
+        charsets.entry(table.to_string()).or_default().insert(column.to_ascii_lowercase(), charset.to_string());
+    }
+    let wide = |charset: &String| crate::mysql_types::unconverted_in_json(charset);
+    if !crate::mysql_params::reads_by_schema(statement) && !charsets.values().flat_map(HashMap::values).any(wide) {
+        return Some(vec![false; raw.columns.len()]);
+    }
+    let own = crate::mysql_params::traced_from(statement).unwrap_or_default();
+    Some(
+        raw.columns
+            .iter()
+            .zip(sized)
+            .map(|(c, sized)| {
+                let Some(table) = c.org_table.as_deref().filter(|_| sized) else { return false };
+                if !own.iter().any(|t| t.eq_ignore_ascii_case(table)) {
+                    return true;
+                }
+                c.org_name.as_deref().and_then(|name| charsets.get(table)?.get(&name.to_ascii_lowercase())).is_none_or(wide)
+            })
+            .collect(),
+    )
 }
 
 /// The tables of a SELECT whose columns' origins in the prepare are the columns themselves: one
