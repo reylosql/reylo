@@ -125,17 +125,33 @@ export class RawJson {
  * stands (`at /n`, after `at`), rather than stored as null.
  */
 export function writeJson(v: unknown, dialect: Dialect, fail: (message: string) => never, at = ""): string | undefined {
-  let special = false;
-  // The value as JSON.stringify writes it, where it holds no number that writes another, which the
-  // replacer sees after each `toJSON()`.
-  // A replacer sees a boxed number before JSON.stringify unboxes it.
+  const special = (n: unknown): n is number => typeof n === "number" && (!Number.isFinite(n) || Object.is(n, -0));
+  // One pass of JSON.stringify, each such number written as its own text with JSON.rawJSON, so that
+  // each value's `toJSON()` and getters are read once. The replacer sees a value after its
+  // `toJSON()` and before a boxed number is unboxed, and each object's place is kept for a refusal.
+  if (rawJson !== undefined) {
+    const places = new WeakMap<object, string>();
+    return JSON.stringify(v, function (this: object, key: string, x: unknown) {
+      const parent = places.get(this);
+      const place = parent === undefined ? at : `${parent}/${key.replace(/~/g, "~0").replace(/\//g, "~1")}`;
+      if (x !== null && typeof x === "object") places.set(x, place);
+      if (x instanceof RawJson) return rawJson(x.text);
+      const n = x instanceof Number ? Number(x) : x;
+      return special(n) ? rawJson(jsonNumber(n, place, dialect, fail)) : x;
+    });
+  }
+  // Without JSON.rawJSON, JSON.stringify's own text where no such number is in the value; else the
+  // value written again by its algorithm, which reads each `toJSON()` a second time.
+  let found = false;
   const plain = JSON.stringify(v, (_key, x: unknown) => {
-    const n = x instanceof Number ? Number(x) : x;
-    if (x instanceof RawJson || (typeof n === "number" && (!Number.isFinite(n) || Object.is(n, -0)))) special = true;
+    if (x instanceof RawJson || special(x instanceof Number ? Number(x) : x)) found = true;
     return x;
   });
-  return special ? jsonOf("", v, at, (n, place) => jsonNumber(n, place, dialect, fail)) : plain;
+  return found ? jsonOf("", v, at, (n, place) => jsonNumber(n, place, dialect, fail)) : plain;
 }
+
+/** JSON.rawJSON, which JSON.stringify writes as its text, where the runtime has it (Node 21 and later, Bun, Deno, workerd). */
+const rawJson = (JSON as { rawJSON?: (text: string) => unknown }).rawJSON;
 
 /** A number inside a document as the database reads it (`writeJson`). */
 function jsonNumber(n: number, at: string, dialect: Dialect, fail: (message: string) => never): string {
@@ -148,8 +164,8 @@ function jsonNumber(n: number, at: string, dialect: Dialect, fail: (message: str
 
 /**
  * JSON.stringify's algorithm (SerializeJSONProperty), each number written by `number` and each
- * place named by its JSON Pointer, `at`. It runs on a value JSON.stringify has written once
- * already (`writeJson`), which has thrown on a BigInt or a cycle.
+ * place named by its JSON Pointer, `at`, for a runtime without JSON.rawJSON. It runs on a value
+ * JSON.stringify has written once already (`writeJson`), which has thrown on a BigInt or a cycle.
  */
 function jsonOf(key: string, value: unknown, at: string, number: (n: number, at: string) => string): string | undefined {
   if (value !== null && (typeof value === "object" || typeof value === "function")) {

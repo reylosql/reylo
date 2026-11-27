@@ -1004,6 +1004,11 @@ test("a value goes into a document as JSON.stringify writes it, but for NaN, the
   assert.throws(() => writeJson([NaN], "mysql", fail, "[1]"), /^TypeError: at \[1\]\/0 is NaN/);
   // A float's text NaN, as an array's element reads, is the number.
   assert.ok(Number.isNaN(coerce("float", "NaN", "f")));
+  // Each value's toJSON() is read once: one that gives NaN, then 0, is refused for its NaN.
+  let calls = 0;
+  const once = { toJSON: () => (calls++ ? { value: 0 } : { value: NaN }) };
+  assert.throws(() => writeJson({ doc: once }, "sqlite", fail), /^TypeError: at \/doc\/value is NaN/);
+  assert.equal(calls, 1);
   // A boxed number is the number it holds.
   assert.equal(writeJson({ a: new Number(-0) }, "postgres", fail), `{"a":-0}`);
   assert.throws(() => writeJson({ a: new Number(Infinity) }, "mysql", fail), /^TypeError: at \/a is Infinity/);

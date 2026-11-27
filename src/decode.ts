@@ -1046,14 +1046,14 @@ async function runPostgres(c: Client, query: QueryModule<"postgres">, { text, va
     const bun = typeof c.commitDistributed === "function";
     // Each handle Bun.sql gives out, a transaction's, a savepoint's and a reserved connection's too, carries its client's options.
     // Where the JSON text is another than JSON.stringify writes (a NaN, an infinity or -0 in it), the
-    // value its toJSON() returns is that text read back, a -0 in it as JSON.rawJSON("-0"), which Bun
-    // has and writes as it is.
+    // value its toJSON() returns is that text read back, each number as JSON.rawJSON of its own text,
+    // which Bun has and writes as it is, so an integer past 2^53 keeps its digits.
     const raw = (JSON as { rawJSON?: (text: string) => unknown }).rawJSON;
     const bunJson = (v: unknown, i: number) => {
       const written = jsonText(v, "postgres", names[i]!);
       if (c.options?.prepare === false || written === undefined) return written;
       if (written === JSON.stringify(jsonValue(v))) return { toJSON: () => jsonValue(v) };
-      const value: unknown = JSON.parse(written, (_key, x: unknown) => (Object.is(x, -0) && raw !== undefined ? raw("-0") : x));
+      const value: unknown = JSON.parse(written, (_key, x: unknown, context?: { source?: string }) => (typeof x === "number" && raw !== undefined ? raw(context?.source ?? (Object.is(x, -0) ? "-0" : String(x))) : x));
       return { toJSON: () => value };
     };
     const mapped = bun ? bound.map((v, i) => (isJsonParam(v, i) ? bunJson(v, i) : v)) : query.inputs ? bound.map((v, i) => c.typed(postgresText(query, names[i]!, v), 705)) : bound;

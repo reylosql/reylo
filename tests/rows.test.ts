@@ -94,7 +94,7 @@ test("NaN, an infinity and -0, which JSON has no number for, go in where the mem
   const docs = structured(false, [["doc", { kind: "json" }, "json", false, false], ["v", { kind: "unknown" }, "blob", true, true]]).rows;
   assert.equal(prepareRows("d", docs, [{ doc: { z: -0, inf: Infinity } }], "sqlite", false).value, `[{"doc":{"z":-0e0,"inf":9e999}}]`);
   assert.equal(prepareRows("d", docs, [{ doc: [-0] }], "mysql", false).value, `[{"doc":[-0e0]}]`);
-  assert.throws(() => prepareRows("d", docs, [{ doc: { n: [NaN] } }], "mysql", false), /^TypeError: Parameter "d": row 1: "doc" at \/n\/0 is NaN, which MySQL holds no value for/);
+  assert.throws(() => prepareRows("d", docs, [{ doc: { n: [NaN] } }], "mysql", false), /^TypeError: Parameter "d": at \/0\/doc\/n\/0 is NaN, which MySQL holds no value for/);
   assert.throws(() => prepareRows("d", docs, [{ doc: 1, v: NaN }], "sqlite", false), /^TypeError: Parameter "d": at \/0\/v is NaN, which SQLite holds no value for/);
 });
 

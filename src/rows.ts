@@ -90,8 +90,8 @@ export function prepareRows(name: string, type: RowsType, value: unknown, dialec
         const filled = withDefaults(f.schema, checked);
         const failure = validate(f.schema, filled);
         if (failure) fail(`${where}"${f.name}"${failure.path ? ` at ${failure.path}` : ""} ${failure.message}.`);
-        put(f.name, jsonMember(f, filled, dialect, (message) => fail(`${where}"${f.name}" ${message}`)));
-      } else put(f.name, jsonMember(f, checked, dialect, (message) => fail(`${where}"${f.name}" ${message}`)));
+        put(f.name, filled);
+      } else put(f.name, checked);
     }
     // One statement inserts every row of a call, so on MySQL, which copies no default, its column
     // list is the same for each: a key one row leaves out and another gives cannot have its
@@ -110,16 +110,9 @@ export function prepareRows(name: string, type: RowsType, value: unknown, dialec
   const keys = present ?? new Set(type.fields.map((f) => f.name));
   if (inserted && !type.fields.some((f) => keys.has(f.name))) fail("every key is left out, so the insert would name no column; give one at least.");
   const shaped = type.one ? out[0] : out;
+  // A JSON member is written as a JSON parameter of its own is (src/values.ts, `writeJson`): each
+  // value's `toJSON()` read (a Date's), a key whose value is undefined left out.
   return { value: dialect === "postgres" ? shaped : writeJson(shaped, dialect, fail), present: keys };
-}
-
-/**
- * A JSON member's value as a JSON parameter of its own is written (src/values.ts, `writeJson`),
- * where the rows go to the database as JSON text: it reads a value's `toJSON()` (a Date's) and
- * leaves out a key whose value is undefined. Postgres takes the rows as they are, and writes them so.
- */
-function jsonMember(f: RowField, v: unknown, dialect: Dialect, fail: (message: string) => never): unknown {
-  return dialect !== "postgres" && f.type.kind === "json" ? new Raw(writeJson(v, dialect, fail)!) : v;
 }
 
 /** One value checked against its type, as the JSON the database reads; `fail` says why not. */
