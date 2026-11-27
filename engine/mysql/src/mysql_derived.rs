@@ -279,7 +279,8 @@ pub fn reads_one_table(q: &Query) -> bool {
 
 /// A derived table's or a WITH query's query as a statement of its own: with the WITH queries in
 /// scope where it stands, which it may read. `None` where those and its own WITH queries do not
-/// make one WITH without changing what a name reads: where either is RECURSIVE.
+/// make one WITH without changing what a name reads: where either is RECURSIVE, or where its own
+/// hide one in scope that it still reads ([`unhidden`]).
 pub fn standalone(q: &Query, scope: Option<&With>) -> Option<Query> {
     let mut q = q.clone();
     match (scope, &mut q.with) {
@@ -289,12 +290,37 @@ pub fn standalone(q: &Query, scope: Option<&With>) -> Option<Query> {
             if scope.recursive || own.recursive {
                 return None;
             }
-            let mut ctes = scope.cte_tables.clone();
+            let mut ctes = unhidden(&scope.cte_tables, &own.cte_tables)?;
             ctes.append(&mut own.cte_tables);
             own.cte_tables = ctes;
         }
     }
     Some(q)
+}
+
+/// The WITH queries in scope that a query's own (`own`) leave visible: each but those an own one
+/// of the same name hides, which is what the query reads by that name. Both in one WITH would
+/// declare the name twice, which the server refuses. `None` where a WITH query reads the hidden
+/// one: one in scope written after it, or an own one written before the one that hides it or
+/// being it. Left out, the name would read a table instead.
+fn unhidden(scope: &[Cte], own: &[Cte]) -> Option<Vec<Cte>> {
+    let mut visible = Vec::new();
+    for (i, cte) in scope.iter().enumerate() {
+        let name = &cte.alias.name.value;
+        let Some(at) = own.iter().position(|o| o.alias.name.value == *name) else {
+            visible.push(cte.clone());
+            continue;
+        };
+        // A name is found in a text only where it is written the same way everywhere.
+        let reads = |o: &Cte| {
+            let text = o.query.to_string();
+            !text.is_ascii() || names_word(&text, name)
+        };
+        if !plain_name(name) || scope[i + 1..].iter().any(reads) || own[..=at].iter().any(reads) {
+            return None;
+        }
+    }
+    Some(visible)
 }
 
 /// A value of a column's type, which `coalesce(column, filler)` gives the server's flag NOT NULL
@@ -597,6 +623,16 @@ mod tests {
         assert_eq!(alone("with a as (select 1 as x) select d.x from (select x from a) d")[1].as_deref(), Some("WITH a AS (SELECT 1 AS x) SELECT x FROM a"));
         assert_eq!(alone("with a as (select 1 as x) select d.x from (with b as (select x from a) select x from b) d")[1].as_deref(), Some("WITH a AS (SELECT 1 AS x), b AS (SELECT x FROM a) SELECT x FROM b"));
         assert_eq!(alone("with recursive a as (select 1 as x) select d.x from (with b as (select x from a) select x from b) d")[0], None);
+        // An inner WITH query hides an outer one of its name, which the merged WITH leaves out.
+        assert_eq!(
+            alone("with x as (select id from u) select d.b from (with x as (select name as b from u where name is not null) select b from x) d")[1].as_deref(),
+            Some("WITH x AS (SELECT name AS b FROM u WHERE name IS NOT NULL) SELECT b FROM x")
+        );
+        assert_eq!(alone("with x as (select 1 as a), z as (select 2 as c) select d.a from (with x as (select 3 as a) select a from x, z) d")[2].as_deref(), Some("WITH z AS (SELECT 2 AS c), x AS (SELECT 3 AS a) SELECT a FROM x, z"));
+        // Where a WITH query still reads the hidden one, the name would read a table instead.
+        assert_eq!(alone("with x as (select 1 as a) select d.a from (with y as (select a from x), x as (select 2 as a) select a from y) d")[1], None);
+        assert_eq!(alone("with x as (select 1 as a) select d.a from (with x as (select a + 1 as a from x) select a from x) d")[1], None);
+        assert_eq!(alone("with x as (select 1 as a), z as (select a from x) select d.a from (with x as (select 2 as a) select a from x join z using (a)) d")[2], None);
     }
 
     #[test]
