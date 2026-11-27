@@ -1436,12 +1436,12 @@ pub fn combine(kind: SetKind, left: &[DescribedColumn], right: &[DescribedColumn
 /// but no GROUP BY clause, grouping still occurs: the result is a single group row". Whether it
 /// does aggregate is the caller's to show.
 pub fn single_row(select: &SelectStmt) -> bool {
-    set_kind(select).is_none()
-        && select.values_lists.is_empty()
-        && select.group_clause.is_empty()
-        && select.having_clause.is_none()
-        && select.limit_count.is_none()
-        && select.limit_offset.is_none()
+    single_row_unlimited(select) && select.limit_count.is_none() && select.limit_offset.is_none()
+}
+
+/// [`single_row`] of the subquery read without its `LIMIT` and `OFFSET`.
+pub fn single_row_unlimited(select: &SelectStmt) -> bool {
+    set_kind(select).is_none() && select.values_lists.is_empty() && select.group_clause.is_empty() && select.having_clause.is_none()
 }
 
 /// Whether a SELECT that gives one row keeps it, as a scalar subquery reads it: [`single_row`],
