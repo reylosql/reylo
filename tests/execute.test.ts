@@ -1555,24 +1555,25 @@ test("mysql: mariadb's execute(), which throws inside the driver on a BigInt bel
   assert.deepEqual(written, [[-(2n ** 63n) - 1n]]);
 });
 
-test("mysql: runs on one mariadb connection keep their order through the first refusal of a prepared statement, and a statement MySQL will not prepare takes query() alone", async () => {
+test("mysql: runs on one mariadb connection keep their order through the first refusal of a prepared statement, and a statement that reads the session's diagnostics takes query()", async () => {
   const refusal = Object.assign(new Error("Hyperdrive does not currently support MySQL COM_STMT_PREPARE messages"), { errno: 1047 });
   const order: unknown[] = [];
   const refusing = { batch: async () => ({}), execute: () => new Promise((_, reject) => setImmediate(() => reject(refusal))), query: async (_options: unknown, values: unknown[]) => (order.push(values[0]), []) };
   const q: QueryModule<"mysql"> = { dialect: "mysql", sql: "select :n as n", params: ["n"] };
   await Promise.all([1, 2, 3].map((n) => execute(refusing as never, q, { n })));
   assert.deepEqual(order, [1, 2, 3]);
-  // ER_UNSUPPORTED_PS refuses one statement, and the next is prepared as before.
+  // A statement that reads the session's diagnostics goes to query(), since preparing it would clear them; any other error of execute() is the driver's own, and is never run again.
   const calls: string[] = [];
-  const unsupported = Object.assign(new Error("This command is not supported in the prepared statement protocol yet"), { errno: 1295 });
+  const signalled = Object.assign(new Error("This command is not supported in the prepared statement protocol yet"), { errno: 1295 });
   const conn = {
     batch: async () => ({}),
-    execute: async (options: { sql: string }) => (calls.push(`execute ${options.sql}`), options.sql.startsWith("show") ? Promise.reject(unsupported) : []),
+    execute: async (options: { sql: string }) => (calls.push(`execute ${options.sql}`), options.sql.startsWith("call") ? Promise.reject(signalled) : []),
     query: async (options: { sql: string }) => (calls.push(`query ${options.sql}`), []),
   };
-  await execute(conn as never, { dialect: "mysql", sql: "show count(*) warnings", params: [] }, {});
+  await execute(conn as never, { dialect: "mysql", sql: "-- after the insert\nshow count(*) warnings", params: [] }, {});
+  await assert.rejects(execute(conn as never, { dialect: "mysql", sql: "call writes_then_signals()", params: [] }, {}) as Promise<unknown>, (e) => e === signalled);
   await execute(conn as never, q, { n: 1 });
-  assert.deepEqual(calls, ["execute show count(*) warnings", "query show count(*) warnings", "execute select ? as n"]);
+  assert.deepEqual(calls, ["query -- after the insert\nshow count(*) warnings", "execute call writes_then_signals()", "execute select ? as n"]);
 });
 
 test("mysql: through mariadb's execute(), a row of objects keeps its value of a name as the last column of that name gave it, whatever an earlier column of that name was", async () => {
@@ -1628,8 +1629,14 @@ test("mysql: mariadb's execute() runs a statement on an app's pool made with nam
     try {
       await execute(pool, ins, { id: 1, s: "ada" });
       assert.deepEqual(plain((await execute(pool, all, {})) as object[]), [{ s: "ada" }]);
-      // MySQL prepares no SHOW COUNT(*) WARNINGS, which runs through query().
-      assert.equal((await execute(pool, { dialect: "mysql", sql: "show count(*) warnings", params: [] }, {}) as object[]).length, 1);
+      // SHOW COUNT(*) WARNINGS reads the warnings of the statement before it, which preparing it would clear.
+      const conn = await pool.getConnection();
+      try {
+        await conn.query("select cast('x' as signed)");
+        assert.deepEqual(plain((await execute(conn, { dialect: "mysql", sql: "show count(*) warnings", params: [] }, {})) as object[]).map((row) => Object.values(row)), [[1n]]);
+      } finally {
+        await conn.release();
+      }
     } finally {
       await pool.end();
     }
