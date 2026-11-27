@@ -958,6 +958,9 @@ test("the Postgres fingerprint runs on the server, holds while nothing changes, 
       "create table side (a int)",
       "alter extension citext add table side",
       "alter extension citext drop table side",
+      // plpgsql, which every database has from the server, owns a table too.
+      "alter extension plpgsql add table side",
+      "alter extension plpgsql drop table side",
       // A sequence a column owns, which an insert may advance.
       "create sequence extra",
       "alter sequence extra owned by a.x",

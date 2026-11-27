@@ -21,6 +21,8 @@ pub struct Clickhouse {
 
 struct Connection {
     server: Server,
+    /// The server's `version()`, which the schema's fingerprint is written for.
+    version: String,
     /// The engine's answers, kept between statements as the loader's session keeps them.
     answers: AnswerCache<Describe>,
 }
@@ -47,7 +49,7 @@ pub struct Session {
 impl Session {
     pub fn open(url: &str) -> Result<Session, Failure> {
         let (server, version) = connect(url).map_err(|answer| Failure::of(&answer))?;
-        Ok(Session { connection: Connection { server, answers: AnswerCache::until_cleared() }, version })
+        Ok(Session { connection: Connection { server, version: version.clone(), answers: AnswerCache::until_cleared() }, version })
     }
 
     /// Drops the answers kept from earlier statements, for a caller that outlives a schema change.
@@ -77,7 +79,7 @@ impl Program for Clickhouse {
             "open" => match connect(request["url"].as_str().unwrap_or_default()) {
                 Ok((server, version)) => {
                     self.next += 1;
-                    self.connections.insert(self.next, Connection { server, answers: AnswerCache::until_cleared() });
+                    self.connections.insert(self.next, Connection { server, version: version.clone(), answers: AnswerCache::until_cleared() });
                     json!({ "status": "opened", "conn": self.next, "version": version })
                 }
                 Err(failure) => failure,
@@ -102,7 +104,7 @@ impl Program for Clickhouse {
             // The schema's fingerprint ([`crate::engines::clickhouse::schema_fingerprint`]).
             "schema" => match self.connections.get(&id) {
                 None => closed(id),
-                Some(c) => match c.server.ask(crate::engines::clickhouse::schema_fingerprint::QUERY) {
+                Some(c) => match c.server.ask(&crate::engines::clickhouse::schema_fingerprint::query(&c.version)) {
                     Ok(Outcome::Rows(rows)) => crate::Schema::of(&rows, None).answer(),
                     Ok(outcome) => failure(&c.server, outcome),
                     Err(e) => json!({ "status": "unreachable", "message": e }),

@@ -37,6 +37,12 @@ fn within(schema: &str) -> String {
 
 /// The session's account, as `information_schema`'s privilege tables write a grantee.
 const GRANTEE: &str = "concat('''', substring_index(current_user(), '@', 1), '''@''', substring_index(current_user(), '@', -1), '''')";
+/// Whether `grantee` is the session's account or one of its enabled roles, whose grants
+/// `information_schema` lists to an account that may read them. A line names a role's grantee, and
+/// none for the account's own, so that two accounts with the same grants have the same fingerprint.
+fn granted(grantee: &str) -> String {
+    format!("({grantee} = {GRANTEE} or {grantee} in (select concat('''', role_name, '''@''', role_host, '''') from information_schema.enabled_roles))")
+}
 
 /// One line: its tag, then each field, a NUL apart, which no name holds.
 fn line(tag: &str, fields: &[&str]) -> String {
@@ -44,6 +50,7 @@ fn line(tag: &str, fields: &[&str]) -> String {
 }
 
 fn query() -> String {
+    let grantee = format!("if(grantee = {GRANTEE}, '', grantee)");
     let rows = [
         // Columns, with their full types (a length, a precision and scale, fractional seconds, a
         // character set) and defaults, which a structured parameter's optional keys read.
@@ -75,10 +82,10 @@ fn query() -> String {
         // The session's account's privileges, its own and its roles', which the server checks a
         // statement against when it prepares it, and without TRIGGER on a written table hides the
         // table's triggers.
-        format!("select {} from information_schema.user_privileges where grantee = {GRANTEE}", line("u", &["privilege_type"])),
-        format!("select {} from information_schema.schema_privileges where grantee = {GRANTEE} and {}", line("u", &[&within("table_schema"), "privilege_type"]), own("table_schema")),
-        format!("select {} from information_schema.table_privileges where grantee = {GRANTEE} and {}", line("u", &[&within("table_schema"), "table_name", "privilege_type"]), own("table_schema")),
-        format!("select {} from information_schema.column_privileges where grantee = {GRANTEE} and {}", line("u", &[&within("table_schema"), "table_name", "column_name", "privilege_type"]), own("table_schema")),
+        format!("select {} from information_schema.user_privileges where {}", line("u", &[&grantee, "privilege_type"]), granted("grantee")),
+        format!("select {} from information_schema.schema_privileges where {} and {}", line("u", &[&grantee, &within("table_schema"), "privilege_type"]), granted("grantee"), own("table_schema")),
+        format!("select {} from information_schema.table_privileges where {} and {}", line("u", &[&grantee, &within("table_schema"), "table_name", "privilege_type"]), granted("grantee"), own("table_schema")),
+        format!("select {} from information_schema.column_privileges where {} and {}", line("u", &[&grantee, &within("table_schema"), "table_name", "column_name", "privilege_type"]), granted("grantee"), own("table_schema")),
         format!("select {} from information_schema.enabled_roles", line("e", &["role_name", "role_host"])),
         format!("select {} from information_schema.role_table_grants where {}", line("e", &["grantee", "grantee_host", &within("table_schema"), "table_name", "privilege_type"]), own("table_schema")),
         format!("select {} from information_schema.role_column_grants where {}", line("e", &["grantee", "grantee_host", &within("table_schema"), "table_name", "column_name", "privilege_type"]), own("table_schema")),

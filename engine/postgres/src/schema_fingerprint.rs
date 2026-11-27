@@ -267,11 +267,12 @@ fn query() -> String {
             eq("d.classoid", PG_CLASS),
             user("c.oid")
         ),
-        // Extensions, and the relations and functions each owns: the tables an extension's code may
-        // read, and whether a CHECK's function is the JSON Schema validator it is typed by.
-        format!("select {} from pg_catalog.pg_extension e where e.oid operator(pg_catalog.>=) {USER}", line("n", &[txt("e.extname"), txt("e.extversion"), named("regnamespace", "e.extnamespace")])),
+        // Extensions, the server's own plpgsql among them, and the relations and functions each
+        // owns: the tables an extension's code may read, and whether a CHECK's function is the JSON
+        // Schema validator it is typed by.
+        format!("select {} from pg_catalog.pg_extension e", line("n", &[txt("e.extname"), txt("e.extversion"), named("regnamespace", "e.extnamespace")])),
         format!(
-            "select {} from pg_catalog.pg_depend d join pg_catalog.pg_extension e on {} where {} and {} and e.oid operator(pg_catalog.>=) {USER} and d.classid operator(pg_catalog.=) any (array[{PG_CLASS}, {PG_PROC}])",
+            "select {} from pg_catalog.pg_depend d join pg_catalog.pg_extension e on {} where {} and {} and d.classid operator(pg_catalog.=) any (array[{PG_CLASS}, {PG_PROC}])",
             line("y", &[txt("e.extname"), format!("case when {} then {} else {} end", eq("d.classid", PG_CLASS), relation("d.objid"), named("regprocedure", "d.objid"))]),
             eq("e.oid", "d.refobjid"),
             eq("d.refclassid", PG_EXTENSION),
