@@ -97,7 +97,8 @@ test("NaN, an infinity and -0, which JSON has no number for, go in where the mem
   assert.throws(() => prepareRows("d", docs, [{ doc: { n: [NaN] } }], "mysql", false), /^TypeError: Parameter "d": row 1: "doc" at \/n\/0 is NaN, which MySQL holds no value for/);
   assert.throws(() => prepareRows("d", docs, [{ doc: 1, v: NaN }], "sqlite", false), /^TypeError: Parameter "d": at \/0\/v is NaN, which SQLite holds no value for/);
   // A JSON member is written as it would be alone: its toJSON() takes the key a value alone has.
-  const keyed = { toJSON: (key: string) => (key === "" ? { saved: true, big: JSON.rawJSON("12345678901234567890"), s: JSON.rawJSON(String.raw`"\u0061"`), z: -0 } : undefined) };
+  const { rawJSON } = JSON as unknown as { rawJSON(text: string): unknown };
+  const keyed = { toJSON: (key: string) => (key === "" ? { saved: true, big: rawJSON("12345678901234567890"), s: rawJSON(String.raw`"\u0061"`), z: -0 } : undefined) };
   for (const dialect of ["mysql", "sqlite"] as const) assert.equal(prepareRows("d", docs, [{ doc: keyed }], dialect, false).value, String.raw`[{"doc":{"saved":true,"big":12345678901234567890,"s":"\u0061","z":-0e0}}]`);
 });
 

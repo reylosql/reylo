@@ -166,7 +166,8 @@ test("a JSON parameter's NaN, infinities and -0 go in as each database's JSON re
   for (const values of seen) assert.deepEqual(values, [pgText, `{"${pgText.replace(/"/g, '\\"')}","-0"}`]);
   // An integer past 2^53, written as it is with JSON.rawJSON, keeps its digits beside a -0 on Bun.sql.
   seen.length = 0;
-  await execute(bun, pq, { doc: { id: JSON.rawJSON("9007199254740993"), z: -0 }, docs: null });
+  const { rawJSON } = JSON as unknown as { rawJSON(text: string): never };
+  await execute(bun, pq, { doc: { id: rawJSON("9007199254740993"), z: -0 }, docs: null });
   assert.deepEqual([...seen], [[`{"id":9007199254740993,"z":-0}`, null]]);
   // MySQL and SQLite read -0 from `-0e0`; SQLite an infinity from a number past a double's range.
   const mq: QueryModule<"mysql"> = { dialect: "mysql", sql: "select cast(:doc as json)", params: ["doc"], inputs: { doc: json } };
