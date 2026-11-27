@@ -244,6 +244,9 @@ function scalar(t: EngineType, dialect: Dialect, input: boolean): Schema {
       const types = [...new Set(kinds.map((k) => kindSchema(scalarKind(k), t, dialect).type as string))];
       return { type: types.includes("number") ? types.filter((type) => type !== "integer") : types };
     }
+    // A column of a table that is not STRICT declared with an integer's name: SQLite keeps a REAL
+    // there that it cannot convert, which `.run()` returns as the number it is (src/decode-sqlite.ts).
+    if (t.kind === "union" && kinds[0] === "int") return { type: "number" };
     return kindSchema(scalarKind(kinds[0]!), t, dialect);
   }
   // A union's members, each as a value of its own type is, an array or a row among them (a ClickHouse Variant's).
