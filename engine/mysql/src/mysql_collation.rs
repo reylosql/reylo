@@ -249,20 +249,29 @@ pub fn written(rewritten: Rewritten, sites: &[usize], collation: &str) -> Rewrit
         let delta: isize = rewritten.spans.iter().filter(|&&(_, oe, _, _)| oe <= p).map(|&(os, oe, rs, re)| (re - rs) as isize - (oe - os) as isize).sum();
         (p as isize + delta) as usize
     };
-    let mut sql = String::with_capacity(rewritten.sql.len() + sites.len() * clause.len());
+    // Each site with its rewritten offset and its text: a space after the collation where the
+    // type runs straight into PATH (`varchar(4)path`), which would otherwise read as its name.
+    let texts: Vec<(usize, usize, String)> = sites
+        .iter()
+        .map(|&original| {
+            let to = at(original);
+            let text = if rewritten.sql[to..].starts_with(char::is_whitespace) { clause.clone() } else { format!("{clause} ") };
+            (original, to, text)
+        })
+        .collect();
+    let mut sql = String::with_capacity(rewritten.sql.len() + texts.iter().map(|(_, _, text)| text.len()).sum::<usize>());
     let mut inserted = Vec::with_capacity(sites.len());
     let mut from = 0;
-    for &original in sites {
-        let to = at(original);
-        sql.push_str(&rewritten.sql[from..to]);
-        inserted.push((original, sql.len(), sql.len() + clause.len()));
-        sql.push_str(&clause);
-        from = to;
+    for (original, to, text) in &texts {
+        sql.push_str(&rewritten.sql[from..*to]);
+        inserted.push((*original, sql.len(), sql.len() + text.len()));
+        sql.push_str(text);
+        from = *to;
     }
     sql.push_str(&rewritten.sql[from..]);
     // Each placeholder after an added text moved by its length.
     let spans = rewritten.spans.iter().map(|&(os, oe, rs, re)| {
-        let shift = sites.iter().filter(|&&original| original <= os).count() * clause.len();
+        let shift: usize = texts.iter().filter(|(original, _, _)| *original <= os).map(|(_, _, text)| text.len()).sum();
         (os, oe, rs + shift, re + shift)
     });
     let spans = spans.collect();
@@ -288,6 +297,11 @@ mod tests {
         assert_eq!(
             compiled("select u.id from users u join json_table(:names, '$[*]' columns (n varchar(40) path '$', k int path '$.k', t text exists path '$.t')) j on u.name = j.n"),
             "select u.id from users u join json_table(?, '$[*]' columns (n varchar(40) COLLATE utf8mb4_0900_ai_ci path '$', k int path '$.k', t text COLLATE utf8mb4_0900_ai_ci exists path '$.t')) j on u.name = j.n"
+        );
+        // A type that runs straight into PATH keeps a space before it.
+        assert_eq!(
+            compiled("select j.n from json_table /* doc */ (:d, '$[*]' columns (n varchar(4)path '$', m int path '$.m')) j where j.n = :n"),
+            "select j.n from json_table /* doc */ (?, '$[*]' columns (n varchar(4) COLLATE utf8mb4_0900_ai_ci path '$', m int path '$.m')) j where j.n = ?"
         );
         // A NESTED path's columns too; an ordinality column, and a number, take nothing.
         assert_eq!(
