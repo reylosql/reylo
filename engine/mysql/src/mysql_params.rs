@@ -906,7 +906,20 @@ impl Walk {
                 }
             }
             SetExpr::Insert(s) | SetExpr::Update(s) | SetExpr::Delete(s) | SetExpr::Merge(s) => self.statement(s, env),
-            _ => {}
+            // `TABLE t` reads what `SELECT * FROM t` does, a WITH query in scope included. Its name
+            // is written as the statement quotes it.
+            SetExpr::Table(table) => {
+                self.by_schema |= table.schema_name.is_some();
+                let unquoted = |name: &str| match name.strip_prefix('`').and_then(|n| n.strip_suffix('`')) {
+                    Some(inner) => inner.replace("``", "`"),
+                    None => name.to_string(),
+                };
+                if let Some(name) = table.table_name.as_deref().filter(|_| table.schema_name.is_none()).map(unquoted) {
+                    if !matches!(crate::mysql_names::with_query(env.ctes.iter().map(String::as_str), &name), Reads::With(_)) {
+                        self.tables.push(name);
+                    }
+                }
+            }
         }
     }
 
@@ -1235,6 +1248,11 @@ mod tests {
         assert_eq!(tables("delete from users where id in (select user_id from bans)"), (names(&["bans", "users"]), names(&["users"])));
         // A table of another schema is left out: the facts are read from the current one.
         assert_eq!(tables("select id from other.users"), (vec![], vec![]));
+        // `TABLE t` reads its table, or the WITH query of its name, wherever it stands.
+        assert_eq!(tables("select d.id from (table `users`) d union table posts"), (names(&["posts", "users"]), vec![]));
+        assert_eq!(tables("with users as (select id from accounts) table users"), (names(&["accounts"]), vec![]));
+        let statement = crate::mysql::parse_default("select d.id from (table other.users) d").unwrap().pop().unwrap();
+        assert_eq!((super::tables(&statement).read, super::reads_by_schema(&statement)), (vec![], true));
         // A multi-table UPDATE or DELETE may write any of its tables; one that names a table of
         // another schema, or joins a derived table, lists nothing it writes.
         assert_eq!(tables("delete u from users u join bans b on b.user_id = u.id").1, names(&["bans", "users"]));

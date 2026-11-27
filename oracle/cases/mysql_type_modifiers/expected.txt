@@ -8,6 +8,7 @@ json_object.sql: many () -> { doc: json { name: varchar(≤20), code: char(≤5)
 json_table.sql: many () -> { a: varchar?, b: decimal?, c: datetime? }
 json_wide.sql: many () -> { doc: json { u16: varchar?, u16le: varchar?, u32: char?, u2: char?, u16_note: text(≤255)?, plain: varchar(≤4)? } }
 json_wide_derived.sql: many () -> { doc: json { plain: varchar?, u16: varchar? } }
+json_wide_table.sql: many () -> { doc: json { u16: varchar?, plain: varchar? } }
 outer_join.sql: many () -> { name: varchar(≤20), code: char(≤5)?, body: text(≤65535 bytes, UTF-8)?, huge: decimal(65,30)?, at_us: datetime? }
 parts.sql: many () -> { id: int, part: decimal(5,5) }
 union.sql: many () -> { name: varchar?, price: decimal? }
