@@ -122,7 +122,7 @@ allow_untyped_params: true
 
 Whether a Postgres array column may hold nested arrays.
 
-Postgres doesn't track an array's dimensions. By default Reylo types an array column as one-dimensional, and `.run()` throws on a deeper value. With this set, the column is a `NestedArray<T>` of any depth.
+Postgres doesn't track an array's dimensions. By default Reylo types an array column as one-dimensional, and `.run()` throws on a deeper value. With this set, an array column and an array parameter are each a `NestedArray<T>` of any depth.
 
 ```yaml title=".reylo.yaml"
 # the default is false

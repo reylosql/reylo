@@ -82,3 +82,24 @@ test("an array of a domain over an array type holds whole arrays: one dimension 
   assert.match(moduleTypes("", whole, "postgres", undefined, true).row, /x: \(\(number \| null\)\[\] \| null\)\[\]/);
   assert.match(moduleTypes("", whole, "postgres", undefined, true, ".reylo.yaml", {}, true).row, /x: NestedArray<NestedArray<number \| null> \| null>/);
 });
+
+test("a Postgres array parameter is typed with one dimension by default, and at any depth under allow_nested_arrays, so it takes back what a column of its type returns", () => {
+  const int4 = { kind: "integer", bits: 32, label: "int4" };
+  const float8 = { kind: "float", exponent_bits: 11, mantissa_bits: 52, label: "float8" };
+  const lseg = { kind: "array", size: { exact: 2 }, element: { type: { kind: "struct", fields: [{ name: "x", type: float8 }, { name: "y", type: float8 }], label: "point" } }, label: "lseg" };
+  const withParams = {
+    ...analysis,
+    params: [
+      { name: "cells", nullable: false, type: { kind: "array", label: "_int4", element: { type: int4 } } },
+      { name: "segments", nullable: false, type: { kind: "array", label: "_lseg", element: { type: lseg } } },
+    ],
+  } as unknown as Analysis;
+  const flat = moduleTypes("", withParams, "postgres", undefined, true);
+  assert.match(flat.params, /cells: number\[\]; segments: \{ x: number; y: number \}\[\]\[\]/);
+  const nested = moduleTypes("", withParams, "postgres", undefined, true, ".reylo.yaml", {}, true);
+  assert.match(nested.params, /cells: NestedArray<number>; segments: NestedArray<\{ x: number; y: number \}\[\]>/);
+  assert.equal(reyloImport(`${nested.params} ${nested.row}`), `import type { NestedArray, Query } from "reylo";`);
+  // The input's JSON Schema lets them nest too.
+  const items = (a: Analysis) => (querySchemas(a, "postgres").input as { properties: { cells: { items: unknown } } }).properties.cells.items;
+  assert.deepEqual(items(analysisWithNestedArrays(withParams)), { anyOf: [items(withParams), { type: "array" }] });
+});

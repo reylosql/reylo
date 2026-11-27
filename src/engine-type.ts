@@ -123,7 +123,12 @@ function markNesting(t: Type): Type {
   }
 }
 
-/** The analysis with each Postgres array typed at any depth in its result, as `allow_nested_arrays: true` asks: the format writes arrays flat, and Postgres lets a column's hold any number of dimensions. */
-export function analysisWithNestedArrays<A extends { columns: readonly { type: Type }[] }>(analysis: A): A {
-  return { ...analysis, columns: analysis.columns.map((c) => ({ ...c, type: markNesting(c.type) })) };
+/**
+ * The analysis with each Postgres array typed at any depth in its result and its parameters, as
+ * `allow_nested_arrays: true` asks: the format writes arrays flat, and Postgres lets a column's hold
+ * any number of dimensions, which a parameter of its type takes back.
+ */
+export function analysisWithNestedArrays<A extends { columns: readonly { type: Type }[]; params?: readonly { type: Type }[] }>(analysis: A): A {
+  const marked = { ...analysis, columns: analysis.columns.map((c) => ({ ...c, type: markNesting(c.type) })) };
+  return analysis.params === undefined ? marked : { ...marked, params: analysis.params.map((p) => ({ ...p, type: markNesting(p.type) })) };
 }

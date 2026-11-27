@@ -426,7 +426,7 @@ function plainSchema(t: EngineType, dialect: Dialect, input: boolean, inJson: bo
       const each = typeSchema(t.element.type, dialect, input, inJson, inRow, undefined, codecs);
       const items = (input && dialect !== "clickhouse" ? inRow : t.element.nullable) ? nullable(each) : each;
       // An array the project lets nest holds its elements, or arrays of them at any depth.
-      return { type: "array", items: !input && nestsAnyDeep(t) ? { anyOf: [items, { type: "array" }] } : items };
+      return { type: "array", items: nestsAnyDeep(t) ? { anyOf: [items, { type: "array" }] } : items };
     }
     case "struct": {
       // A built-in geometric type is its text inside a document.

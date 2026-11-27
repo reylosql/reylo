@@ -1074,6 +1074,9 @@ fn render_param_type(t: &Value, dialect: &str, in_row: bool, members: Option<&Va
         if kind.ends_with("[]") {
             let element = render_param_type(&t["element"]["type"], dialect, in_row, None, codecs);
             let inner = if in_row { or_null(&element) } else { element };
+            if nests_any_deep(t) {
+                return format!("NestedArray<{inner}>");
+            }
             return if UNION_MARK.is_match(&inner) { format!("({inner})[]") } else { format!("{inner}[]") };
         }
     }
@@ -1162,14 +1165,13 @@ fn module_types(written: &Value, dialect: &str, codecs: &Value, allow_nested_arr
     let empty = Map::new();
     let domains = written.get("domains").and_then(Value::as_object).unwrap_or(&empty);
     let based = |t: &Value| if domains.is_empty() { t.clone() } else { with_bases(t, domains) };
-    let params: Vec<Value> = items(&written["params"]).iter().map(|p| with_type(p, based(&p["type"]))).collect();
-    let columns: Vec<Value> = items(&written["columns"])
-        .iter()
-        .map(|c| {
-            let ty = based(&c["type"]);
-            with_type(c, if allow_nested_arrays { mark_nesting(&ty) } else { ty })
-        })
-        .collect();
+    // A parameter nests where the project lets columns nest, so it takes back what a column of its type returns.
+    let nesting = |slot: &Value| {
+        let ty = based(&slot["type"]);
+        with_type(slot, if allow_nested_arrays { mark_nesting(&ty) } else { ty })
+    };
+    let params: Vec<Value> = items(&written["params"]).iter().map(nesting).collect();
+    let columns: Vec<Value> = items(&written["columns"]).iter().map(nesting).collect();
     let cardinality = match written["cardinality"].as_str().unwrap_or("many") {
         "at_most_one" => "maybeOne",
         other => other,
@@ -1613,6 +1615,14 @@ mod tests {
             printed(&a, "postgres", &Value::Null, true).text(),
             "type Returns = {\n  flags: NestedArray<string | null>;\n  segments: NestedArray<{ x: number; y: number }[] | null>;\n  stacked: NestedArray<string | null>[];\n}[];\n"
         );
+    }
+
+    #[test]
+    fn an_array_parameter_nests_at_any_depth_where_columns_do() {
+        let int4 = json!({ "kind": "integer", "bits": 32, "label": "int4" });
+        let a = analysis(json!([]), json!([{ "name": "cells", "type": { "kind": "array", "label": "_int4", "element": { "type": int4 } } }]), "none");
+        assert_eq!(printed(&a, "postgres", &Value::Null, false).text(), "type Params = { cells: number[] };\ntype Returns = void;\n");
+        assert_eq!(printed(&a, "postgres", &Value::Null, true).text(), "type Params = { cells: NestedArray<number> };\ntype Returns = void;\n");
     }
 
     #[test]
