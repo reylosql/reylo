@@ -649,7 +649,8 @@ pub fn trust(host: &Host) -> Lazy<Trust> {
     operators.extend(infer::POSTGRES_STRICT_OPERATORS.iter().filter(|o| !infer::POSTGRES_OPERATORS.contains(o)));
     let functions = infer::postgres_function_names();
     let rows = host.query(TRUST_QUERY, vec![json!(operators), json!(functions)], Scope::Session)?;
-    let mut trust = Trust { shadowed: HashSet::new(), cast_targets: Some(HashSet::new()), ..Default::default() };
+    let asked: HashSet<String> = operators.iter().chain(&functions).map(|n| n.to_string()).collect();
+    let mut trust = Trust { shadowed: HashSet::new(), asked: Some(std::sync::Arc::new(asked)), cast_targets: Some(HashSet::new()), ..Default::default() };
     match rows {
         Ok(rows) => {
             for row in &rows {
@@ -4560,6 +4561,11 @@ fn build_catalog(set_returning: &(HashSet<String>, HashSet<String>), rows: Catal
             // every function is then taken at its label.
             if row.get(3).and_then(as_bool).unwrap_or(false) {
                 catalog.labelled.insert(name.to_string());
+            }
+            // A host that answers without the fifth column reports no function's origin: every
+            // function is then taken as a user's, whose value may turn on its rows' order.
+            if row.get(4).and_then(as_bool).unwrap_or(true) {
+                catalog.user_functions.insert(name.to_string());
             }
             catalog.functions.insert(name.to_string());
         }

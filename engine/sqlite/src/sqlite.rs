@@ -455,13 +455,13 @@ fn reads_itself(sel: &Sel) -> bool {
 /// writes. A view is named, never what it reads; a WITH query, a subquery and a table-valued
 /// function are no table. SQLite expands a view into a subquery as it does a derived table, and
 /// marks both a view: a view keeps the name the statement writes, a derived table has none. A
-/// recursive WITH query's reference to itself is marked as nothing at all, so a name the statement
-/// gives a WITH query is no table anywhere in it.
+/// recursive WITH query's reference to itself has no subquery, and is marked recursive. SQLite
+/// resolved each name where it stands, so a table of a WITH query's name read outside its scope
+/// is still read.
 fn tables(t: &Tree) -> Tables {
     #[derive(Default)]
     struct Walk {
         read: Vec<String>,
-        ctes: Vec<String>,
     }
     impl Walk {
         fn node(&mut self, n: &Node) {
@@ -480,14 +480,11 @@ fn tables(t: &Tree) -> Tables {
                 self.node(&c.expr);
             }
             for f in &s.from {
-                if f.cte {
-                    self.ctes.extend(f.table.clone());
-                }
                 if f.cte || f.subquery.is_some() && f.table.is_none() {
                     if let Some(q) = &f.subquery {
                         self.sel(q);
                     }
-                } else if !f.tab_func {
+                } else if !f.tab_func && !f.recursive {
                     self.read.extend(f.table.clone());
                 }
                 for n in f.args.iter().chain(&f.on) {
@@ -517,8 +514,7 @@ fn tables(t: &Tree) -> Tables {
             walk.node(n);
         }
     }
-    let Walk { mut read, ctes } = walk;
-    read.retain(|table| !ctes.iter().any(|cte| cte.eq_ignore_ascii_case(table)));
+    let Walk { read } = walk;
     Tables { read, write, ..Default::default() }
 }
 
@@ -3998,6 +3994,28 @@ mod tests {
             assert!(messages.contains(&"The schema replay skipped statement 3: not authorized"), "{messages:?}");
         }
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_table_of_a_with_querys_name_is_read_outside_its_scope() {
+        // SQLite resolves each name where it stands: a WITH query of a subquery hides `users` in
+        // that subquery alone, and a recursive one's read of itself is no table.
+        let read = |sql: &str| {
+            let t = tree::analyze(&ddl(), sql, sql, &[], None).expect("the tree parses");
+            assert!(t.error.is_none(), "{sql}: {:?}", t.error);
+            let mut tables = tables(&t).read;
+            tables.sort();
+            let named = match crate::capabilities::of_statement(&t).tables {
+                crate::types::CapabilityTables::Named(named) => named.into_keys().collect::<Vec<_>>(),
+                other => panic!("{other:?}"),
+            };
+            assert_eq!(named, tables, "{sql}");
+            tables
+        };
+        assert_eq!(read("select u.id from users u join (with users as (select 1 as x) select x from users) s on true"), ["users"]);
+        assert_eq!(read("select p.id from posts p where exists (with posts as (select 1) select 1 from posts)"), ["posts"]);
+        assert_eq!(read("with users as (select id from posts) select id from users"), ["posts"]);
+        assert_eq!(read("with recursive c (n) as (select 1 union all select n + 1 from c where n < 3) select n from c"), Vec::<String>::new());
     }
 
     #[test]

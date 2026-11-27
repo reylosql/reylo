@@ -71,7 +71,7 @@ impl Labels {
 /// ENUM or SET columns it reads itself, where the server's own type lacks them; `None` for every
 /// other column.
 pub(crate) fn columns(q: &Query, raw: &MysqlDescribe, host: &Host) -> Lazy<Vec<Option<Type>>> {
-    if crate::mysql_derived::with_outlives_operand(q) {
+    if crate::mysql_derived::with_outlives_operand(q) || crate::mysql_derived::with_rebound(q) {
         return Some(vec![None; raw.columns.len()]);
     }
     let set_operation = holds_set_operation(q);

@@ -624,6 +624,15 @@ mod tests {
     }
 
     #[test]
+    fn a_call_the_session_answers_with_a_function_of_its_own_is_strict_in_nothing() {
+        // MySQL 9.6 moved md5 out of the server, where a stored function of the name may answer.
+        let sql = "select u.name from posts p left join users u on u.id = p.user_id where md5(u.email) is not null";
+        assert!(reduced(sql).is_some());
+        assert_eq!(crate::mysql::with_not_builtin(&["md5"], || reduced(sql)), None);
+        assert_eq!(crate::mysql::with_not_builtin(&["md5"], || strict("md5(p.a) = 'x' and lower(p.b) = 'y'")), ["p.b"]);
+    }
+
+    #[test]
     fn a_test_is_strict_where_null_makes_it_never_true() {
         assert_eq!(strict("p.published_at is not null"), ["p.published_at"]);
         assert_eq!(strict("p.id > 0 and u.id < 10"), ["p.id", "u.id"]);
