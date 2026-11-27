@@ -534,7 +534,7 @@ Postgres lets any array contain `NULL`, even in a `NOT NULL` column. So a `text[
 
 **Several dimensions**
 
-An array column is typed with one dimension. Postgres doesn't track an array's dimensions, so an `int[]` column can hold `'{{1,2},{3,4}}'` too. Then `.run()` throws, naming the column. To read it, select `to_jsonb(cells)`, or set [`allow_nested_arrays: true`](/docs/configuration#allow_nested_arrays). An array your query builds of arrays, like `array_agg(tags)`, is typed with each level it adds.
+An array column is typed with one dimension. Postgres doesn't track an array's dimensions, so an `int[]` column can hold `'{{1,2},{3,4}}'` too. Then `.run()` throws, naming the column, and it does the same for an array in a row value's field. To read it, select `to_jsonb(cells)`, or set [`allow_nested_arrays: true`](/docs/configuration#allow_nested_arrays). An array your query builds of arrays, like `array_agg(tags)`, is typed with each level it adds.
 
 <Pairs>
 

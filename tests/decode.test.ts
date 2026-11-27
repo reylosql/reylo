@@ -570,4 +570,14 @@ test("a Postgres array column holds one dimension, and an array the statement bu
   await assert.rejects(async () => execute(client([{ s: [[null]], m: null }]), segments, { id: 1 }), /Column "s" holds an array of 2 dimensions/);
   const docs: QueryModule<"postgres"> = { ...probe, columns: [["docs", "json[]"]] };
   assert.deepEqual(await execute(client([{ docs: [[[1], { a: [2] }]] }]), docs, { id: 1 }), [{ docs: [[[1], { a: [2] }]] }]);
+  // An array a row value's field holds is held to the field's kind, in a column of rows, an array of them and a row inside a row.
+  const pair = `(${JSON.stringify(["a", "int"])},${JSON.stringify(["b", "int[]"])})`;
+  const rows: QueryModule<"postgres"> = { ...probe, columns: [["p", pair], ["ps", `${pair}[]`], ["outer", `(${JSON.stringify(["inner", pair])})`]] };
+  const plain = { p: { a: 1, b: [1, 2] }, ps: [{ a: 1, b: [3] }, null], outer: { inner: { a: 1, b: null } } };
+  assert.deepEqual(await execute(client([plain]), rows, { id: 1 }), [plain]);
+  await assert.rejects(async () => execute(client([{ ...plain, p: { a: 1, b: [[1, 2]] } }]), rows, { id: 1 }), /^TypeError: Column "p" holds, in its row value's field "b", an array of 2 dimensions, and its type has one:/);
+  await assert.rejects(async () => execute(client([{ ...plain, ps: [null, { a: 1, b: [[3]] }] }]), rows, { id: 1 }), /Column "ps" holds, in its row value's field "b", an array of 2 dimensions/);
+  await assert.rejects(async () => execute(client([{ ...plain, outer: { inner: { a: 1, b: [[[1]]] } } }]), rows, { id: 1 }), /Column "outer" holds, in its row value's field "inner\.b", an array of 3 dimensions/);
+  // Under `allow_nested_arrays: true` each field is typed at any depth, and nothing is refused.
+  assert.deepEqual(await execute(client([{ ...plain, p: { a: 1, b: [[1, 2]] } }]), { ...rows, nestedArrays: true }, { id: 1 }), [{ ...plain, p: { a: 1, b: [[1, 2]] } }]);
 });
