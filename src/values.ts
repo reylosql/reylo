@@ -1313,16 +1313,30 @@ export function withRawIntegers(v: unknown): unknown {
 const bigintToJson = () => typeof (BigInt.prototype as { toJSON?: unknown }).toJSON === "function";
 
 function rawCopy(v: unknown, key = ""): unknown {
-  // What JSON.stringify writes for the value: its toJSON()'s (a Date's), called once with the key it
-  // stands at, then the items and own keys of what that returns.
-  if (v !== null && typeof v === "object" && typeof (v as { toJSON?: unknown }).toJSON === "function") v = (v as { toJSON(key: string): unknown }).toJSON(key);
+  const copy = rawValue(v, key);
+  return copy === LEFT_OUT ? undefined : copy;
+}
+
+/** What JSON.stringify leaves out of an object, and writes as null in an array. */
+const LEFT_OUT: unique symbol = Symbol("left out");
+
+// As JSON.stringify serializes a value: its toJSON()'s (a Date's, or a function's own), called once
+// with the key it stands at, then what that returns, a BigInt as its digits and the items and own
+// keys of an object, without a key's function (a toJSON() among them), symbol or undefined, which
+// it leaves out, so the driver serializes the copy as that text.
+function rawValue(v: unknown, key: string): unknown {
+  if ((typeof v === "object" || typeof v === "function") && v !== null && typeof (v as { toJSON?: unknown }).toJSON === "function") v = (v as { toJSON(key: string): unknown }).toJSON(key);
   if (typeof v === "bigint") return rawInteger(v);
+  if (v === undefined || typeof v === "function" || typeof v === "symbol") return LEFT_OUT;
   if (v === null || typeof v !== "object" || (JSON as { isRawJSON?: (x: unknown) => boolean }).isRawJSON?.(v)) return v;
-  // Without what JSON.stringify leaves out, a key's function (a toJSON() among them), symbol or
-  // undefined, or writes as null in an array, so the driver serializes the copy as that text.
-  const skipped = (x: unknown) => x === undefined || typeof x === "function" || typeof x === "symbol";
-  if (Array.isArray(v)) return Array.from(v, (x, i) => (skipped(x) ? null : rawCopy(x, String(i))));
-  return Object.fromEntries(Object.entries(v).flatMap(([k, x]) => (skipped(x) ? [] : [[k, rawCopy(x, k)]])));
+  if (Array.isArray(v)) return Array.from(v, (x, i) => {
+    const copy = rawValue(x, String(i));
+    return copy === LEFT_OUT ? null : copy;
+  });
+  return Object.fromEntries(Object.entries(v).flatMap(([k, x]) => {
+    const copy = rawValue(x, k);
+    return copy === LEFT_OUT ? [] : [[k, copy]];
+  }));
 }
 
 /** The integers MySQL and SQLite read from JSON as integers: SQLite's 64-bit signed ones, and MySQL's signed and unsigned ones. */

@@ -1134,6 +1134,9 @@ test("a JSON parameter's BigInt is written as its digits, whatever toJSON an app
   const child = { n: 1, toJSON(this: object, key: string) { calls++; return this === child && key === "child" ? this : "changed"; } };
   assert.equal(JSON.stringify(withRawIntegers({ id: 9007199254740993n, child, f: () => 1, xs: [() => 1, undefined] })), '{"id":9007199254740993,"child":{"n":1},"xs":[null,null]}');
   assert.equal(calls, 1);
+  // A function's own toJSON() runs before it is left out, given its key or its index.
+  const named = Object.assign(() => 1, { toJSON: (key: string) => key });
+  assert.equal(JSON.stringify(withRawIntegers({ id: 1n, named, xs: [named] })), JSON.stringify({ id: 1, named, xs: [named] }));
   const plain = { n: 1 };
   assert.equal(withRawIntegers(plain), plain, "no copy where it holds no BigInt");
 });
