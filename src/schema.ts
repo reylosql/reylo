@@ -128,7 +128,8 @@ export function inDocument(t: EngineType, dialect: Dialect, inUnion = false): Do
       case "decimal": return { schema: { type: "number" }, type: "number" };
       case "boolean": return BOOLEAN;
       case "text": return string();
-      case "union": return /^bool(ean)?$/i.test(name.trim()) ? { schema: { type: "integer", format: "int64" }, type: "number" } : name.toUpperCase() === "NUMERIC" ? { schema: { type: ["number", "string"] }, type: "number | string" } : ANY;
+      // An INTEGER that may be a REAL, which SQLite keeps outside a STRICT table: a number of either kind.
+      case "union": return /^bool(ean)?$/i.test(name.trim()) ? { schema: { type: "integer", format: "int64" }, type: "number" } : name.toUpperCase() === "NUMERIC" ? { schema: { type: ["number", "string"] }, type: "number | string" } : t.members.every((m) => m.kind === "integer" || m.kind === "float") ? { schema: { type: "number" }, type: "number" } : ANY;
       case "enum": case "array": case "tuple": case "struct": case "json": case "table": case "intersection": case "tagged_union": case "null": case "unknown": return undefined;
       default: return ANY;
     }
@@ -240,10 +241,15 @@ function scalar(t: EngineType, dialect: Dialect, input: boolean): Schema {
     }
     const kinds = columnKind(t, dialect).split("|");
     if (kinds.length > 1) {
-      // A NUMERIC: whichever storage class the row stored, an integer being a number too.
+      // A NUMERIC, or a number SQLite computes: whichever storage class the row holds, an integer
+      // being a number too.
       const types = [...new Set(kinds.map((k) => kindSchema(scalarKind(k), t, dialect).type as string))];
-      return { type: types.includes("number") ? types.filter((type) => type !== "integer") : types };
+      const type = types.includes("number") ? types.filter((type) => type !== "integer") : types;
+      return { type: type.length === 1 ? type[0] : type };
     }
+    // A column of a table that is not STRICT declared with an integer's name: SQLite keeps a REAL
+    // there that it cannot convert, which `.run()` returns as the number it is (src/decode-sqlite.ts).
+    if (t.kind === "union" && kinds[0] === "int") return { type: "number" };
     return kindSchema(scalarKind(kinds[0]!), t, dialect);
   }
   // A union's members, each as a value of its own type is, an array or a row among them (a ClickHouse Variant's).

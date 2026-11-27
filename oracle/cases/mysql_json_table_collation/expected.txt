@@ -7,4 +7,5 @@ nested_tags.sql: many (doc: json {"type":"object"}) -> { id: int }
 number_column.sql: many (ids: json {"type":"array","items":{"type":"integer"}}) -> { name: varchar(≤40) }
 other_collation.sql: many (codes: json {"type":"array","items":{"type":"string"}}) -> { id: int }
 own_charset.sql: many (names: json {"type":"array","items":{"type":"string"}}) -> { id: int }
+path_after_type.sql: many (names: json {"type":"array","items":{"type":"string"}}) -> { id: int, name: varchar(≤40) }
 shape.sql: many (d: json {"type":"array","items":{"type":"string"}}) -> { o: json { n: text? } }
