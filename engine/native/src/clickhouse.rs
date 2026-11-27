@@ -36,7 +36,7 @@ struct Connection {
     /// The UUID each server name answered the fingerprint with ([`Connection::read`]).
     uuids: HashMap<Option<String>, String>,
     /// Whether one name has answered for two servers, as replicas that share a `display_name`, or
-    /// a proxy that sets the header or drops it, make them: nothing is kept on such a connection.
+    /// a proxy that sets the header, make them: nothing is kept on such a connection.
     ambiguous: bool,
 }
 
@@ -176,9 +176,11 @@ impl Connection {
 /// engine reused were given in an analysis kept under the same label (`Connection::confirmed`). On
 /// one server it costs the one read the loader would make itself. Replicas are told apart by the name
 /// each answers with, its `display_name`, the host's name by default; where one name answers the
-/// fingerprint with two servers' UUIDs, the connection keeps nothing (`Connection::ambiguous`).
+/// fingerprint with two servers' UUIDs, the connection keeps nothing (`Connection::ambiguous`). Every
+/// server the program reaches names itself, so an answer that carries no name, as a proxy that drops
+/// the header gives, is of a server not told apart, and the analysis is not kept.
 fn judged(label: &str, before: &HashMap<Option<String>, String>, by: &BTreeSet<Option<String>>, mut read: impl FnMut() -> Option<Option<(Option<String>, String)>>) -> (bool, Option<String>) {
-    let kept = by.iter().all(|server| before.get(server).is_some_and(|f| f == label));
+    let kept = by.iter().all(|server| server.is_some() && before.get(server).is_some_and(|f| f == label));
     let mut heard = BTreeSet::new();
     let mut after: Option<String> = None;
     for _ in 0..CONFIRM_READS {
@@ -443,8 +445,8 @@ mod tests {
         // One the reads never reach again, or a read that fails.
         assert_eq!(judged("new", &shown(&[("a", "new"), ("b", "new")]), &set(&["a", "b"]), reads(&[("a", "new"); CONFIRM_READS])), (false, after("new")));
         assert_eq!(judged("new", &shown(&[("a", "new"), ("b", "new")]), &set(&["a", "b"]), reads(&[("a", "new")])), (false, None));
-        // A server whose answers carry no name is one server, as before names were read.
-        assert_eq!(judged("new", &[(None, "new".to_string())].into(), &[None].into(), move || Some(Some((None, "new".to_string())))), (true, after("new")));
+        // Answers that carry no name, as through a proxy that drops it, are of no server told apart.
+        assert_eq!(judged("new", &[(None, "new".to_string())].into(), &[None].into(), move || Some(Some((None, "new".to_string())))), (false, after("new")));
         // A read two servers answered tells nothing, and the reads go on.
         assert_eq!(judged("new", &shown(&[("a", "new")]), &set(&["a"]), reads(&[("split", ""), ("a", "new")])), (true, after("new")));
     }

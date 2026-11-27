@@ -156,8 +156,8 @@ impl Server {
     }
 
     /// The servers that answered since this was last called, by the name each answer carries in
-    /// `X-ClickHouse-Server-Display-Name`, `None` for an answer that carries none: one server unless
-    /// the connection reaches several replicas.
+    /// `X-ClickHouse-Server-Display-Name`, `None` for an answer that carries none, which a server of
+    /// 25.11 or later always sends: one server unless the connection reaches several replicas.
     pub fn answered(&self) -> BTreeSet<Option<String>> {
         std::mem::take(&mut *self.answered.lock().unwrap_or_else(|e| e.into_inner()))
     }
