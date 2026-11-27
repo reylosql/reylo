@@ -767,6 +767,10 @@ test("the Postgres fingerprint runs on the server, holds while nothing changes, 
 });
 
 test("the MySQL fingerprint holds while nothing changes, and moves with a column's length, precision and scale, fractional seconds and character set, which its type carries, with a CHECK's expression and whether it is enforced, with a stored function's arguments, and with what another database holds, but for Reylo Migrate's shadows other than the URL's own, and with the account's TRIGGER privileges", { skip: mysqlLive }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "reylo-fingerprint-"));
+  writeFileSync(join(root, "package.json"), "{}");
+  mkdirSync(join(root, "node_modules"));
+  symlinkSync(join(DRIVERS, "mysql2"), join(root, "node_modules", "mysql2"));
   const own = await mysqlDatabase(
     "reylo_fingerprint",
     `create table m (v varchar(20), n decimal(10,2), at datetime(3), body text character set latin1);
@@ -778,10 +782,6 @@ test("the MySQL fingerprint holds while nothing changes, and moves with a column
   // The fingerprint reads every database the account may reach, so the session's account is granted
   // only this test's: the databases other tests make and drop meanwhile are out of its sight.
   const user = `reylo_fp_${process.pid}`;
-  const root = mkdtempSync(join(tmpdir(), "reylo-fingerprint-"));
-  writeFileSync(join(root, "package.json"), "{}");
-  mkdirSync(join(root, "node_modules"));
-  symlinkSync(join(DRIVERS, "mysql2"), join(root, "node_modules", "mysql2"));
   // A session per call, as a process of its own, so that none answers from a fingerprint it took.
   const fingerprint = async (database = ownName) => {
     const url = new URL(own.url);
@@ -852,12 +852,12 @@ test("the MySQL fingerprint holds while nothing changes, and moves with a column
 });
 
 test("on MySQL, a view in another check's shadow leaves the analysis of a table of the same name as it was", { skip: mysqlLive }, async () => {
-  const own = await mysqlDatabase("reylo_view_base", "create table base (n int not null)");
-  const shadow = `reylo_shadow_view_${process.pid}`;
   const root = mkdtempSync(join(tmpdir(), "reylo-shadow-view-"));
   writeFileSync(join(root, "package.json"), "{}");
   mkdirSync(join(root, "node_modules"));
   symlinkSync(join(DRIVERS, "mysql2"), join(root, "node_modules", "mysql2"));
+  const own = await mysqlDatabase("reylo_view_base", "create table base (n int not null)");
+  const shadow = `reylo_shadow_view_${process.pid}`;
   // A fresh analysis in a session of its own, which holds no answer from before.
   const columns = async () => {
     const session = await Session.open(root, { DATABASE_URL: own.url });
