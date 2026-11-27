@@ -242,6 +242,10 @@ The `typed` row has new columns: on Postgres a float8 of -0 and of NaN, a float4
 
 PlanetScale's simulator fails S8 as before. [compare.ts](compare.ts) against the RESULTS.md before it: every row that was there has the result it had, but S10 and S11 of mysql2 3.15.3 and 2.3.3.
 
+## Run (2026-11-27): mariadb on execute()
+
+mariadb 3.4.5 and 3.5.4 now run each statement through `execute()`, which prepares it and binds each value; 2.5.6, which has no `execute()`, keeps `query()`. The mariadb jobs alone ran on Node 26.11.1 against a MySQL 8.4 from Homebrew, root/porg on 127.0.0.1:33406, seeded with [seed/mysql.sql](seed/mysql.sql): 534 rows, 534 pass. [compare.ts](compare.ts) against the RESULTS.md before it: every row has the result it had, and S0 now reports `execute()` on 3.4.5 and 3.5.4.
+
 ## Type check
 
 [typecheck/check.ts](typecheck/check.ts) generates [typecheck/cases.ts](typecheck/cases.ts), which declares one value of each client type and passes it to `run` on a Postgres, a MySQL and a SQLite query. It also checks the type `run`, `with(...)(...)` and `runSync` return (a promise from `run` and `with` on every client, the value from `runSync` on a synchronous SQLite client) and that `runSync` rejects every other client, then runs the repository's tsc and maps each diagnostic back to its line. Against the final src (src/execute.ts 332f629f3f63), all 552 cases over 94 client types are as expected: none is wrongly accepted and none is wrongly rejected; with the ten Turso client types of 2026-10-20, all 612 over 104 are. Turso's shape needs `exec()` beside `prepare()`, because postgres.js's TransactionSql has a `prepare(name)` whose result is of any type, which the first try at the type took for Turso's. [typecheck/RESULTS.md](typecheck/RESULTS.md) lists every case.
