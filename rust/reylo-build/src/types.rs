@@ -724,7 +724,17 @@ impl Types {
     /// reads the JSON: a number as the integer or float it is, and a date, a time, a uuid or bytes
     /// as the text the database writes for it.
     fn json_value(&mut self, t: &Type, nullable: bool, label: &str) -> syn::Result<TokenStream2> {
+        // A value the database writes as its text inside a document, where its kind would say
+        // otherwise: on Postgres a geometric type, a bit string, a network address, an oid, a vector
+        // and each type with no cast to JSON (engine/core, `postgres_text_in_json`); on MySQL a BIT,
+        // whose bytes it writes as their base64, as any bytes.
+        let text = match self.dialect {
+            Dialect::Postgres => reylo_engine_core::schema::postgres_text_in_json(t),
+            Dialect::Mysql => matches!(t.kind, Kind::Array(_)) && t.label.as_deref().map(bare) == Some("bit"),
+            Dialect::Sqlite => false,
+        };
         let ty = match &t.kind {
+            _ if text => quote!(::std::string::String),
             Kind::Boolean(_) => quote!(bool),
             Kind::Integer(i) => match (i.bits, i.unsigned) {
                 (b, false) if b <= 8 => quote!(i8),
@@ -1227,6 +1237,22 @@ mod tests {
         };
         assert_eq!(column(Dialect::Postgres, map("extensions.hstore")), Ok(("::reylo::sqlx::postgres::types::PgHstore".into(), false)));
         assert!(column(Dialect::Postgres, Type::opaque("public.ltree")).unwrap_err().contains("no Rust type for public.ltree"));
+    }
+
+    /// Inside a document Postgres writes a geometric type, an oid and a type with no cast to JSON as
+    /// their text, and MySQL a BIT as its bytes' base64; a composite of the user's named `point` is an
+    /// object of its fields.
+    #[test]
+    fn a_value_written_as_text_inside_a_document_is_a_string() {
+        use reylo_engine_core::types::{Field, Slot};
+        let point = || Type::structure(vec![Field::new("x", Type::double(), false), Field::new("y", Type::double(), false)]);
+        let in_json = |t: Type| Type::json_of(Slot::non_null(t));
+        let string = Ok(("::std::string::String".to_string(), true));
+        assert_eq!(column(Dialect::Postgres, in_json(point().named("point"))), string);
+        assert_eq!(column(Dialect::Postgres, in_json(Type::unsigned(32).named("oid"))), string);
+        assert_eq!(column(Dialect::Postgres, in_json(Type::opaque("ltree"))), string);
+        assert_eq!(column(Dialect::Mysql, in_json(Type::array(Slot::non_null(Type::boolean())).named("bit"))), string);
+        assert_ne!(column(Dialect::Postgres, in_json(point().named("public.point"))), string);
     }
 
     #[test]

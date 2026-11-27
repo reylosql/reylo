@@ -45,33 +45,37 @@ const ANY: DocumentForm = { schema: {}, type: JSON_TYPE };
 const BOOLEAN: DocumentForm = { schema: { type: "boolean" }, type: "boolean" };
 const string = (schema: Schema = { type: "string" }): DocumentForm => ({ schema, type: "string" });
 
-// What Postgres writes inside a JSON document for a type whose form there its kind does not say
-// (the spec's facts): the text of a type the format structures (a bit string, a vector, a
-// geometric type, a network address) or does not (an extension's), an object of its keys for an
-// hstore, GeoJSON for a geometry, and an object of its columns for a row whose columns were not
-// read. A type named nowhere here, whose form the engine does not know, is any JSON value: an
-// extension's type may have a cast to JSON. The same list in engine/core/src/schema.rs and
-// engine/cli/src/typescript.rs.
-const POSTGRES_IN_JSON: ReadonlyMap<string, DocumentForm> = new Map([
-  ...[
+/**
+ * The Postgres types whose form inside a JSON document their kind does not say, and which Postgres
+ * writes there as their text, having no cast to JSON: types the format structures (a bit string, a
+ * vector, a geometric type, a network address), built-in system types, and the extensions' on Neon
+ * and Supabase (PostGIS's others, cube, seg, isn, intarray, h3, hll, ip4r, pgx_ulid, prefix, rdkit,
+ * roaringbitmap, semver, unit, VectorChord). The same list in engine/core/src/schema.rs, which
+ * tests/schema-facts.test.ts holds this one to.
+ */
+export const POSTGRES_TEXT_IN_JSON: readonly string[] = [
+  "bit", "varbit", "vector", "halfvec", "sparsevec",
+  "point", "line", "lseg", "box", "path", "polygon", "circle",
+  "inet", "cidr",
+  "money", "tsvector", "tsquery", "regclass", "regtype",
+  "ltree", "lquery", "ltxtquery",
+  "oid", "pg_lsn", "jsonpath", "xid", "xid8", "oid8", "regdatabase",
+  "regproc", "regprocedure", "regoper", "regoperator", "regnamespace", "regrole", "regcollation", "regconfig", "regdictionary",
+  "tid", "cid", "aclitem", "refcursor", "pg_snapshot", "txid_snapshot",
+  "geography", "box2d", "box3d", "spheroid", "raster",
+  "cube", "seg", "ean13", "isbn", "isbn13", "ismn", "ismn13", "issn", "issn13", "upc",
+  "query_int", "h3index", "hll", "hll_hashval",
+  "ip4", "ip4r", "ip6", "ip6r", "ipaddress", "iprange", "ulid", "prefix_range",
+  "mol", "qmol", "xqmol", "reaction", "bfp", "sfp", "roaringbitmap", "s3vec",
+  "semver", "semverrange", "semvermultirange", "unit", "unitrange", "unitmultirange", "rabitq8", "rabitq4",
+];
 
-      "bit", "varbit", "vector", "halfvec", "sparsevec",
-      "point", "line", "lseg", "box", "path", "polygon", "circle",
-      "inet", "cidr",
-      "money", "tsvector", "tsquery", "regclass", "regtype",
-      "ltree", "lquery", "ltxtquery",
-      // Types with no cast to JSON, which Postgres writes inside a document as their text: built-in
-      // system types, and the extensions' on Neon and Supabase (PostGIS's others, cube, seg, isn,
-      // intarray, h3, hll, ip4r, pgx_ulid, prefix, rdkit, roaringbitmap, semver, unit, VectorChord).
-      "oid", "pg_lsn", "jsonpath", "xid", "xid8", "oid8", "regdatabase",
-      "regproc", "regprocedure", "regoper", "regoperator", "regnamespace", "regrole", "regcollation", "regconfig", "regdictionary",
-      "geography", "box2d", "box3d", "spheroid", "raster",
-      "cube", "seg", "ean13", "isbn", "isbn13", "ismn", "ismn13", "issn", "issn13", "upc",
-      "query_int", "h3index", "hll", "hll_hashval",
-      "ip4", "ip4r", "ip6", "ip6r", "ipaddress", "iprange", "ulid", "prefix_range",
-      "mol", "qmol", "xqmol", "reaction", "bfp", "sfp", "roaringbitmap", "s3vec",
-      "semver", "semverrange", "semvermultirange", "unit", "unitrange", "unitmultirange", "rabitq8", "rabitq4",
-  ].map((name): [string, DocumentForm] => [name, string({ type: "string", description: `pg type ${name}` })]),
+// What Postgres writes inside a JSON document for a type whose form there its kind does not say:
+// the text of each type above, an object of its keys for an hstore, GeoJSON for a geometry, and an
+// object of its columns for a row whose columns were not read. A type named nowhere here, whose form
+// the engine does not know, is any JSON value: an extension's type may have a cast to JSON.
+const POSTGRES_IN_JSON: ReadonlyMap<string, DocumentForm> = new Map([
+  ...POSTGRES_TEXT_IN_JSON.map((name): [string, DocumentForm] => [name, string({ type: "string", description: `pg type ${name}` })]),
   // An hstore is an object of its keys inside a document, each value text or null (`{"a": "1", "b": null}`).
   ["hstore", { schema: { type: "object", additionalProperties: { type: ["string", "null"] } }, type: "Record<string, string | null>" }],
   // PostGIS writes a geometry through its cast to JSON: a GeoJSON geometry, `{"type":"Point","coordinates":[1,2]}`.
@@ -113,17 +117,19 @@ const MYSQL_BYTES = string({ type: "string", pattern: "^base64:type[0-9]+:[A-Za-
  */
 export function inDocument(t: EngineType, dialect: Dialect, inUnion = false): DocumentForm | undefined {
   const name = bareName(t);
+  // MySQL writes a SET as its members joined by commas.
+  if (isMysqlSet(t)) return dialect === "sqlite" ? ANY : string();
   if (dialect === "sqlite") {
     // SQLite writes a value as its storage class: a number, text, or a NUMERIC's either; a column
     // declared BOOLEAN holds 0 and 1, which it writes as numbers. A BLOB is no JSON.
     switch (t.kind) {
       case "integer": return { schema: { type: "integer", format: "int64" }, type: "number" };
       case "float": return { schema: { type: "number", format: "double" }, type: "number" };
+      case "decimal": return { schema: { type: "number" }, type: "number" };
       case "boolean": return BOOLEAN;
       case "text": return string();
       case "union": return /^bool(ean)?$/i.test(name.trim()) ? { schema: { type: "integer", format: "int64" }, type: "number" } : name.toUpperCase() === "NUMERIC" ? { schema: { type: ["number", "string"] }, type: "number | string" } : ANY;
-      case "array": return isMysqlSet(t) ? ANY : undefined;
-      case "enum": case "tuple": case "struct": case "json": case "table": case "intersection": case "tagged_union": case "null": case "unknown": return undefined;
+      case "enum": case "array": case "tuple": case "struct": case "json": case "table": case "intersection": case "tagged_union": case "null": case "unknown": return undefined;
       default: return ANY;
     }
   }
@@ -144,11 +150,8 @@ export function inDocument(t: EngineType, dialect: Dialect, inUnion = false): Do
         return postgresInJson(t) ?? (name ? { schema: { description: `pg type ${name}` }, type: JSON_TYPE } : ANY);
     }
   }
-  if (dialect === "mysql") {
-    // MySQL writes a SET as its members joined by commas, and any bytes as their base64.
-    if (isMysqlSet(t)) return string();
-    if (t.kind === "bytes" || (t.kind === "array" && name === "bit")) return MYSQL_BYTES;
-  }
+  // MySQL writes any bytes as their base64.
+  if (dialect === "mysql" && (t.kind === "bytes" || (t.kind === "array" && name === "bit"))) return MYSQL_BYTES;
   switch (t.kind) {
     case "boolean": return BOOLEAN;
     // An integer is a JSON number in there, a MySQL `tinyint(1)` too.
@@ -229,8 +232,9 @@ function scalar(t: EngineType, dialect: Dialect, input: boolean): Schema {
         case "real": return { type: "number", format: "double" };
         case "text": return { type: "string" };
         case "blob": return { type: "string", format: "byte", contentEncoding: "base64" };
-        case "numeric": return { type: ["number", "string"] };
-        case "bool": return { type: "boolean" };
+        // A NUMERIC's and a BOOLEAN's parameter takes a truth value, which the run time binds as 1 or 0, and a number (src/render.ts).
+        case "numeric": return { type: ["number", "string", "boolean"] };
+        case "bool": return { type: ["boolean", "number"] };
         default: return {};
       }
     }

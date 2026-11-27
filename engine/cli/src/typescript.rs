@@ -669,8 +669,9 @@ fn render_type(t: &Value, in_json: bool, dialect: &str, codecs: &Value) -> Strin
         "enum" => return enum_literal(t, &render_type(&t["type"], in_json, dialect, codecs)),
         "tuple" => return tuple_of(t, &|e| render_type(e, in_json, dialect, codecs)),
         "array" => {
+            // A SET is its text inside a document, but on SQLite, which has none, any JSON (src/schema.ts, `inDocument`).
             if is_mysql_set(t) {
-                return if !in_json && dialect == "mysql" { format!("Set<{}>", render_type(&t["element"]["type"], false, dialect, codecs)) } else { "string".into() };
+                return if !in_json && dialect == "mysql" { format!("Set<{}>", render_type(&t["element"]["type"], false, dialect, codecs)) } else if in_json && dialect == "sqlite" { JSON_TYPE.into() } else { "string".into() };
             }
             if in_json && dialect == "postgres" {
                 if let Some(image) = postgres_json_image(t) {

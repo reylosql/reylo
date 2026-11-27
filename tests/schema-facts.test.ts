@@ -8,9 +8,10 @@ import { Ajv2020 } from "ajv/dist/2020.js";
 import { Session } from "../src/analyze.ts";
 import { validate } from "../src/json-schema.ts";
 import { sqlModule } from "../src/loader.ts";
-import { querySchemas, typeSchema } from "../src/schema.ts";
+import { POSTGRES_TEXT_IN_JSON, querySchemas, typeSchema } from "../src/schema.ts";
 import type { EngineType } from "../src/engine-type.ts";
-import { DRIVERS, INDEX, MYSQL, driver, mysqlDatabase, mysqlLive, pgLive, postgresDatabase } from "./helpers.ts";
+import { readFileSync } from "node:fs";
+import { DRIVERS, INDEX, MYSQL, ROOT, driver, mysqlDatabase, mysqlLive, pgLive, postgresDatabase } from "./helpers.ts";
 
 const int4 = (facts: object): EngineType => ({ kind: "integer", bits: 32, label: "int4", ...facts }) as EngineType;
 const varchar = (facts: object): EngineType => ({ kind: "text", label: "varchar", ...facts }) as EngineType;
@@ -125,6 +126,13 @@ test("a field named __proto__ is a key of the schema like any other, required wh
   assert.ok(Object.hasOwn(schema.properties, "__proto__"));
   assert.deepEqual(schema.required, ["__proto__", "b"]);
   assert.equal(JSON.stringify(schema.properties), '{"__proto__":{"type":"integer","format":"int32"},"b":{"type":"string"}}');
+});
+
+test("the types Postgres writes as their text inside a document are the engine's own list, which a built array's schema and the Rust crate read", () => {
+  const source = readFileSync(join(ROOT, "engine", "core", "src", "schema.rs"), "utf8");
+  const list = /pub const POSTGRES_TEXT_IN_JSON: &\[&str\] = &\[([^\]]*)\];/.exec(source)?.[1];
+  assert.ok(list !== undefined, "engine/core/src/schema.rs names no POSTGRES_TEXT_IN_JSON");
+  assert.deepEqual([...list.matchAll(/"([^"]+)"/g)].map((m) => m[1]), [...POSTGRES_TEXT_IN_JSON]);
 });
 
 test("an array's size is written on an array", () => {

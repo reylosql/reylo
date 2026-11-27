@@ -88,14 +88,32 @@ fn bare_name(ty: &Type) -> &str {
 /// on Neon and Supabase (PostGIS's others, cube, seg, isn, intarray, h3, hll, ip4r, pgx_ulid,
 /// prefix, rdkit, roaringbitmap, semver, unit, VectorChord). An extension's type named nowhere
 /// here may have a cast to JSON, so inside a document it is any JSON value. The same list in
-/// src/schema.ts, `POSTGRES_IN_JSON`.
+/// src/schema.ts, which tests/schema-facts.test.ts holds to this one.
 pub const POSTGRES_TEXT_IN_JSON: &[&str] = &[
     "bit", "varbit", "vector", "halfvec", "sparsevec", "point", "line", "lseg", "box", "path", "polygon", "circle", "inet", "cidr", "money", "tsvector", "tsquery", "regclass", "regtype", "ltree", "lquery", "ltxtquery",
     "oid", "pg_lsn", "jsonpath", "xid", "xid8", "oid8", "regdatabase", "regproc", "regprocedure", "regoper", "regoperator", "regnamespace", "regrole", "regcollation", "regconfig", "regdictionary",
+    "tid", "cid", "aclitem", "refcursor", "pg_snapshot", "txid_snapshot",
     "geography", "box2d", "box3d", "spheroid", "raster", "cube", "seg", "ean13", "isbn", "isbn13", "ismn", "ismn13", "issn", "issn13", "upc", "query_int", "h3index", "hll", "hll_hashval",
     "ip4", "ip4r", "ip6", "ip6r", "ipaddress", "iprange", "ulid", "prefix_range", "mol", "qmol", "xqmol", "reaction", "bfp", "sfp", "roaringbitmap", "s3vec",
     "semver", "semverrange", "semvermultirange", "unit", "unitrange", "unitmultirange", "rabitq8", "rabitq4",
 ];
+
+/// Whether Postgres writes a value of `ty` inside a JSON document as its text, where its kind would
+/// say a number, an array, an object or several: an oid, and each type `POSTGRES_TEXT_IN_JSON`
+/// names. A built-in structure (a geometric type, a bit string, a network address) is known by its
+/// own label, which a type of another schema never has, since the engine qualifies one: a composite
+/// of the user's named `public.point` is an object of its fields there. An extension's type is known
+/// by its name in whatever schema it was created in. The loader's in src/schema.ts, `postgresInJson`.
+pub fn postgres_text_in_json(ty: &Type) -> bool {
+    let name = bare_name(ty);
+    match &ty.kind {
+        Kind::Integer(_) => name == "oid",
+        Kind::Array(_) if matches!(name, "vector" | "halfvec" | "sparsevec") => true,
+        Kind::Array(_) | Kind::Struct(_) | Kind::Union(_) => POSTGRES_TEXT_IN_JSON.contains(&builtin_name(ty)),
+        Kind::Opaque | Kind::Geometry(_) | Kind::Map(_) | Kind::ZonedDateTime(_) => POSTGRES_TEXT_IN_JSON.contains(&name),
+        _ => false,
+    }
+}
 
 /// An integer's format: OpenAPI's `int32` or `int64` where its range fits one, an unsigned type
 /// needing a bit more, and none past 64 bits, as an unsigned 64-bit integer reaches.
@@ -226,6 +244,9 @@ impl Type {
     /// The JSON Schema of a value of this type, standing where `opts` says.
     pub fn json_schema(&self, opts: SchemaOptions) -> Value {
         match &self.kind {
+            // Inside a document, a type Postgres writes as its text there, a geometric type among
+            // them, which it has no cast to JSON for.
+            _ if opts.in_json && postgres_text_in_json(self) => text_of(self),
             Kind::Boolean(_) => json!({"type": "boolean"}),
             // An enum's values as its base writes them: a boolean or a number as itself where its
             // schema is a JSON number or boolean, else as its text.
@@ -301,9 +322,6 @@ impl Type {
             Kind::Bytes(_) => json!({"type": "string", "format": "byte", "contentEncoding": "base64"}),
             // A bit string and pgvector's vectors are their text to a client.
             Kind::Array(_) if matches!(builtin_name(self), "bit" | "varbit") || matches!(bare_name(self), "vector" | "halfvec" | "sparsevec") => text_of(self),
-            // Postgres has no cast of a geometric type to JSON, so a document holds its text.
-            // A composite of the user's named so, `public.point`, is an object of its fields.
-            Kind::Array(_) | Kind::Struct(_) if opts.in_json && matches!(builtin_name(self), "point" | "line" | "lseg" | "box" | "path" | "polygon" | "circle") => text_of(self),
             Kind::Array(a) => {
                 let items = a.element.ty.json_schema(opts);
                 // A parameter's elements are strict; a result's may be NULL unless the statement
@@ -384,7 +402,7 @@ impl Type {
             }
             // An extension's type of no form the engine knows, which may have a cast to JSON: any
             // JSON value inside a document.
-            Kind::Opaque | Kind::Geometry(_) if opts.in_json && !POSTGRES_TEXT_IN_JSON.contains(&bare_name(self)) => {
+            Kind::Opaque | Kind::Geometry(_) if opts.in_json && !postgres_text_in_json(self) => {
                 json!({"description": format!("pg type {}", self.label.as_deref().unwrap_or(self.kind.name()))})
             }
             // Every other type is a plain string, which is how Postgres prints it, named in the
