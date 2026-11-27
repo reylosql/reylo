@@ -1319,10 +1319,12 @@ impl<'a> Engine<'a> {
         let mut seen: HashSet<String> = relations.iter().cloned().collect();
         let mut queue: Vec<String> = relations.to_vec();
         while let Some(name) = queue.pop() {
+            // The relation by its name as the statement writes it, `public.kv` as well as `kv`.
             let definition = {
                 let known = self.relations.borrow();
                 let views = self.views.borrow();
-                known.iter().find(|(_, (n, _))| analyze::relation_name("", n) == name).and_then(|(oid, _)| views.get(oid).cloned())
+                let oid = self.oids_by_name.borrow().get(&name).copied().or_else(|| known.iter().find(|(_, (n, _))| analyze::relation_name("", n) == name).map(|(oid, _)| *oid));
+                oid.and_then(|oid| views.get(&oid).cloned())
             };
             let Some(definition) = definition else { continue };
             let parsed = analyze::analyze(&definition).ok();

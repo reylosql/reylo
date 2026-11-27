@@ -612,9 +612,10 @@ fn answered<T: Clone>(table: fn(&mut Answers) -> &mut HashMap<Asked, T>, s: &Sel
     answer
 }
 
-/// `f` of the SELECT `make` makes of an INSERT's SELECT `s` and the INSERT's WITH clause: made once
-/// in each [`answering`] run and kept to its end, so that every proof reads the one statement
-/// ([`Asked`]); made anew outside one.
+/// `f` of the SELECT `make` makes of a SELECT `s` and the WITH clause it reads, an INSERT's SELECT
+/// and the INSERT's or a WHERE's subquery and its statement's: made once in each [`answering`] run
+/// and kept to its end, so that every proof reads the one statement ([`Asked`]); made anew outside
+/// one.
 fn inserted<T>(s: &SelectStmt, make: impl FnOnce() -> SelectStmt, f: impl FnOnce(&SelectStmt) -> T) -> T {
     let key = s as *const SelectStmt as usize;
     let kept = ANSWERS.with(|answers| answers.borrow().as_ref().map(|answers| answers.inserted.get(&key).cloned()));
@@ -1081,6 +1082,22 @@ struct From<'a> {
     refused: Option<&'static str>,
     /// The statement's own WITH queries, whose statements a subquery or a WITH query reads.
     with: Option<&'a protobuf::WithClause>,
+    /// The conjuncts `col IN (subquery)` whose subquery returns one row at most, by address: one
+    /// value, as `col = (subquery)` is. Proved as the closure starts ([`From::determined_from`]),
+    /// which has what the proof of a subquery reads.
+    one_row_ins: OnceCell<HashSet<usize>>,
+}
+
+/// What the walk of a subquery knows of one of its FROM items' columns ([`From::scope_of`]).
+enum Scoped {
+    /// A table or a view the catalog names, whose columns it gives.
+    Relation(String),
+    /// A WITH query of the statement's own, with every column's name.
+    Columns(Vec<String>),
+    /// A WITH query the subquery defines itself, read by no name here: it only shadows.
+    OwnWith,
+    /// Anything else: a bare name beside it cannot be placed.
+    Unknown,
 }
 
 /// One FROM item.
@@ -1137,7 +1154,7 @@ fn conjuncts_of(node: &protobuf::Node) -> Vec<&protobuf::Node> {
 impl<'a> From<'a> {
     fn read(s: &'a SelectStmt, catalog: &Catalog) -> From<'a> {
         let ctes = with_names(s.with_clause.as_ref()).chain(catalog.enclosing_ctes.iter()).cloned().collect();
-        let mut from = From { items: Vec::new(), conjuncts: Vec::new(), ctes, using: Vec::new(), natural: false, refused: None, with: s.with_clause.as_ref() };
+        let mut from = From { items: Vec::new(), conjuncts: Vec::new(), ctes, using: Vec::new(), natural: false, refused: None, with: s.with_clause.as_ref(), one_row_ins: OnceCell::new() };
         for item in &s.from_clause {
             from.flatten(item, s.with_clause.as_ref(), false);
         }
@@ -1157,7 +1174,7 @@ impl<'a> From<'a> {
         let (alias, renamed) = rv.alias.as_ref().map_or_else(|| (rv.relname.clone(), false), |a| (a.aliasname.clone(), !a.colnames.is_empty()));
         let item = Item { alias, source: Source::Relation(rv), nullable: false, proven_one: false, renamed, columns: Vec::new() };
         let conjuncts = where_clause.into_iter().flat_map(conjuncts_of).map(|node| Conjunct { node, may_pin: None, inner: true }).collect();
-        let mut from = From { items: vec![item], conjuncts, ctes, using: Vec::new(), natural: false, refused: None, with };
+        let mut from = From { items: vec![item], conjuncts, ctes, using: Vec::new(), natural: false, refused: None, with, one_row_ins: OnceCell::new() };
         for item in joined {
             from.flatten(item, with, false);
         }
@@ -1287,6 +1304,22 @@ impl<'a> From<'a> {
     #[allow(clippy::too_many_arguments)]
     fn determined_from(&self, mut done: Vec<bool>, keys: &[impl Deref<Target = Vec<Key>>], constant: bool, dialect: Dialect, trust: &Trust, catalog: &Catalog) -> Vec<bool> {
         let n = self.items.len();
+        self.one_row_ins.get_or_init(|| {
+            // The subquery reads the statement's WITH queries as its own, so the proof reads their
+            // bodies: `id IN (SELECT id FROM input)` is one row where `input` is.
+            let inside = catalog.inside(self.with, None);
+            // A view's body is no part of the subquery's text, which the walk for volatile calls reads
+            // ([`equality_bounds`]); and unlike `col = (subquery)`, run once, `col IN (subquery)` can
+            // be a join that runs the subquery again for each row it meets.
+            let bounded = |sub: &SelectStmt| {
+                !reads_view(sub, catalog)
+                    && match self.with {
+                        Some(with) if sub.with_clause.is_none() => inserted(sub, || SelectStmt { with_clause: Some(with.clone()), ..sub.clone() }, |s| at_most_one_select(s, dialect, trust, &inside).is_ok()),
+                        _ => at_most_one_select(sub, dialect, trust, &inside).is_ok(),
+                    }
+            };
+            self.conjuncts.iter().filter_map(|c| one_row_in(c.node).filter(|(_, sub)| bounded(sub)).map(|_| c.node as *const protobuf::Node as usize)).collect()
+        });
         // The items of one row at most per row of the rest (rule 4).
         let per_row: Vec<bool> = self
             .items
@@ -1544,24 +1577,29 @@ impl<'a> From<'a> {
     /// [`From::equates`] for the column item `i` names `name`, which is `column` of `relation`.
     #[allow(clippy::too_many_arguments)]
     fn equates_as(&self, node: &protobuf::Node, i: usize, name: &str, relation: &str, column: &str, done: &[bool], catalog: &Catalog) -> bool {
-        let Some(NodeEnum::AExpr(e)) = node.node.as_ref() else { return false };
-        if !is_equality(e) {
-            return false;
-        }
-        let (Some(l), Some(r)) = (e.lexpr.as_deref(), e.rexpr.as_deref()) else { return false };
         let alias = &self.items[i].alias;
         let is_part = |side: &protobuf::Node| match name.strip_prefix('(') {
             Some(_) => !self.mentions_merged(side) && matches_expression(side, name, alias),
             None => self.own(side, alias).as_deref() == Some(name),
         };
-        [(l, r), (r, l)].into_iter().any(|(side, value)| {
-            is_part(side)
-                && self.reads(value, catalog).is_some_and(|read| {
-                    read.iter().all(|(j, read)| *j != i && (done[*j] || read.as_deref().is_some_and(|c| self.pinned_by_value(*j, c, catalog))))
-                })
-                && equality_bounds(catalog, relation, column, value, &|n| self.node_type(n, catalog))
+        let bounds = |value: &protobuf::Node| {
+            self.reads(value, catalog).is_some_and(|read| {
+                read.iter().all(|(j, read)| *j != i && (done[*j] || read.as_deref().is_some_and(|c| self.pinned_by_value(*j, c, catalog))))
+            }) && equality_bounds(catalog, relation, column, value, &|n| self.node_type(n, catalog))
                 && self.keeps_collation(relation, column, value, catalog)
-        })
+        };
+        // `col IN (subquery)` of one row at most compares `col` with that row's value, as
+        // `col = (subquery)` does, under the same operator and collation.
+        if let Some((test, sub)) = one_row_in(node) {
+            let proven = self.one_row_ins.get().is_some_and(|ins| ins.contains(&(node as *const protobuf::Node as usize)));
+            return proven && is_part(test) && bounds(&scalar_of(sub));
+        }
+        let Some(NodeEnum::AExpr(e)) = node.node.as_ref() else { return false };
+        if !is_equality(e) {
+            return false;
+        }
+        let (Some(l), Some(r)) = (e.lexpr.as_deref(), e.rexpr.as_deref()) else { return false };
+        [(l, r), (r, l)].into_iter().any(|(side, value)| is_part(side) && bounds(value))
     }
 
     /// Whether `column = value` compares under the column's own collation, or one as strict. A
@@ -1817,15 +1855,16 @@ impl<'a> From<'a> {
     }
 
     /// `inner` holds the scopes of the subqueries the walk is inside, innermost last: each the
-    /// names its FROM goes by, with the relation behind each where it is one the catalog knows.
-    fn walk_reads(&self, v: &Value, inner: &mut Vec<Vec<(String, Option<String>)>>, catalog: &Catalog, out: &mut Vec<(usize, Option<String>)>) -> Option<()> {
+    /// names its FROM goes by, with what the proof knows of each one's columns.
+    fn walk_reads(&self, v: &Value, inner: &mut Vec<Vec<(String, Scoped)>>, catalog: &Catalog, out: &mut Vec<(usize, Option<String>)>) -> Option<()> {
         match v {
             Value::Object(map) => {
                 if let Some(c) = map.get("ColumnRef") {
                     return self.place(c, inner, catalog, out);
                 }
                 if let Some(select) = map.get("SelectStmt") {
-                    inner.push(self.scope_of(select));
+                    let shadowed: Vec<String> = inner.iter().flatten().filter_map(|(name, s)| matches!(s, Scoped::OwnWith).then(|| name.clone())).collect();
+                    inner.push(self.scope_of(select, &shadowed));
                     let walked = select.as_object().into_iter().flat_map(|o| o.values()).try_for_each(|child| self.walk_reads(child, inner, catalog, out));
                     inner.pop();
                     return walked;
@@ -1837,49 +1876,74 @@ impl<'a> From<'a> {
         }
     }
 
-    /// The names a subquery's FROM goes by, and the catalog relation behind each that is one.
-    fn scope_of(&self, select: &Value) -> Vec<(String, Option<String>)> {
-        let mut own: Vec<String> = Vec::new();
+    /// The names a subquery's FROM goes by, and what the proof knows of each one's columns; and,
+    /// as [`Scoped::OwnWith`], the WITH queries the subquery itself defines, which shadow the
+    /// statement's of the same name in it and in any subquery inside it, as `shadowed` holds those
+    /// of the subqueries the walk is inside.
+    fn scope_of(&self, select: &Value, shadowed: &[String]) -> Vec<(String, Scoped)> {
+        let mut own: Vec<String> = shadowed.to_vec();
+        let mut out = Vec::new();
         for cte in select.get("with_clause").and_then(|w| w.get("ctes")).and_then(Value::as_array).into_iter().flatten() {
             if let Some(name) = cte.get("node").and_then(|n| n.get("CommonTableExpr")).and_then(|c| c.get("ctename")).and_then(Value::as_str) {
                 own.push(name.to_string());
+                out.push((name.to_string(), Scoped::OwnWith));
             }
         }
-        let mut out = Vec::new();
-        fn item(v: &Value, ctes: &[String], own: &[String], out: &mut Vec<(String, Option<String>)>) {
+        let with = |name: &str| self.with_columns(name);
+        fn item(v: &Value, ctes: &[String], own: &[String], with: &dyn Fn(&str) -> Option<Vec<String>>, out: &mut Vec<(String, Scoped)>) {
             let Some(node) = v.get("node") else { return };
             let alias = |n: &Value| n.get("alias").and_then(|a| a.get("aliasname")).and_then(Value::as_str).map(String::from);
             if let Some(rv) = node.get("RangeVar") {
                 let relname = rv.get("relname").and_then(Value::as_str).unwrap_or_default().to_string();
                 let schema = rv.get("schemaname").and_then(Value::as_str).unwrap_or_default();
                 let renamed = rv.get("alias").and_then(|a| a.get("colnames")).and_then(Value::as_array).is_some_and(|c| !c.is_empty());
-                let relation = (!schema.is_empty() || (!ctes.contains(&relname) && !own.contains(&relname))).then(|| crate::analyze::relation_name(schema, &relname));
-                out.push((alias(rv).unwrap_or(relname), relation.filter(|_| !renamed)));
+                let scoped = if renamed {
+                    Scoped::Unknown
+                } else if !schema.is_empty() || (!ctes.contains(&relname) && !own.contains(&relname)) {
+                    Scoped::Relation(crate::analyze::relation_name(schema, &relname))
+                } else if !own.contains(&relname) {
+                    with(&relname).map_or(Scoped::Unknown, Scoped::Columns)
+                } else {
+                    Scoped::Unknown
+                };
+                out.push((alias(rv).unwrap_or(relname), scoped));
             } else if let Some(j) = node.get("JoinExpr") {
                 for side in ["larg", "rarg"] {
                     if let Some(s) = j.get(side) {
-                        item(s, ctes, own, out);
+                        item(s, ctes, own, with, out);
                     }
                 }
             } else if let Some(other) = node.as_object().and_then(|o| o.values().next()) {
-                out.push((alias(other).unwrap_or_default(), None));
+                out.push((alias(other).unwrap_or_default(), Scoped::Unknown));
             }
         }
         for f in select.get("from_clause").and_then(Value::as_array).into_iter().flatten() {
-            item(f, &self.ctes, &own, &mut out);
+            item(f, &self.ctes, &own, &with, &mut out);
         }
         out
     }
 
+    /// The names of every column of the statement's own WITH query `name`, where the proof can
+    /// read them all: its column list, or its SELECT's names ([`output_names`]).
+    fn with_columns(&self, name: &str) -> Option<Vec<String>> {
+        let cte = self.with?.ctes.iter().find_map(|c| match c.node.as_ref() {
+            Some(NodeEnum::CommonTableExpr(cte)) if cte.ctename == name => Some(cte),
+            _ => None,
+        })?;
+        let Some(NodeEnum::SelectStmt(body)) = cte.ctequery.as_deref().and_then(|q| q.node.as_ref()) else { return None };
+        let listed: Vec<String> = cte.aliascolnames.iter().filter_map(field_name).map(String::from).collect();
+        renamed_names(body, &listed)?.into_iter().collect()
+    }
+
     /// Place one column a walk meets, adding the item it reads and the column's name there (`None`
     /// for a whole row, `q.*`) to `out`.
-    fn place(&self, c: &Value, inner: &[Vec<(String, Option<String>)>], catalog: &Catalog, out: &mut Vec<(usize, Option<String>)>) -> Option<()> {
+    fn place(&self, c: &Value, inner: &[Vec<(String, Scoped)>], catalog: &Catalog, out: &mut Vec<(usize, Option<String>)>) -> Option<()> {
         let fields = c.get("fields")?.as_array()?;
         let names: Vec<&str> = fields.iter().filter_map(|f| f.get("node")?.get("String")?.get("sval")?.as_str()).collect();
         match (names.as_slice(), fields.len()) {
             // `q.column`, or `q.*`.
             ([q, rest @ ..], 2) => {
-                if inner.iter().rev().any(|scope| scope.iter().any(|(alias, _)| alias == q)) {
+                if inner.iter().rev().any(|scope| scope.iter().any(|(alias, s)| alias == q && !matches!(s, Scoped::OwnWith))) {
                     return Some(());
                 }
                 if let Some(i) = self.items.iter().position(|it| it.alias == *q) {
@@ -1893,9 +1957,14 @@ impl<'a> From<'a> {
                     return None;
                 }
                 for scope in inner.iter().rev() {
-                    for (_, relation) in scope {
-                        let columns = catalog.column_types.get(relation.as_deref()?)?;
-                        if columns.contains_key(*column) {
+                    for (_, scoped) in scope {
+                        let has = match scoped {
+                            Scoped::Relation(relation) => catalog.column_types.get(relation)?.contains_key(*column),
+                            Scoped::Columns(columns) => columns.iter().any(|c| c == column),
+                            Scoped::OwnWith => false,
+                            Scoped::Unknown => return None,
+                        };
+                        if has {
                             return Some(());
                         }
                     }
@@ -1909,7 +1978,7 @@ impl<'a> From<'a> {
                     // A name no relation in scope has as a column is the whole row of an item
                     // that goes by it, as `(p).author_id` reads `p`: of a subquery the walk is
                     // inside, or of an item here.
-                    [] if inner.iter().any(|scope| scope.iter().any(|(alias, _)| alias == column)) => Some(()),
+                    [] if inner.iter().any(|scope| scope.iter().any(|(alias, s)| alias == column && !matches!(s, Scoped::OwnWith))) => Some(()),
                     [] if self.items.iter().any(|it| it.alias == *column) => {
                         out.extend(self.items.iter().enumerate().filter(|(_, it)| it.alias == *column).map(|(i, _)| (i, None)));
                         Some(())
@@ -3838,6 +3907,42 @@ fn mentions(node: &protobuf::Node, kind: &str) -> bool {
 /// or an operator merely spelled with an equals sign.
 fn is_equality(e: &protobuf::AExpr) -> bool {
     e.kind == protobuf::AExprKind::AexprOp as i32 && e.name.last().and_then(field_name) == Some("=")
+}
+
+/// `test IN (sub)`, which the parser writes as `test = ANY (sub)` with no operator name: the
+/// tested expression and the subquery.
+fn one_row_in(node: &protobuf::Node) -> Option<(&protobuf::Node, &SelectStmt)> {
+    let Some(NodeEnum::SubLink(l)) = node.node.as_ref() else { return None };
+    if l.sub_link_type != protobuf::SubLinkType::AnySublink as i32 || !(l.oper_name.is_empty() || (l.oper_name.len() == 1 && l.oper_name.last().and_then(field_name) == Some("="))) {
+        return None;
+    }
+    let Some(NodeEnum::SelectStmt(sub)) = l.subselect.as_deref()?.node.as_ref() else { return None };
+    Some((l.testexpr.as_deref()?, sub))
+}
+
+/// Whether a statement reads a view anywhere in it, by any name the catalog knows as one.
+fn reads_view(s: &SelectStmt, catalog: &Catalog) -> bool {
+    fn walk(v: &Value, catalog: &Catalog) -> bool {
+        match v {
+            Value::Object(map) => map.iter().any(|(key, child)| {
+                let view = key == "RangeVar" && {
+                    let part = |name: &str| child.get(name).and_then(Value::as_str).unwrap_or_default();
+                    catalog.views.contains_key(&crate::analyze::relation_name(part("schemaname"), part("relname")))
+                };
+                view || walk(child, catalog)
+            }),
+            Value::Array(items) => items.iter().any(|i| walk(i, catalog)),
+            _ => false,
+        }
+    }
+    serde_json::to_value(s).map_or(true, |tree| walk(&tree, catalog))
+}
+
+/// A scalar subquery of `sub`'s statement: the value `col IN (sub)` compares `col` with, where
+/// `sub` returns one row at most.
+fn scalar_of(sub: &SelectStmt) -> protobuf::Node {
+    let link = protobuf::SubLink { sub_link_type: protobuf::SubLinkType::ExprSublink as i32, subselect: Some(Box::new(protobuf::Node { node: Some(NodeEnum::SelectStmt(Box::new(sub.clone()))) })), ..Default::default() };
+    protobuf::Node { node: Some(NodeEnum::SubLink(Box::new(link))) }
 }
 
 /// The column name this expression is, when it names a column of `alias` — `alias.col`, or a bare
