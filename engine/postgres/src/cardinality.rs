@@ -74,8 +74,8 @@ use crate::levels::{Columns, Level, Withs};
 use crate::pgtypes::oid;
 use syntax::postgres::protobuf::{self, node::Node as NodeEnum, SelectStmt};
 use serde_json::Value;
-use std::cell::LazyCell;
-use std::collections::HashSet;
+use std::cell::{LazyCell, OnceCell, RefCell};
+use std::collections::{HashMap, HashSet};
 use std::ops::Deref;
 
 /// The shapes the build proves return exactly one row, for the diagnostic that refuses a
@@ -211,18 +211,23 @@ impl Catalog {
         Catalog { enclosing_ctes: Vec::new(), enclosing_bodies: Vec::new(), nested: false, row_fields: None, ..self.clone() }
     }
 
-    /// This catalog for a nested statement, adding only its parent's own WITH queries.
-    fn enclosed(&self, with: Option<&protobuf::WithClause>) -> Catalog {
-        let mut inner = self.clone();
-        inner.enclosing_ctes.extend(with_names(with).cloned());
-        inner
+    /// The catalog every proof reads a statement nested in one whose WITH clause is `with` under,
+    /// whichever proof asks: a subquery or a set operation's arm (`cte` `None`) sees every one of
+    /// `with`'s queries, and the body of its query `cte` those before it ([`Catalog::scoped`]). One
+    /// reading for every proof keeps the statement of a WITH query in scope wherever its name is
+    /// read, so that it hides an enclosing one of its name, and gives each nested statement one
+    /// scope, in which it is proved once ([`answered`]).
+    fn inside(&self, with: Option<&protobuf::WithClause>, cte: Option<&protobuf::CommonTableExpr>) -> Catalog {
+        let at = |cte: &protobuf::CommonTableExpr| with.and_then(|w| w.ctes.iter().position(|c| matches!(c.node.as_ref(), Some(NodeEnum::CommonTableExpr(c)) if std::ptr::eq(c.as_ref(), cte))));
+        self.scoped(with, cte.map(|cte| at(cte).unwrap_or(0)))
     }
 
-    /// [`Catalog::enclosed`] for a statement nested in one whose WITH clause is `with`, with the
-    /// statements of the first `upto` of `with`'s queries (every one, for `None`) in scope, so
+    /// This catalog for a statement nested in one whose WITH clause is `with`, with `with`'s names
+    /// and the statements of the first `upto` of its queries (every one, for `None`) in scope, so
     /// that a reference to one reads its keys. A WITH query's body sees those before it.
     fn scoped(&self, with: Option<&protobuf::WithClause>, upto: Option<usize>) -> Catalog {
-        let mut inner = self.enclosed(with);
+        let mut inner = self.clone();
+        inner.enclosing_ctes.extend(with_names(with).cloned());
         let recursive = with.is_some_and(|w| w.recursive);
         for cte in with.into_iter().flat_map(|w| w.ctes.iter().take(upto.unwrap_or(usize::MAX))) {
             let Some(NodeEnum::CommonTableExpr(cte)) = cte.node.as_ref() else { continue };
@@ -492,13 +497,86 @@ pub const SET_RETURNING_OPERATORS_QUERY: &str = "SELECT DISTINCT o.oprname::pg_c
 pub const SET_RETURNING_ATTRIBUTES_QUERY: &str = "SELECT DISTINCT p.proname::pg_catalog.text FROM pg_catalog.pg_proc p \
     WHERE p.proretset AND p.pronargs OPERATOR(pg_catalog.>=) '1'::pg_catalog.int2 AND p.pronargs OPERATOR(pg_catalog.-) p.pronargdefaults OPERATOR(pg_catalog.<=) '1'::pg_catalog.int2";
 
+/// The answers the proofs have given while one public proof runs ([`answering`]), by what each was
+/// asked. A statement nested in another is asked about from every level around it, by several
+/// proofs and from several places in each: whether a FROM item is one row and then what its keys
+/// are, the items of a join and then the same items again for a DISTINCT or a GROUP BY, a WITH
+/// query's rows by its name and again as a FROM item. Proved anew each time it is asked, a
+/// statement's work would double with each level of nesting around it; kept, each statement is
+/// proved once in each scope it is read in.
+#[derive(Default)]
+struct Answers {
+    exactly_one: HashMap<Asked, Result<(), String>>,
+    at_most_one: HashMap<Asked, Result<(), String>>,
+    keys: HashMap<Asked, Vec<Key>>,
+}
+
+/// What an answer turns on, past what every proof of one public proof shares (the catalog's facts
+/// and the trust): the statement, as the JSON of its parse tree, the dialect, and what the catalog
+/// says of the statements around it, which is all a proof changes of the catalog it was given
+/// ([`Catalog::scoped`], [`Catalog::for_view`], [`enclosing_body`]; `row_fields` it only clears).
+#[derive(PartialEq, Eq, Hash)]
+struct Asked {
+    statement: Vec<u8>,
+    dialect: Dialect,
+    enclosing_ctes: Vec<String>,
+    enclosing_bodies: Vec<(String, Option<String>, Vec<String>)>,
+    nested: bool,
+    row_fields: bool,
+}
+
+thread_local! {
+    static ANSWERS: RefCell<Option<Answers>> = const { RefCell::new(None) };
+}
+
+/// Run one public proof with answers of its own: one run inside another, under another catalog,
+/// keeps none of the other's, and leaves them as they were.
+fn answering<T>(prove: impl FnOnce() -> T) -> T {
+    struct Outer(Option<Answers>);
+    impl Drop for Outer {
+        fn drop(&mut self) {
+            let outer = self.0.take();
+            ANSWERS.with(|answers| *answers.borrow_mut() = outer);
+        }
+    }
+    let _outer = Outer(ANSWERS.with(|answers| answers.borrow_mut().replace(Answers::default())));
+    prove()
+}
+
+/// What `prove` answers for `s` under `catalog`, proved once in each [`answering`] run, and anew
+/// outside one. `table` is where the answers of `prove`'s kind are kept.
+fn answered<T: Clone>(table: fn(&mut Answers) -> &mut HashMap<Asked, T>, s: &SelectStmt, dialect: Dialect, catalog: &Catalog, prove: impl FnOnce() -> T) -> T {
+    let running = ANSWERS.with(|answers| answers.borrow().is_some());
+    let asked = running.then(|| serde_json::to_vec(s).ok()).flatten().map(|statement| Asked {
+        statement,
+        dialect,
+        enclosing_ctes: catalog.enclosing_ctes.clone(),
+        enclosing_bodies: catalog.enclosing_bodies.clone(),
+        nested: catalog.nested,
+        row_fields: catalog.row_fields.is_some(),
+    });
+    let Some(asked) = asked else { return prove() };
+    if let Some(answer) = ANSWERS.with(|answers| answers.borrow_mut().as_mut().and_then(|answers| table(answers).get(&asked).cloned())) {
+        return answer;
+    }
+    let answer = prove();
+    ANSWERS.with(|answers| {
+        if let Some(answers) = answers.borrow_mut().as_mut() {
+            table(answers).insert(asked, answer.clone());
+        }
+    });
+    answer
+}
+
 /// Prove that one rewritten statement (placeholders already `$n` or `?n`) returns exactly one
 /// row, or say why the build cannot, worded to finish a sentence: "a WHERE with no FROM can
 /// remove the row". `trust` is the describer's ([`crate::describe::Describer::trust`]); `catalog`
 /// is read on Postgres only.
 pub fn exactly_one(sql: &str, dialect: Dialect, trust: &Trust, catalog: &Catalog) -> Result<(), String> {
-    let s = one_select(sql, dialect)?;
-    exactly_one_select(&s, dialect, trust, &with_fields(&s, catalog))
+    answering(|| {
+        let s = one_select(sql, dialect)?;
+        exactly_one_select(&s, dialect, trust, &with_fields(&s, catalog))
+    })
 }
 
 /// The catalog for a proof that starts from a statement's text, with the columns the statement's
@@ -510,8 +588,14 @@ fn with_fields(s: &SelectStmt, catalog: &Catalog) -> Catalog {
 }
 
 fn exactly_one_select(s: &SelectStmt, dialect: Dialect, trust: &Trust, catalog: &Catalog) -> Result<(), String> {
+    answered(|answers| &mut answers.exactly_one, s, dialect, catalog, || exactly_one_anew(s, dialect, trust, catalog))
+}
+
+fn exactly_one_anew(s: &SelectStmt, dialect: Dialect, trust: &Trust, catalog: &Catalog) -> Result<(), String> {
     #[cfg(test)]
     tests::EXACT_PROOFS.set(tests::EXACT_PROOFS.get() + 1);
+    #[cfg(test)]
+    tests::PROOFS.set(tests::PROOFS.get() + 1);
     if (s.limit_count.is_some() || s.limit_offset.is_some()) && limit_keeps_a_row(s) {
         return exactly_one_select(&unlimited(s), dialect, trust, catalog);
     }
@@ -586,10 +670,10 @@ fn never_empty(node: &protobuf::Node, s: &SelectStmt, dialect: Dialect, trust: &
             });
             match cte {
                 Some((cte, false)) => {
-                    let enclosed = catalog.enclosed(s.with_clause.as_ref());
+                    let inside = catalog.inside(s.with_clause.as_ref(), Some(cte.as_ref()));
                     let one = match cte.ctequery.as_deref().and_then(|q| q.node.as_ref()) {
-                        Some(NodeEnum::SelectStmt(inner)) => exactly_one_select(inner, dialect, trust, &enclosed),
-                        Some(body @ (NodeEnum::InsertStmt(_) | NodeEnum::UpdateStmt(_) | NodeEnum::DeleteStmt(_))) => match dml_node(body, trust, &enclosed) {
+                        Some(NodeEnum::SelectStmt(inner)) => exactly_one_select(inner, dialect, trust, &inside),
+                        Some(body @ (NodeEnum::InsertStmt(_) | NodeEnum::UpdateStmt(_) | NodeEnum::DeleteStmt(_))) => match dml_node(body, trust, &inside) {
                             Some(Ok(Cardinality::One)) => Ok(()),
                             Some(Ok(Cardinality::AtMostOne)) => Err("the write may change no row".to_string()),
                             Some(Err(why)) => Err(why),
@@ -606,7 +690,7 @@ fn never_empty(node: &protobuf::Node, s: &SelectStmt, dialect: Dialect, trust: &
             }
         }
         Some(NodeEnum::RangeSubselect(r)) => match r.subquery.as_deref().and_then(|n| n.node.as_ref()) {
-            Some(NodeEnum::SelectStmt(sub)) => exactly_one_select(sub, dialect, trust, &catalog.enclosed(s.with_clause.as_ref()))
+            Some(NodeEnum::SelectStmt(sub)) => exactly_one_select(sub, dialect, trust, &catalog.inside(s.with_clause.as_ref(), None))
                 .map_err(|why| format!("the subquery `{}` may return no row, or several: {why}", r.alias.as_ref().map_or("", |a| a.aliasname.as_str()))),
             _ => Err(ROWS.into()),
         },
@@ -742,11 +826,19 @@ pub fn at_most_one(sql: &str, dialect: Dialect, trust: &Trust, catalog: &Catalog
 }
 
 fn at_most_one_here(sql: &str, dialect: Dialect, trust: &Trust, catalog: &Catalog) -> Result<(), String> {
-    let s = one_select(sql, dialect)?;
-    at_most_one_select(&s, dialect, trust, &with_fields(&s, catalog))
+    answering(|| {
+        let s = one_select(sql, dialect)?;
+        at_most_one_select(&s, dialect, trust, &with_fields(&s, catalog))
+    })
 }
 
 fn at_most_one_select(s: &SelectStmt, dialect: Dialect, trust: &Trust, catalog: &Catalog) -> Result<(), String> {
+    answered(|answers| &mut answers.at_most_one, s, dialect, catalog, || at_most_one_anew(s, dialect, trust, catalog))
+}
+
+fn at_most_one_anew(s: &SelectStmt, dialect: Dialect, trust: &Trust, catalog: &Catalog) -> Result<(), String> {
+    #[cfg(test)]
+    tests::PROOFS.set(tests::PROOFS.get() + 1);
     // A negative LIMIT is an error on Postgres and no limit at all on SQLite.
     if const_limit(s).is_some_and(|n| (0..=1).contains(&n)) {
         return Ok(());
@@ -763,7 +855,7 @@ fn at_most_one_select(s: &SelectStmt, dialect: Dialect, trust: &Trust, catalog: 
     // An INTERSECT returns only rows both arms return, and an EXCEPT only rows of its left arm,
     // with ALL or without: at most one row when an arm it draws every row from is.
     if let (Some(left), Some(right)) = (s.larg.as_deref(), s.rarg.as_deref()) {
-        let inner = catalog.enclosed(s.with_clause.as_ref());
+        let inner = catalog.inside(s.with_clause.as_ref(), None);
         let arm = |a: &SelectStmt| at_most_one_select(a, dialect, trust, &inner).is_ok();
         if s.op == protobuf::SetOperation::SetopIntersect as i32 && (arm(left) || arm(right)) {
             return Ok(());
@@ -819,16 +911,16 @@ fn cte_passthrough(s: &SelectStmt, dialect: Dialect, trust: &Trust, catalog: &Ca
         }
     }
     let body = cte.ctequery.as_deref()?.node.as_ref()?;
-    let enclosed = catalog.enclosed(s.with_clause.as_ref());
+    let inside = catalog.inside(s.with_clause.as_ref(), Some(cte.as_ref()));
     let inner = match body {
-        NodeEnum::SelectStmt(inner) => match exactly_one_select(inner, dialect, trust, &enclosed) {
+        NodeEnum::SelectStmt(inner) => match exactly_one_select(inner, dialect, trust, &inside) {
             Ok(()) => Ok(Cardinality::One),
-            Err(why) => match at_most_one_select(inner, dialect, trust, &enclosed) {
+            Err(why) => match at_most_one_select(inner, dialect, trust, &inside) {
                 Ok(()) => Ok(Cardinality::AtMostOne),
                 Err(_) => Err(format!("the WITH query `{}` returns any number of rows: {why}", rv.relname)),
             },
         },
-        NodeEnum::InsertStmt(_) | NodeEnum::UpdateStmt(_) | NodeEnum::DeleteStmt(_) => match dml_node(body, trust, catalog) {
+        NodeEnum::InsertStmt(_) | NodeEnum::UpdateStmt(_) | NodeEnum::DeleteStmt(_) => match dml_node(body, trust, &inside) {
             Some(r) => r.map_err(|why| format!("the WITH query `{}` returns any number of rows: {why}", rv.relname)),
             None => return None,
         },
@@ -1141,6 +1233,9 @@ impl<'a> From<'a> {
                 _ => false,
             })
             .collect();
+        // The catalog each WITH query's and subquery's statement is read in, made once.
+        let scopes: Vec<OnceCell<Catalog>> = (0..n).map(|_| OnceCell::new()).collect();
+        let inside = |i: usize| scopes[i].get_or_init(|| self.inside(i, catalog));
         loop {
             let mut changed = false;
             for i in 0..n {
@@ -1154,8 +1249,8 @@ impl<'a> From<'a> {
                     Source::Relation(_) if per_row[i] => !constant && rest(),
                     Source::Relation(rv) => self.key_pinned(i, rv, &done, constant, catalog) || self.derived_pinned(i, &keys[i], &done, constant, catalog),
                     _ if constant && item.nullable => false,
-                    Source::With(cte, recursive) => !*recursive && (with_query_at_most_one(cte, dialect, trust, &catalog.enclosed(self.with)) || self.derived_pinned(i, &keys[i], &done, constant, catalog)),
-                    Source::Subquery(sub, lateral) => (!*lateral || rest()) && (at_most_one_select(sub, dialect, trust, &catalog.enclosed(self.with)).is_ok() || self.derived_pinned(i, &keys[i], &done, constant, catalog)),
+                    Source::With(cte, recursive) => !*recursive && (with_query_at_most_one(cte, dialect, trust, inside(i)) || self.derived_pinned(i, &keys[i], &done, constant, catalog)),
+                    Source::Subquery(sub, lateral) => (!*lateral || rest()) && (at_most_one_select(sub, dialect, trust, inside(i)).is_ok() || self.derived_pinned(i, &keys[i], &done, constant, catalog)),
                     Source::Function(f) => !constant && rest() && one_row_function(f, catalog).is_ok(),
                     Source::Enclosing(_) => self.derived_pinned(i, &keys[i], &done, constant, catalog),
                     Source::Opaque => false,
@@ -1221,15 +1316,22 @@ impl<'a> From<'a> {
             columns
         };
         match &item.source {
-            Source::Subquery(sub, _) => Some(f(sub, &catalog.scoped(self.with, None), &item.columns)),
+            Source::Subquery(sub, _) => Some(f(sub, &self.inside(i, catalog), &item.columns)),
             Source::With(cte, false) => {
                 let Some(NodeEnum::SelectStmt(body)) = cte.ctequery.as_deref().and_then(|q| q.node.as_ref()) else { return None };
-                let at = self.with.and_then(|w| w.ctes.iter().position(|c| matches!(c.node.as_ref(), Some(NodeEnum::CommonTableExpr(c)) if std::ptr::eq(c.as_ref(), *cte))));
                 let own: Vec<String> = cte.aliascolnames.iter().filter_map(field_name).map(String::from).collect();
-                Some(f(body, &catalog.scoped(self.with, Some(at.unwrap_or(0))), &overlay(&own)))
+                Some(f(body, &self.inside(i, catalog), &overlay(&own)))
             }
             Source::Enclosing(name) => enclosing_body(catalog, name, |body, scope, own| f(body, scope, &overlay(own))),
             _ => None,
+        }
+    }
+
+    /// The catalog the statement of subquery or WITH query `i` is read in ([`Catalog::inside`]).
+    fn inside(&self, i: usize, catalog: &Catalog) -> Catalog {
+        match &self.items[i].source {
+            Source::With(cte, _) => catalog.inside(self.with, Some(*cte)),
+            _ => catalog.inside(self.with, None),
         }
     }
 
@@ -2111,7 +2213,13 @@ type Key = Vec<Part>;
 ///
 /// None at all for a set operation, a VALUES list, or a set-returning call at this level, which
 /// repeats a row (`SELECT id, generate_series(1, 2) FROM posts`).
-fn output_keys<'a>(s: &'a SelectStmt, dialect: Dialect, trust: &Trust, catalog: &Catalog) -> Vec<Key> {
+fn output_keys(s: &SelectStmt, dialect: Dialect, trust: &Trust, catalog: &Catalog) -> Vec<Key> {
+    answered(|answers| &mut answers.keys, s, dialect, catalog, || output_keys_anew(s, dialect, trust, catalog))
+}
+
+fn output_keys_anew<'a>(s: &'a SelectStmt, dialect: Dialect, trust: &Trust, catalog: &Catalog) -> Vec<Key> {
+    #[cfg(test)]
+    tests::PROOFS.set(tests::PROOFS.get() + 1);
     if let (Some(left), Some(right)) = (s.larg.as_deref(), s.rarg.as_deref()) {
         return set_keys(s, left, right, dialect, trust, &catalog.scoped(s.with_clause.as_ref(), None));
     }
@@ -2310,7 +2418,7 @@ fn unconverted(left: &SelectStmt, right: &SelectStmt, at: usize, dialect: Dialec
 pub fn result_keys(sql: &str, trust: &Trust, catalog: &Catalog, columns: &[(String, bool)], identifies: &[bool]) -> Vec<Vec<String>> {
     crate::stack::run(|| {
         let Ok(s) = one_select(sql, Dialect::Postgres) else { return Vec::new() };
-        let keys = select_keys(&s, trust, &with_fields(&s, catalog), columns);
+        let keys = answering(|| select_keys(&s, trust, &with_fields(&s, catalog), columns));
         // A column whose name another output column also has is not one a row can be read by.
         let named = |i: usize| columns.get(i).filter(|(name, _)| identifies.get(i) == Some(&true) && columns.iter().filter(|(other, _)| other == name).count() == 1).map(|(name, _)| name.clone());
         let readable: Vec<Vec<usize>> = keys
@@ -2567,7 +2675,7 @@ fn clause_column(s: &SelectStmt, from: &From, e: &protobuf::Node, clause: KeyCla
 pub fn total_order(sql: &str, trust: &Trust, catalog: &Catalog, columns: &[(String, bool)], plain: &[bool]) -> bool {
     crate::stack::run(|| {
         let Ok(s) = one_select(sql, Dialect::Postgres) else { return false };
-        ordered_select(&s, trust, &with_fields(&s, catalog), columns, plain)
+        answering(|| ordered_select(&s, trust, &with_fields(&s, catalog), columns, plain))
     })
 }
 
@@ -3246,7 +3354,7 @@ fn dml_here(sql: &str, trust: &Trust, catalog: &Catalog) -> Option<Result<Cardin
         return None;
     }
     let node = stmts.pop().and_then(|s| s.stmt).and_then(|n| n.node)?;
-    dml_node(&node, trust, catalog)
+    answering(|| dml_node(&node, trust, catalog))
 }
 
 /// How many rows an INSERT's SELECT returns, read with the INSERT's WITH queries in its scope:
@@ -3840,6 +3948,49 @@ fn walk(v: &Value, calls: &mut Calls) {
 mod tests {
     std::thread_local! {
         pub(super) static EXACT_PROOFS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+        /// How many statements the proofs [`answered`] keeps were proved anew.
+        pub(super) static PROOFS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    #[test]
+    fn a_statement_nested_in_another_is_proved_once_at_each_level() {
+        // Each level reads the one below it as a FROM item, and asks about it from several places:
+        // its rows and then its keys, the FROM again for DISTINCT or GROUP BY, a WITH query by its
+        // name and again as an item. Proved anew at each asking, the work doubled with each level.
+        // Each shape with the row count it has over a pinned row, at every depth; over every row
+        // of `todos`, each is many.
+        let shapes: [(fn(&str) -> String, &str); 8] = [
+            (|q| format!("SELECT id FROM (WITH c AS ({q}) SELECT id FROM c) s"), "at_most_one"),
+            (|q| format!("SELECT t.id FROM todos t LEFT JOIN ({q}) s ON s.id = t.id"), "many"),
+            (|q| format!("SELECT t.id FROM todos t JOIN ({q}) s ON s.id = t.id"), "at_most_one"),
+            (|q| format!("SELECT DISTINCT id FROM ({q}) s"), "at_most_one"),
+            (|q| format!("SELECT id FROM ({q}) s GROUP BY id"), "at_most_one"),
+            (|q| format!("SELECT s.id FROM todos t, LATERAL ({q}) s"), "many"),
+            (|q| format!("SELECT id FROM ({q} INTERSECT SELECT id FROM todos) s"), "at_most_one"),
+            (|q| format!("SELECT id FROM ({q} LIMIT 2) s"), "at_most_one"),
+        ];
+        crate::stack::run(|| {
+            let (catalog, trust, columns) = (stock(), Trust::default(), [("id".to_string(), false)]);
+            for (shape, pinned) in shapes {
+                for (base, rows) in [("SELECT id FROM todos", "many"), ("SELECT id FROM todos WHERE id = $1", pinned)] {
+                    let proofs = |depth: usize| {
+                        let sql = (0..depth).fold(base.to_string(), |q, _| shape(&q));
+                        PROOFS.set(0);
+                        let found = match (exactly_one(&sql, Dialect::Postgres, &trust, &catalog), at_most_one(&sql, Dialect::Postgres, &trust, &catalog)) {
+                            (Ok(()), _) => "one",
+                            (_, Ok(())) => "at_most_one",
+                            _ => "many",
+                        };
+                        result_keys(&sql, &trust, &catalog, &columns, &[true]);
+                        total_order(&format!("{sql} ORDER BY id"), &trust, &catalog, &columns, &[true]);
+                        assert_eq!(found, rows, "{sql}");
+                        (PROOFS.get(), sql)
+                    };
+                    let ((shallow, _), (deep, sql)) = (proofs(20), proofs(40));
+                    assert!(deep <= 2 * shallow, "{deep} proofs at 40 levels, {shallow} at 20: {sql}");
+                }
+            }
+        });
     }
 
     #[test]
@@ -4606,6 +4757,15 @@ mod tests {
 
     fn pg_most(sql: &str) -> Result<(), String> {
         at_most_one(sql, Dialect::Postgres, &Trust::default(), &stock())
+    }
+
+    #[test]
+    fn every_proof_reads_a_nested_statement_with_its_parents_with_queries() {
+        // The inner `a` holds each todo once per user, and the enclosing `a`'s key is no key of it.
+        let shadowed = "WITH a AS (SELECT id FROM todos) SELECT * FROM (WITH a (id) AS (SELECT t.id FROM todos t CROSS JOIN users u) SELECT x.id FROM todos x JOIN (SELECT id FROM a WHERE id = $2) s ON s.id = x.id) w WHERE w.id = $1";
+        assert!(pg_most(shadowed).is_err());
+        // The row count of a subquery reads the enclosing WITH query its keys do.
+        assert_eq!(pg_most("WITH a AS (SELECT id FROM todos) SELECT * FROM (SELECT id FROM a WHERE id = $1) s"), Ok(()));
     }
 
     #[test]
