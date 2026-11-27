@@ -144,17 +144,15 @@ pub const CHECKS_QUERY: &str = concat!(
     " OPERATOR(pg_catalog.=) ANY (ARRAY['pg_catalog.int2'::pg_catalog.regtype::pg_catalog.oid, 'pg_catalog.int4'::pg_catalog.regtype::pg_catalog.oid, 'pg_catalog.int8'::pg_catalog.regtype::pg_catalog.oid, 'pg_catalog.float4'::pg_catalog.regtype::pg_catalog.oid, 'pg_catalog.float8'::pg_catalog.regtype::pg_catalog.oid, 'pg_catalog.numeric'::pg_catalog.regtype::pg_catalog.oid, 'pg_catalog.uuid'::pg_catalog.regtype::pg_catalog.oid]) \
         OR t.typcategory OPERATOR(pg_catalog.=) 'A'::pg_catalog.\"char\")"
 );
-/// Whether each column of the named relations refuses null, for a parameter written to it
-/// ([`Engine::nullable_params`]): `(relation, attnum, column, whether its NOT NULL or a domain of
-/// its type's declared NOT NULL refuses it, or the relation is a view, whose columns say nothing
-/// of what the table or the rule or trigger behind it takes, the enforced CHECKs of the table that
-/// read the column, the CHECKs of every domain of its type, and a generated column's expression,
-/// where every partition and child of the relation computes it the same and declares it NOT NULL,
-/// since a row computes it as the table it lands in does)`, each CHECK and expression as the server prints it. A CHECK
-/// refuses null where it is false wherever the column is NULL ([`refuses_null`]); a NOT VALID one
-/// still checks every row written. A NO INHERIT one on a table with children checks none of the
-/// rows a write reaches in them, and none checks a foreign table's, nor its NOT NULL, so neither
-/// is read, nor a generated column over one. A CHECK
+/// Whether each column of the named relations refuses null in a row the relation itself holds, for
+/// a parameter written to it ([`Engine::nullable_params`]): `(relation, attnum, column, whether its
+/// NOT NULL or a domain of its type's declared NOT NULL refuses it, or the relation is a view, whose
+/// columns say nothing of what the table or the rule or trigger behind it takes, the enforced CHECKs
+/// of the table that read the column, the CHECKs of every domain of its type, a generated column's
+/// expression, the relation's partitions and children at every depth, and whether it is
+/// partitioned)`, each CHECK and expression as the server prints it. A CHECK refuses null where it
+/// is false wherever the column is NULL ([`refuses_null`]); a NOT VALID one still checks every row
+/// written. A foreign table's CHECKs and generated columns check nothing, and are left out. A CHECK
 /// `NOT ENFORCED` (PostgreSQL 18), which checks nothing, is the one the server prints with those
 /// words last. `$1` is `text[]` of relation names as the statement writes them, schema-qualified or
 /// resolved through the search path, `$2` how many; the relation is named as `$1` names it.
@@ -179,21 +177,16 @@ pub const REFUSES_NULL_QUERY: &str = concat!(
         WHERE d.attrelid OPERATOR(pg_catalog.=) a.attrelid AND d.attnum OPERATOR(pg_catalog.=) a.attnum AND t.typnotnull), \
       ARRAY(SELECT pg_catalog.pg_get_expr(k.conbin, k.conrelid, true) FROM pg_catalog.pg_constraint k \
         WHERE k.contype OPERATOR(pg_catalog.=) 'c'::pg_catalog.\"char\" AND k.conrelid OPERATOR(pg_catalog.=) c.oid AND a.attnum OPERATOR(pg_catalog.=) ANY (k.conkey) \
-          AND (NOT k.connoinherit OR NOT EXISTS (SELECT 1 FROM pg_catalog.pg_inherits h WHERE h.inhparent OPERATOR(pg_catalog.=) c.oid)) \
           AND c.relkind OPERATOR(pg_catalog.<>) 'f'::pg_catalog.\"char\" \
-          AND NOT EXISTS (SELECT 1 FROM kin n JOIN pg_catalog.pg_class f ON f.oid OPERATOR(pg_catalog.=) n.oid WHERE n.root OPERATOR(pg_catalog.=) c.oid AND f.relkind OPERATOR(pg_catalog.=) 'f'::pg_catalog.\"char\") \
           AND NOT (pg_catalog.pg_get_constraintdef(k.oid) OPERATOR(pg_catalog.~~) '% NOT ENFORCED'::pg_catalog.text)), \
       ARRAY(SELECT pg_catalog.pg_get_expr(k.conbin, '0'::pg_catalog.oid, true) FROM domains d \
         JOIN pg_catalog.pg_constraint k ON k.contypid OPERATOR(pg_catalog.=) d.oid AND k.contype OPERATOR(pg_catalog.=) 'c'::pg_catalog.\"char\" \
         WHERE d.attrelid OPERATOR(pg_catalog.=) a.attrelid AND d.attnum OPERATOR(pg_catalog.=) a.attnum), \
       (SELECT pg_catalog.pg_get_expr(g.adbin, g.adrelid, true) FROM pg_catalog.pg_attrdef g \
-        WHERE a.attgenerated OPERATOR(pg_catalog.<>) ''::pg_catalog.\"char\" AND g.adrelid OPERATOR(pg_catalog.=) a.attrelid AND g.adnum OPERATOR(pg_catalog.=) a.attnum \
-          AND c.relkind OPERATOR(pg_catalog.<>) 'f'::pg_catalog.\"char\" \
-          AND NOT EXISTS (SELECT 1 FROM kin n JOIN pg_catalog.pg_class f ON f.oid OPERATOR(pg_catalog.=) n.oid WHERE n.root OPERATOR(pg_catalog.=) c.oid AND f.relkind OPERATOR(pg_catalog.=) 'f'::pg_catalog.\"char\") \
-          AND NOT EXISTS (SELECT 1 FROM kin n JOIN pg_catalog.pg_attribute ka ON ka.attrelid OPERATOR(pg_catalog.=) n.oid AND ka.attname OPERATOR(pg_catalog.=) a.attname \
-            LEFT JOIN pg_catalog.pg_attrdef kd ON kd.adrelid OPERATOR(pg_catalog.=) ka.attrelid AND kd.adnum OPERATOR(pg_catalog.=) ka.attnum \
-            WHERE n.root OPERATOR(pg_catalog.=) c.oid AND (kd.adbin IS NULL OR NOT ka.attnotnull \
-              OR NOT (pg_catalog.pg_get_expr(kd.adbin, kd.adrelid, true) OPERATOR(pg_catalog.=) pg_catalog.pg_get_expr(g.adbin, g.adrelid, true))))) \
+        WHERE a.attgenerated OPERATOR(pg_catalog.<>) ''::pg_catalog.\"char\" AND c.relkind OPERATOR(pg_catalog.<>) 'f'::pg_catalog.\"char\" \
+          AND g.adrelid OPERATOR(pg_catalog.=) a.attrelid AND g.adnum OPERATOR(pg_catalog.=) a.attnum), \
+      ARRAY(SELECT n.oid::pg_catalog.regclass::pg_catalog.text FROM kin n WHERE n.root OPERATOR(pg_catalog.=) c.oid ORDER BY 1), \
+      c.relkind OPERATOR(pg_catalog.=) 'p'::pg_catalog.\"char\" \
     FROM rels r JOIN pg_catalog.pg_class c ON c.oid OPERATOR(pg_catalog.=) r.oid \
       JOIN pg_catalog.pg_attribute a ON a.attrelid OPERATOR(pg_catalog.=) c.oid AND a.attnum OPERATOR(pg_catalog.>) 0 AND NOT a.attisdropped"
 );
@@ -1420,32 +1413,34 @@ impl<'a> Engine<'a> {
         let trust = trust(self.host);
         let (refusing, (), trust) = (refusing?, prefetched?, trust?);
         let rows = refusing.unwrap_or_default();
-        // Per relation, by attribute: whether the column refuses null itself, by its NOT NULL, a
-        // CHECK or its domain.
-        let mut refuses: HashMap<(String, i32), bool> = HashMap::new();
-        // Per relation, every column, and each generated one with whether it refuses null itself
-        // and its expression.
-        let mut columns_of: HashMap<&str, Vec<String>> = HashMap::new();
-        let mut generated: HashMap<&str, Vec<(String, bool, Probe)>> = HashMap::new();
+        // A write lands in the rows of the tables it reaches, and meets each one's own constraints:
+        // an INSERT, the table it names, or the partition it is routed to; an UPDATE or a MERGE
+        // without ONLY, the table and each of its children too. A column refuses null where any
+        // of them refuses it there.
+        let mut below: Vec<String> = Vec::new();
         for row in &rows {
-            let (Some(relation), Some(attnum), Some(column), Some(not_null)) = (row.first().and_then(as_str), row.get(1).and_then(as_u32), row.get(2).and_then(as_str), row.get(3).and_then(as_bool)) else { continue };
-            let checked = row.get(4).and_then(as_strings).unwrap_or_default().iter().any(|check| refuses_null(check, column, &trust));
-            let domain = row.get(5).and_then(as_strings).unwrap_or_default().iter().any(|check| refuses_null(check, "value", &trust));
-            let refused = not_null || checked || domain;
-            refuses.insert((relation.to_string(), attnum as i32), refused);
-            columns_of.entry(relation).or_default().push(column.to_string());
-            if let Some(expression) = row.get(6).and_then(as_str) {
-                generated.entry(relation).or_default().push((column.to_string(), refused, probe_text(expression, &trust).unwrap_or(Probe::Unknown)));
+            let Some(relation) = row.first().and_then(as_str) else { continue };
+            let partitioned = row.get(8).and_then(as_bool).unwrap_or(false);
+            if partitioned || parsed.reaching.iter().any(|r| r == relation) {
+                below.extend(row.get(7).and_then(as_strings).unwrap_or_default());
             }
         }
-        // A column a NULL in which a generated column that refuses null refuses: one its
-        // expression is NULL wherever it is ([`refusal::refused_by_generated`]).
-        let by_generated: HashMap<&str, HashSet<String>> = generated.iter().map(|(relation, g)| (*relation, refusal::refused_by_generated(&columns_of[relation], g))).collect();
+        below.sort();
+        below.dedup();
+        let below_rows = if below.is_empty() { Some(Ok(Vec::new())) } else { by_relation(self.host, REFUSES_NULL_QUERY, &below) };
+        let below_rows = below_rows?.unwrap_or_default();
+        let own = own_refusals(&rows, &trust);
+        let theirs = own_refusals(&below_rows, &trust);
+        // Each partitioned table among them, which holds no rows of its own.
+        let partitioned: HashSet<&str> = rows.iter().chain(&below_rows).filter(|row| row.get(8).and_then(as_bool).unwrap_or(false)).filter_map(|row| row.first().and_then(as_str)).collect();
+        // Per relation, by attribute: whether the column refuses null.
+        let mut refuses: HashMap<(String, i32), bool> = HashMap::new();
         for row in &rows {
             let (Some(relation), Some(attnum), Some(column)) = (row.first().and_then(as_str), row.get(1).and_then(as_u32), row.get(2).and_then(as_str)) else { continue };
-            if by_generated.get(relation).is_some_and(|refused| refused.contains(column)) {
-                refuses.insert((relation.to_string(), attnum as i32), true);
-            }
+            let reached: Vec<String> = if partitioned.contains(relation) || parsed.reaching.iter().any(|r| r == relation) { row.get(7).and_then(as_strings).unwrap_or_default() } else { Vec::new() };
+            let itself = !partitioned.contains(relation) || reached.is_empty();
+            let refused = (itself && own.get(&(relation, column)).copied().unwrap_or(false)) || reached.iter().filter(|t| !partitioned.contains(t.as_str())).any(|t| theirs.get(&(t.as_str(), column)).copied().unwrap_or(false));
+            refuses.insert((relation.to_string(), attnum as i32), refused);
         }
         let columns = self.columns_by_name.borrow();
         // The column `column` of `relation` names, and whether it refuses null; a column the
@@ -3564,6 +3559,29 @@ pub fn with_values(ty: Type, values: Option<&[String]>, string: bool) -> Type {
     }
 }
 
+/// Per relation and column, from [`REFUSES_NULL_QUERY`]'s rows, whether the relation refuses null
+/// there in a row it holds itself: by the column's NOT NULL, its domain's or a CHECK, or by a
+/// generated column that refuses null, by those, and is NULL wherever the column is
+/// ([`refusal::refused_by_generated`]).
+fn own_refusals<'r>(rows: &'r [Vec<Value>], trust: &Trust) -> HashMap<(&'r str, &'r str), bool> {
+    let mut own: Vec<(&str, &str, bool)> = Vec::new();
+    let mut columns: HashMap<&str, Vec<String>> = HashMap::new();
+    let mut generated: HashMap<&str, Vec<(String, bool, Probe)>> = HashMap::new();
+    for row in rows {
+        let (Some(relation), Some(column), Some(not_null)) = (row.first().and_then(as_str), row.get(2).and_then(as_str), row.get(3).and_then(as_bool)) else { continue };
+        let checked = row.get(4).and_then(as_strings).unwrap_or_default().iter().any(|check| refuses_null(check, column, trust));
+        let domain = row.get(5).and_then(as_strings).unwrap_or_default().iter().any(|check| refuses_null(check, "value", trust));
+        let refused = not_null || checked || domain;
+        own.push((relation, column, refused));
+        columns.entry(relation).or_default().push(column.to_string());
+        if let Some(expression) = row.get(6).and_then(as_str) {
+            generated.entry(relation).or_default().push((column.to_string(), refused, probe_text(expression, trust).unwrap_or(Probe::Unknown)));
+        }
+    }
+    let by_generated: HashMap<&str, HashSet<String>> = generated.iter().map(|(relation, g)| (*relation, refusal::refused_by_generated(&columns[relation], g))).collect();
+    own.into_iter().map(|(relation, column, refused)| ((relation, column), refused || by_generated.get(relation).is_some_and(|r| r.contains(column)))).collect()
+}
+
 /// A CHECK or a generated column's expression, as the server prints it, as
 /// [`refusal::with_null`] reads it ([`probe`]); `None` for text the parser does not read.
 fn probe_text(text: &str, trust: &Trust) -> Option<Probe> {
@@ -3602,11 +3620,12 @@ fn boolean(n: &syntax::postgres::protobuf::Node) -> bool {
 }
 
 /// An expression as [`refusal::with_null`] reads it, as Postgres evaluates it: a column by its
-/// name; NULL, a boolean, an integer, an integer cast to a number type and a string cast to a
-/// string type (a string alone may be read as a row, all of whose fields are NULL); the null and
-/// boolean tests, `IS [NOT] DISTINCT FROM`, AND, OR and NOT; a CASE without an operand; COALESCE
-/// and NULLIF; a comparison; and the operators and functions NULL for a NULL operand
-/// ([`infer::POSTGRES_STRICT_OPERATORS`], [`infer::POSTGRES_STRICT`]). An operator or a function
+/// name; NULL, a boolean, an integer, an integer cast to a number type (with a modifier, which
+/// may round it, a value alone) and a string cast to a string type (a string alone may be read as
+/// a row, all of whose fields are NULL); the null and boolean tests, `IS [NOT] DISTINCT FROM`,
+/// AND, OR and NOT; a CASE without an operand; COALESCE and NULLIF; a comparison; and the
+/// operators and functions NULL for a NULL operand ([`infer::POSTGRES_STRICT_OPERATORS`],
+/// [`infer::POSTGRES_STRICT`]). An operator or a function
 /// counts only where it is the built-in whatever its operands' types ([`Trust::checked`]), and so
 /// does the `=` that `IS DISTINCT FROM` and NULLIF compare two values with. A float holds an
 /// integer exactly only so far (2^24 for `real`, 2^53 for `double precision`), past which one is
@@ -3639,8 +3658,11 @@ fn probe(node: &syntax::postgres::protobuf::Node, trust: &Trust) -> Probe {
         },
         Some(NodeEnum::TypeCast(cast)) => {
             let target = cast.type_name.as_ref().filter(|t| t.array_bounds.is_empty()).and_then(|t| infer::builtin_name(&t.names));
+            // A type modifier rounds (`1::numeric(2,-1)` is 0), or caps a string's length.
+            let modified = cast.type_name.as_ref().is_some_and(|t| !t.typmods.is_empty());
             match (cast.arg.as_deref().and_then(|a| a.node.as_ref()), target.as_deref()) {
                 (Some(NodeEnum::AConst(c)), _) if c.isnull => Probe::Null,
+                (Some(NodeEnum::AConst(_)), Some("int2" | "int4" | "int8" | "numeric" | "float4" | "float8" | "text" | "varchar" | "bpchar" | "name")) if modified => Probe::Value,
                 (Some(NodeEnum::AConst(c)), Some(target @ ("int2" | "int4" | "int8" | "numeric" | "float4" | "float8"))) => match &c.val {
                     Some(Val::Ival(i)) => number(i.ival.into(), target),
                     Some(Val::Fval(f)) => integer(&f.fval).map_or(Probe::Value, |n| number(n, target)),
@@ -5507,6 +5529,8 @@ mod tests {
         // A float holds an integer exactly only so far: 16777217::real is 16777216.
         assert!(!refuses_null("COALESCE(a, 16777217::real) <= 16777216::double precision", "a", &trust));
         assert!(refuses_null("COALESCE(a, 16777215::real) <= 16777214::double precision", "a", &trust));
+        // A type modifier rounds: 1::numeric(2,-1) is 0.
+        assert!(!refuses_null("COALESCE(a, 1::numeric(2,-1)) = 0::numeric", "a", &trust));
         // A user's cast to boolean, which the server prints no cast for, may answer true for NULL.
         let cast = Trust { cast_targets: Some(HashSet::new()), ..Trust::default() };
         assert!(!refuses_null("a IS TRUE", "a", &cast));

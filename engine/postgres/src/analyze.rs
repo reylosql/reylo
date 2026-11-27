@@ -48,6 +48,9 @@ pub struct Analysis {
     pub read_set: Vec<String>,
     /// Tables written (DML contexts).
     pub write_set: Vec<String>,
+    /// The tables an UPDATE or a MERGE writes without ONLY, whose write reaches the rows of
+    /// their children too, as `write_set` names them.
+    pub reaching: Vec<String>,
     /// Function names called anywhere in the statement.
     pub functions: Vec<String>,
     /// Operator names written anywhere in the statement (`=`, `~~` for LIKE, an `ANY`'s and an
@@ -448,6 +451,20 @@ fn analyze_here(sql: &str) -> Result<Analysis, AnalyzeError> {
     }
 
     let (read_set, write_set) = relations(&parsed.protobuf);
+    let mut reaching: Vec<String> = parsed
+        .protobuf
+        .nodes()
+        .iter()
+        .filter_map(|(node, ..)| match node {
+            syntax::postgres::NodeRef::UpdateStmt(u) => u.relation.as_ref(),
+            syntax::postgres::NodeRef::MergeStmt(m) => m.relation.as_ref(),
+            _ => None,
+        })
+        .filter(|v| v.inh)
+        .map(|v| relation_name(&v.schemaname, &v.relname))
+        .collect();
+    reaching.sort_unstable();
+    reaching.dedup();
 
     Ok(Analysis {
         kind,
@@ -455,6 +472,7 @@ fn analyze_here(sql: &str) -> Result<Analysis, AnalyzeError> {
         has_locking,
         read_set,
         write_set,
+        reaching,
         functions,
         operators,
         types,
