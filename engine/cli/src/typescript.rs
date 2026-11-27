@@ -171,14 +171,14 @@ fn holds_whole_arrays(t: &Value) -> bool {
     named(t) && named(&t["element"]["type"]) && label(&t["element"]["type"]) != label(t)
 }
 
-/// The type with each Postgres array marked to nest; a parameter's array of whole arrays keeps one
-/// level outside them, which it writes each element of whole (src/engine-type.ts, `markNesting`).
+/// The type with each Postgres array marked to nest; a parameter's array of whole arrays, or of
+/// JSON, keeps one level outside them, which it writes each element of whole (src/engine-type.ts, `markNesting`).
 fn mark_nesting(t: &Value, parameter: bool) -> Value {
     let mut out = t.clone();
     match kind(t) {
         "array" => {
             out["element"]["type"] = mark_nesting(&t["element"]["type"], parameter);
-            if postgres_array(t) && !(parameter && holds_whole_arrays(t)) {
+            if postgres_array(t) && !(parameter && (holds_whole_arrays(t) || kind(&t["element"]["type"]) == "json")) {
                 out[NESTS] = Value::Bool(true);
             }
         }
@@ -1630,6 +1630,9 @@ mod tests {
         let mut b = analysis(json!([]), json!([{ "name": "x", "type": ints }]), "none");
         b["domains"] = json!({ "public.ints": "_int4" });
         assert_eq!(printed(&b, "postgres", &Value::Null, true).text(), "type Params = { x: NestedArray<number>[] };\ntype Returns = void;\n");
+        // A JSON element may be an array itself, which a parameter writes whole.
+        let docs = analysis(json!([]), json!([{ "name": "docs", "type": { "kind": "array", "label": "_jsonb", "element": { "type": { "kind": "json", "label": "jsonb" } } } }]), "none");
+        assert_eq!(printed(&docs, "postgres", &Value::Null, true).text(), printed(&docs, "postgres", &Value::Null, false).text());
     }
 
     #[test]

@@ -111,15 +111,15 @@ export function holdsWholeArrays(t: Type): boolean {
 }
 
 /**
- * The type with each Postgres array marked to nest. A parameter's array of whole arrays keeps one
- * level outside them: its value alone can't tell that level's dimensions from its elements', and a
- * parameter writes each element whole (src/execute.ts).
+ * The type with each Postgres array marked to nest. A parameter's array of whole arrays, or of
+ * JSON, keeps one level outside them: its value alone can't tell that level's dimensions from its
+ * elements', and a parameter writes each element whole (src/execute.ts).
  */
 function markNesting(t: Type, parameter = false): Type {
   switch (t.kind) {
     case "array": {
       const marked = { ...t, element: { ...t.element, type: markNesting(t.element.type, parameter) } };
-      return postgresArray(t) && !(parameter && holdsWholeArrays(t)) ? Object.assign(marked, { [NESTS]: true }) : marked;
+      return postgresArray(t) && !(parameter && (holdsWholeArrays(t) || t.element.type.kind === "json")) ? Object.assign(marked, { [NESTS]: true }) : marked;
     }
     case "struct": return { ...t, fields: t.fields.map((f) => ({ ...f, type: markNesting(f.type, parameter) })) };
     // A document a statement builds holds its arrays as the statement's columns do.

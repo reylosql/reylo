@@ -237,7 +237,7 @@ export function rowFields(kind: Kind): Columns {
 }
 
 /** What separates the elements of an array of `element` in Postgres's text: its type's `typdelim`, `;` for a box and `:` for PostGIS's types. */
-function delimiterOf(element: EngineType): string | undefined {
+export function delimiterOf(element: EngineType): string | undefined {
   if (geometric(element) === "box") return ";";
   return element.kind === "geometry" && (bareName(element) === "geometry" || bareName(element) === "geography") ? ":" : undefined;
 }

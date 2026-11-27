@@ -425,8 +425,15 @@ function plainSchema(t: EngineType, dialect: Dialect, input: boolean, inJson: bo
       // array's type says whether an element may be null, a parameter's too.
       const each = typeSchema(t.element.type, dialect, input, inJson, inRow, undefined, codecs);
       const items = (input && dialect !== "clickhouse" ? inRow : t.element.nullable) ? nullable(each) : each;
-      // An array the project lets nest holds its elements, or arrays of them at any depth.
-      return { type: "array", items: nestsAnyDeep(t) ? { anyOf: [items, { type: "array" }] } : items };
+      // An array the project lets nest holds its elements, or arrays of them at any depth. A
+      // parameter's names its element at each level, to the six dimensions Postgres holds at most
+      // (MAXDIM); a result's leaves the levels below the first open, which keeps a module's schema
+      // from repeating a row's schema at each.
+      if (!nestsAnyDeep(t)) return { type: "array", items };
+      if (!input) return { type: "array", items: { anyOf: [items, { type: "array" }] } };
+      let deep = items;
+      for (let level = 1; level < 6; level++) deep = { anyOf: [items, { type: "array", items: deep }] };
+      return { type: "array", items: deep };
     }
     case "struct": {
       // A built-in geometric type is its text inside a document.

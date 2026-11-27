@@ -102,7 +102,12 @@ test("a Postgres array parameter is typed with one dimension by default, and at 
   const nested = moduleTypes("", withParams, "postgres", undefined, true, ".reylo.yaml", {}, true);
   assert.match(nested.params, /cells: NestedArray<number>; segments: NestedArray<\{ x: number; y: number \}\[\]>/);
   assert.equal(reyloImport(`${nested.params} ${nested.row}`), `import type { NestedArray, Query } from "reylo";`);
-  // The input's JSON Schema lets them nest too.
+  // The input's JSON Schema lets them nest too, naming the element at each level, to Postgres's six dimensions.
   const items = (a: Analysis) => (querySchemas(a, "postgres").input as { properties: { cells: { items: unknown } } }).properties.cells.items;
-  assert.deepEqual(items(analysisWithNestedArrays(withParams)), { anyOf: [items(withParams), { type: "array" }] });
+  let deep = items(withParams);
+  for (let level = 1; level < 6; level++) deep = { anyOf: [items(withParams), { type: "array", items: deep }] };
+  assert.deepEqual(items(analysisWithNestedArrays(withParams)), deep);
+  // A JSON element may be an array itself, which a parameter writes whole, so a jsonb[] stays one level.
+  const docs = { ...analysis, params: [{ name: "docs", nullable: false, type: { kind: "array", label: "_jsonb", element: { type: { kind: "json", label: "jsonb" } } } }] } as unknown as Analysis;
+  assert.match(moduleTypes("", docs, "postgres", undefined, true, ".reylo.yaml", {}, true).params, /docs: JsonInput\[\]/);
 });
