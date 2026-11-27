@@ -76,7 +76,7 @@ In TypeScript, `.run()` returns the same value for a type on every driver. The e
 | `BOOLEAN` (a `TINYINT(1)`), `BIT(1)` | `boolean` | `true` |
 | A comparison, `IS NULL`, `IN`, `BETWEEN`, `LIKE`, `EXISTS`, `NOT`, `AND`, `OR` | `boolean` | `false` |
 | `DECIMAL`, `SUM(…)`, `AVG(…)`, `/` | `string` | `"12.50"` |
-| `FLOAT`, `DOUBLE` | `number` | `1.1` |
+| `FLOAT`, `DOUBLE` | `number`, but not `NaN` or an infinity | `1.1` |
 | `CHAR`, `VARCHAR`, `TEXT` | `string` | `"Ada"` |
 | `ENUM` | the union of its labels | `"member"` |
 | `SET` | a `Set` of its labels, its members in the order the column declares them | `new Set(["a", "c"])` |
@@ -447,7 +447,7 @@ A parameter accepts the same values `.run()` returns for its type. You can pass 
 | An `ENUM` column | the union of its labels |
 | A `SET` column | a `Set` of its labels |
 | `DATE`, `DATETIME`, `TIMESTAMP`, `TIME` | `string` |
-| `JSON` | any value `JSON.stringify` writes, such as a `Date` inside an object |
+| `JSON` | any value `JSON.stringify` writes, such as a `Date` inside an object, but no `NaN` or infinity |
 | `BINARY`, `VARBINARY`, `BLOB` | `Uint8Array` |
 | `VECTOR` | `number[]` |
 

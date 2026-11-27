@@ -780,6 +780,17 @@ const { kind } = await jsonKind.run(db, { doc: null });
 select jsonb_typeof(:doc::jsonb) as kind
 ```
 
+**JSON numbers**
+
+JSON has no number for `NaN` or an infinity. A JSON parameter writes each as the text Postgres writes for it inside a document:
+
+<Pairs>
+
+- `{ n: NaN }` → `{"n": "NaN"}`
+- `{ n: -Infinity }` → `{"n": "-Infinity"}`
+
+</Pairs>
+
 </Rules>
 
 A `bytea` parameter takes only a `Uint8Array`. It rejects base64 or hex text, which each driver would store differently. Decode the text into a `Uint8Array` first.
