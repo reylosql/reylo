@@ -823,10 +823,10 @@ fn prove(q: &Query, raw: Option<&MysqlDescribe>, views: &HashSet<String>, host: 
     // JSON shapes: the constructors' value expressions, prepared as columns of their own statements.
     // Whose an aggregate in a scalar subquery is can turn on the columns of the subquery's
     // tables, which the plan asks for by naming them; the probes are the same either way.
-    let mut plan = crate::mysql_shape::plan(q, &Default::default());
+    let mut plan = crate::mysql_shape::plan(q, &Default::default(), views);
     if !plan.wanted.is_empty() {
         match table_columns(host, &plan.wanted) {
-            Some(columns) => plan = crate::mysql_shape::plan(q, &columns),
+            Some(columns) => plan = crate::mysql_shape::plan(q, &columns, views),
             None => pending = true,
         }
     }
