@@ -149,11 +149,12 @@ pub const CHECKS_QUERY: &str = concat!(
 /// its type's declared NOT NULL refuses it, or the relation is a view, whose columns say nothing
 /// of what the table or the rule or trigger behind it takes, the enforced CHECKs of the table that
 /// read the column, the CHECKs of every domain of its type, and a generated column's expression,
-/// where every partition and child of the relation computes it the same, since a row computes it
-/// as the table it lands in does)`, each CHECK and expression as the server prints it. A CHECK
+/// where every partition and child of the relation computes it the same and declares it NOT NULL,
+/// since a row computes it as the table it lands in does)`, each CHECK and expression as the server prints it. A CHECK
 /// refuses null where it is false wherever the column is NULL ([`refuses_null`]); a NOT VALID one
 /// still checks every row written. A NO INHERIT one on a table with children checks none of the
-/// rows a write reaches in them, and none checks a foreign table's, so neither is read. A CHECK
+/// rows a write reaches in them, and none checks a foreign table's, nor its NOT NULL, so neither
+/// is read, nor a generated column over one. A CHECK
 /// `NOT ENFORCED` (PostgreSQL 18), which checks nothing, is the one the server prints with those
 /// words last. `$1` is `text[]` of relation names as the statement writes them, schema-qualified or
 /// resolved through the search path, `$2` how many; the relation is named as `$1` names it.
@@ -187,9 +188,11 @@ pub const REFUSES_NULL_QUERY: &str = concat!(
         WHERE d.attrelid OPERATOR(pg_catalog.=) a.attrelid AND d.attnum OPERATOR(pg_catalog.=) a.attnum), \
       (SELECT pg_catalog.pg_get_expr(g.adbin, g.adrelid, true) FROM pg_catalog.pg_attrdef g \
         WHERE a.attgenerated OPERATOR(pg_catalog.<>) ''::pg_catalog.\"char\" AND g.adrelid OPERATOR(pg_catalog.=) a.attrelid AND g.adnum OPERATOR(pg_catalog.=) a.attnum \
+          AND c.relkind OPERATOR(pg_catalog.<>) 'f'::pg_catalog.\"char\" \
+          AND NOT EXISTS (SELECT 1 FROM kin n JOIN pg_catalog.pg_class f ON f.oid OPERATOR(pg_catalog.=) n.oid WHERE n.root OPERATOR(pg_catalog.=) c.oid AND f.relkind OPERATOR(pg_catalog.=) 'f'::pg_catalog.\"char\") \
           AND NOT EXISTS (SELECT 1 FROM kin n JOIN pg_catalog.pg_attribute ka ON ka.attrelid OPERATOR(pg_catalog.=) n.oid AND ka.attname OPERATOR(pg_catalog.=) a.attname \
             LEFT JOIN pg_catalog.pg_attrdef kd ON kd.adrelid OPERATOR(pg_catalog.=) ka.attrelid AND kd.adnum OPERATOR(pg_catalog.=) ka.attnum \
-            WHERE n.root OPERATOR(pg_catalog.=) c.oid AND (kd.adbin IS NULL \
+            WHERE n.root OPERATOR(pg_catalog.=) c.oid AND (kd.adbin IS NULL OR NOT ka.attnotnull \
               OR NOT (pg_catalog.pg_get_expr(kd.adbin, kd.adrelid, true) OPERATOR(pg_catalog.=) pg_catalog.pg_get_expr(g.adbin, g.adrelid, true))))) \
     FROM rels r JOIN pg_catalog.pg_class c ON c.oid OPERATOR(pg_catalog.=) r.oid \
       JOIN pg_catalog.pg_attribute a ON a.attrelid OPERATOR(pg_catalog.=) c.oid AND a.attnum OPERATOR(pg_catalog.>) 0 AND NOT a.attisdropped"
@@ -3575,7 +3578,27 @@ fn probe_text(text: &str, trust: &Trust) -> Option<Probe> {
 /// `coalesce` with a default that fails it, `IS DISTINCT FROM NULL` and `IS TRUE` are. A CHECK
 /// that is NULL there passes, as one that only compares the column is.
 fn refuses_null(text: &str, column: &str, trust: &Trust) -> bool {
-    probe_text(text, trust).is_some_and(|p| refusal::check_refuses(&p, column))
+    let Ok(parsed) = crate::stack::parse(&format!("SELECT {text}")) else { return false };
+    let Some(NodeEnum::SelectStmt(select)) = parsed.protobuf.stmts.first().and_then(|s| s.stmt.as_deref()).and_then(|s| s.node.as_ref()) else { return false };
+    let Some(NodeEnum::ResTarget(target)) = select.target_list.first().and_then(|t| t.node.as_ref()) else { return false };
+    // The server casts a CHECK to boolean as it does a boolean test's argument ([`probe`]).
+    target.val.as_deref().is_some_and(|root| (trust.cast("bool") || boolean(root)) && refusal::check_refuses(&probe(root, trust), column))
+}
+
+/// Whether a node is boolean whatever it reads: a null or boolean test, AND, OR or NOT, a boolean
+/// or NULL literal, `IS [NOT] DISTINCT FROM`, or a comparison.
+fn boolean(n: &syntax::postgres::protobuf::Node) -> bool {
+    use syntax::postgres::protobuf::{a_const::Val, AExprKind};
+    match n.node.as_ref() {
+        Some(NodeEnum::NullTest(_) | NodeEnum::BooleanTest(_) | NodeEnum::BoolExpr(_)) => true,
+        Some(NodeEnum::AConst(c)) => c.isnull || matches!(c.val, Some(Val::Boolval(_))),
+        Some(NodeEnum::AExpr(e)) => match AExprKind::try_from(e.kind) {
+            Ok(AExprKind::AexprDistinct | AExprKind::AexprNotDistinct) => true,
+            Ok(AExprKind::AexprOp) => matches!(infer::builtin_name(&e.name).as_deref(), Some("=" | "<>" | "<" | ">" | "<=" | ">=")),
+            _ => false,
+        },
+        _ => false,
+    }
 }
 
 /// An expression as [`refusal::with_null`] reads it, as Postgres evaluates it: a column by its
@@ -3604,20 +3627,7 @@ fn probe(node: &syntax::postgres::protobuf::Node, trust: &Trust) -> Probe {
         _ => Probe::Int(n),
     };
     // A node in a place the server casts to boolean.
-    let truth = |n: &syntax::postgres::protobuf::Node| {
-        let boolean = trust.cast("bool")
-            || match n.node.as_ref() {
-                Some(NodeEnum::NullTest(_) | NodeEnum::BooleanTest(_) | NodeEnum::BoolExpr(_)) => true,
-                Some(NodeEnum::AConst(c)) => c.isnull || matches!(c.val, Some(Val::Boolval(_))),
-                Some(NodeEnum::AExpr(e)) => match AExprKind::try_from(e.kind) {
-                    Ok(AExprKind::AexprDistinct | AExprKind::AexprNotDistinct) => true,
-                    Ok(AExprKind::AexprOp) => matches!(infer::builtin_name(&e.name).as_deref(), Some("=" | "<>" | "<" | ">" | "<=" | ">=")),
-                    _ => false,
-                },
-                _ => false,
-            };
-        if boolean { probe(n, trust) } else { Probe::Unknown }
-    };
+    let truth = |n: &syntax::postgres::protobuf::Node| if trust.cast("bool") || boolean(n) { probe(n, trust) } else { Probe::Unknown };
     let truth_at = |n: &Option<Box<syntax::postgres::protobuf::Node>>| Box::new(n.as_deref().map_or(Probe::Unknown, truth));
     match node.node.as_ref() {
         Some(NodeEnum::AConst(c)) if c.isnull => Probe::Null,
@@ -5503,6 +5513,8 @@ mod tests {
         assert!(!probe_text("CASE WHEN a THEN 1 ELSE NULL::integer END", &cast).is_some_and(|p| with_null(&p, "a") == Known::Null));
         assert!(refuses_null("a IS NOT NULL AND b > 0", "a", &cast));
         assert!(refuses_null("COALESCE(a, 0) > 0 IS TRUE", "a", &cast));
+        assert!(!refuses_null("CASE WHEN a IS NULL THEN false ELSE true END", "a", &cast));
+        assert!(refuses_null("CASE WHEN a IS NULL THEN false ELSE true END", "a", &trust));
     }
 
     #[test]
