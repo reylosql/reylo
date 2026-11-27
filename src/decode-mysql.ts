@@ -24,7 +24,7 @@
 // and a column whose kind is `bool` (src/values.ts) is made a boolean after the driver, a value
 // other than 0 or 1 refused (`truth`).
 import { lastOfEach, namesInResult, rowOf } from "./row.ts";
-import { bigInteger, coerce, columnKind, DecodeError, describe, ParameterError, truth, utf8, withFraction, type Columns, type Kind } from "./values.ts";
+import { bigInteger, coerce, DecodeError, describe, ParameterError, truth, utf8, withFraction, type Columns, type Kind } from "./values.ts";
 import { BUN_MYSQL, bunRows } from "./decode.ts";
 import { readMysqlError } from "./query-error.ts";
 import { literalsAtMarks, takesFloat, vectorParameter, wrappers, type AnyClient as Client, type Bound, type Marks, type QueryModule, type Runtime } from "./execute.ts";
