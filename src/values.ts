@@ -135,7 +135,9 @@ export function writeJson(v: unknown, dialect: Dialect, fail: (message: string) 
       const parent = places.get(this);
       const place = parent === undefined ? at : `${parent}/${key.replace(/~/g, "~0").replace(/\//g, "~1")}`;
       if (x !== null && typeof x === "object") places.set(x, place);
-      if (x instanceof RawJson) return rawJson(x.text);
+      // JSON.rawJSON takes a primitive's text alone, so a document's is read back, each number
+      // as its own text.
+      if (x instanceof RawJson) return JSON.parse(x.text, (_k, y: unknown, context?: { source?: string }) => (typeof y === "number" ? rawJson(context?.source ?? String(y)) : y));
       const n = x instanceof Number ? Number(x) : x;
       return special(n) ? rawJson(jsonNumber(n, place, dialect, fail)) : x;
     });
