@@ -1780,42 +1780,11 @@ async fn leftovers(db: &mut Db, history: &[HistoryRow]) -> Result<Vec<Leftover>,
     if db.dialect() != Dialect::Postgres || started.is_empty() {
         return Ok(vec![]);
     }
-    const NAME: &str = r#"(?:"(?:[^"]|"")*"|[^\s(".;]+)(?:\.(?:"(?:[^"]|"")*"|[^\s(".;]+))*"#;
-    let create = regex::Regex::new(&format!(r"(?is)^create\s+(?:unique\s+)?index\s+concurrently\s+(?:if\s+not\s+exists\s+)?(?:({NAME})\s+)?on\s+(?:only\s+)?({NAME})")).unwrap();
-    let drop = regex::Regex::new(&format!(r"(?is)^drop\s+index\s+concurrently\s+(?:if\s+exists\s+)?({NAME})")).unwrap();
-    let reindex = regex::Regex::new(&format!(r"(?is)^reindex\s+(?:\([^)]*\)\s*)?(index|table)\s+concurrently\s+({NAME})")).unwrap();
-    let literal = |s: &str| format!("'{}'", s.replace('\'', "''"));
-    // A name as the server stores it: unquoted folded to lower case.
-    let stored = |name: &str| match name.strip_prefix('"').and_then(|n| n.strip_suffix('"')) {
-        Some(inner) => inner.replace("\"\"", "\""),
-        None => name.to_lowercase(),
-    };
     let mut out = Vec::new();
     for m in started {
         // The one statement, without the comments above it.
         let Some(statement) = split_statements(&m.sql, Dialect::Postgres).into_iter().next() else { continue };
-        let sql = statement.text.trim_end_matches(';').trim_end_matches(|c: char| c.is_ascii_whitespace());
-        let found = if let Some(c) = create.captures(sql) {
-            // An index is made in its table's schema, and named without one.
-            let on = format!("i.indrelid = to_regclass({})", literal(&c[2]));
-            match c.get(1) {
-                Some(name) => format!("{on} and c.relname = {}", literal(&stored(name.as_str()))),
-                None => on,
-            }
-        } else if let Some(c) = drop.captures(sql) {
-            format!("c.oid = to_regclass({})", literal(&c[1]))
-        } else if let Some(c) = reindex.captures(sql) {
-            // A concurrent reindex builds <index>_ccnew beside each index, and swaps the old one to <index>_ccold.
-            let copies = |base: &str| format!("(c.relname like {} or c.relname like {})", literal(&format!("{}\\_ccnew%", base.replace('_', "\\_"))), literal(&format!("{}\\_ccold%", base.replace('_', "\\_"))));
-            if c[1].eq_ignore_ascii_case("index") {
-                let bare = stored(&crate::sql::last_written(&c[2]));
-                format!("i.indrelid = (select x.indrelid from pg_index x where x.indexrelid = to_regclass({})) and {}", literal(&c[2]), copies(&bare))
-            } else {
-                format!("i.indrelid = to_regclass({}) and {}", literal(&c[2]), copies("%"))
-            }
-        } else {
-            continue;
-        };
+        let Some(found) = leftover_filter(&statement.text) else { continue };
         for r in db
             .rows(&format!("select format('%I.%I', n.nspname, c.relname) as qualified, pg_get_indexdef(c.oid) as def from pg_index i join pg_class c on c.oid = i.indexrelid join pg_namespace n on n.oid = c.relnamespace where not i.indisvalid and {found}"))
             .await?
@@ -1824,6 +1793,52 @@ async fn leftovers(db: &mut Db, history: &[HistoryRow]) -> Result<Vec<Leftover>,
         }
     }
     Ok(out)
+}
+
+/// The catalog filter, over `pg_index i` and `pg_class c`, for the indexes a Postgres statement
+/// that builds, drops or rebuilds one concurrently leaves invalid when it is cut off. Spacing and the
+/// folding of an unquoted name to lower case are ASCII's, as Postgres reads them: a U+3000 or a
+/// U+00A0 is part of a name there, and `É` stays `É`.
+fn leftover_filter(statement: &str) -> Option<String> {
+    const S: &str = r"[ \t\n\r\x0B\x0C]";
+    static PATTERNS: LazyLock<[Regex; 3]> = LazyLock::new(|| {
+        let part = r#"(?:"(?:[^"]|"")*"|[^ \t\n\r\x0B\x0C(".;]+)"#;
+        let name = format!(r"{part}(?:\.{part})*");
+        let re = |p: String| Regex::new(&p.replace("\\s", S)).expect("a valid pattern");
+        [
+            re(format!(r"(?i)^create\s+(?:unique\s+)?index\s+concurrently\s+(?:if\s+not\s+exists\s+)?(?:({name})\s+)?on\s+(?:only\s+)?({name})")),
+            re(format!(r"(?i)^drop\s+index\s+concurrently\s+(?:if\s+exists\s+)?({name})")),
+            re(format!(r"(?i)^reindex\s+(?:\([^)]*\)\s*)?(index|table)\s+concurrently\s+({name})")),
+        ]
+    });
+    let [create, drop, reindex] = &*PATTERNS;
+    let literal = |s: &str| format!("'{}'", s.replace('\'', "''"));
+    // A name as the server stores it: unquoted folded to lower case.
+    let stored = |name: &str| match name.strip_prefix('"').and_then(|n| n.strip_suffix('"')) {
+        Some(inner) => inner.replace("\"\"", "\""),
+        None => name.to_ascii_lowercase(),
+    };
+    let sql = statement.trim_end_matches(';').trim_end_matches(|c: char| c.is_ascii_whitespace());
+    if let Some(c) = create.captures(sql) {
+        // An index is made in its table's schema, and named without one.
+        let on = format!("i.indrelid = to_regclass({})", literal(&c[2]));
+        return Some(match c.get(1) {
+            Some(name) => format!("{on} and c.relname = {}", literal(&stored(name.as_str()))),
+            None => on,
+        });
+    }
+    if let Some(c) = drop.captures(sql) {
+        return Some(format!("c.oid = to_regclass({})", literal(&c[1])));
+    }
+    let c = reindex.captures(sql)?;
+    // A concurrent reindex builds <index>_ccnew beside each index, and swaps the old one to <index>_ccold.
+    let copies = |base: &str| format!("(c.relname like {} or c.relname like {})", literal(&format!("{}\\_ccnew%", base.replace('_', "\\_"))), literal(&format!("{}\\_ccold%", base.replace('_', "\\_"))));
+    Some(if c[1].eq_ignore_ascii_case("index") {
+        let bare = stored(&crate::sql::last_written(&c[2]));
+        format!("i.indrelid = (select x.indrelid from pg_index x where x.indexrelid = to_regclass({})) and {}", literal(&c[2]), copies(&bare))
+    } else {
+        format!("i.indrelid = to_regclass({}) and {}", literal(&c[2]), copies("%"))
+    })
 }
 
 async fn drop_leftovers(db: &mut Db, leftovers: &[Leftover], log: Log<'_>) -> Result<(), Error> {
@@ -11143,6 +11158,17 @@ fn table_lines(table: &crate::db::Table) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_index_cut_off_is_found_by_its_whole_name() {
+        let f = |sql: &str| super::leftover_filter(sql).unwrap();
+        // Postgres reads a U+3000 as part of an unquoted name, and folds only ASCII letters.
+        assert_eq!(f("create unique index concurrently users_email\u{3000} on users (email);"), "i.indrelid = to_regclass('users') and c.relname = 'users_email\u{3000}'");
+        assert_eq!(f("CREATE INDEX CONCURRENTLY Édition_IDX ON t (x)"), "i.indrelid = to_regclass('t') and c.relname = 'Édition_idx'");
+        assert_eq!(f("drop index concurrently a\u{a0}b;"), "c.oid = to_regclass('a\u{a0}b')");
+        assert_eq!(f("create index concurrently on \"T\"\n  (x)"), "i.indrelid = to_regclass('\"T\"')");
+        assert_eq!(super::leftover_filter("create index i on t (x)"), None);
+    }
+
     #[test]
     fn a_space_beyond_ascii_ending_a_file_is_kept() {
         assert_eq!(super::normalized("select 1 as x\u{3000}\r\n \n"), "select 1 as x\u{3000}");
