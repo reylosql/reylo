@@ -26,7 +26,9 @@ const HEADER: &str = "# On a conflict, keep main's and run reylo migrate dev\n";
 /// text `canonical` keeps) and how it is written. A lock with none is version 1, as written up to
 /// 0.8.2. A change to any of them moves it, so that a lock written by the old rules is still
 /// checked by them, and a Reylo that reads an older version refuses a newer lock rather than read
-/// its checksums by the wrong rules, which would show every migration as edited.
+/// its checksums by the wrong rules, which would show every migration as edited. A correction
+/// where the old rules took two texts a database runs differently for the same moves none: a lock
+/// still checked by them would keep letting the edit through.
 pub const VERSION: u64 = 1;
 
 /// The lock: its migrations in order, and schema.sql's checksum where one was proven.
