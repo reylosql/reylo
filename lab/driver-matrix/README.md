@@ -224,6 +224,19 @@ The Bun jobs ran alone (`./run.sh --only bun`) on Bun 1.4.4, with Node 26.11.1 f
 
 The @vercel/postgres and Knex jobs are new. [drivers/vercel-postgres.ts](drivers/vercel-postgres.ts) points the package's own copy of @neondatabase/serverless at the local Neon proxy, with a pooled connection string (a host with `-pooler.`) for `sql` and `createPool()` and a direct one for `createClient()`, as the package requires. [drivers/knex.ts](drivers/knex.ts) runs Knex over pg on the local Postgres. The full run, on Node 26.11.1 and 24.22.0, Bun 1.4.4 and Miniflare 4.20260730.0, with the containers in colima and a throwaway Postgres 18 standing in for the shared Postgres 14 (`DM_PG_URL`), wrote [RESULTS.md](RESULTS.md): 75 jobs and 6319 rows, with 6236 pass, 4 fail (PlanetScale's simulator, as before), 60 unsupported, 16 skip and 3 not run, and 31 of 120 control rows failing as designed. All 412 rows of the three new jobs pass, S10's array of a subquery's rows on every shape. [compare.ts](compare.ts) against the RESULTS.md before it: 5952 rows over 74 jobs, and every row that was there has the result it had.
 
+## Run (2026-11-26): numbers JSON has none for, and fractions of a time
+
+The `typed` row has new columns: on Postgres a float8 of -0 and of NaN, a float4 of -Infinity, a `time(6)` of `12:00:00.05` and a domain over bytea; on MySQL a DOUBLE of -0 and a `TIME(6)` of `12:00:00.05`; on SQLite a REAL infinity and -0 in a column with no type. S11 compares the -0 as its text, and S11c is new. The full run, on Node 26.11.1 and 24.22.3, Bun 1.4.4 and Miniflare 4.20260730.0, with the containers in colima and a throwaway Postgres 18 standing in for the shared Postgres 14 (`DM_PG_URL`), wrote [RESULTS.md](RESULTS.md): 75 jobs and 6550 rows, with 6408 pass, 60 fail, 63 unsupported, 16 skip and 3 not run, and 32 of 124 control rows failing as designed.
+
+| Rows | Result | Diagnosis |
+| --- | --- | --- |
+| mysql2 3.15.3 and 2.3.3, S10 and S11 on every shape, MySQL 8.4 and 8.0 | fail (56 rows) | Not Reylo. Before 3.23.4 (sidorares/node-mysql2#4481), mysql2 writes a binary TIME's microseconds without their leading zeros, so `12:00:00.05` reaches Reylo as `12:00:00.5`, which it pads to the column's six digits. 3.24.5 reads it exactly |
+| D1 and Drizzle over D1, S10, S11 and S11c | pass, with D1's own values | D1's binding sends each row as JSON, so the REAL's infinity comes back as null and -0 as 0; the rows expect those |
+| @planetscale/database 2.0.0, S11c | unsupported (3 rows) | 2.0 binds no parameters, as for every scenario with them |
+| Turso's engine, S11c | pass | Before 0.8 its `json_extract` reads the number `9e999` as the text `9e999`, so S11c reads the parameter back as a column rather than through `json_extract` |
+
+PlanetScale's simulator fails S8 as before. [compare.ts](compare.ts) against the RESULTS.md before it: every row that was there has the result it had, but S10 and S11 of mysql2 3.15.3 and 2.3.3.
+
 ## Type check
 
 [typecheck/check.ts](typecheck/check.ts) generates [typecheck/cases.ts](typecheck/cases.ts), which declares one value of each client type and passes it to `run` on a Postgres, a MySQL and a SQLite query. It also checks the type `run`, `with(...)(...)` and `runSync` return (a promise from `run` and `with` on every client, the value from `runSync` on a synchronous SQLite client) and that `runSync` rejects every other client, then runs the repository's tsc and maps each diagnostic back to its line. Against the final src (src/execute.ts 332f629f3f63), all 552 cases over 94 client types are as expected: none is wrongly accepted and none is wrongly rejected; with the ten Turso client types of 2026-10-20, all 612 over 104 are. Turso's shape needs `exec()` beside `prepare()`, because postgres.js's TransactionSql has a `prepare(name)` whose result is of any type, which the first try at the type took for Turso's. [typecheck/RESULTS.md](typecheck/RESULTS.md) lists every case.
