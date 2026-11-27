@@ -30,11 +30,26 @@ struct Connection {
     shown: HashMap<Option<String>, String>,
     /// The fingerprint read last, which the loader labels the next analysis with.
     label: Option<String>,
+    /// The servers that answered the last analysis without having shown its label's schema.
+    unshown: BTreeSet<Option<String>>,
 }
+
+/// How many more times the schema's fingerprint is read for servers an analysis heard from that
+/// had not shown it: a load balancer that sends each request to the next replica reaches each in turn.
+const UNSHOWN_READS: usize = 4;
 
 impl Connection {
     fn new(server: Server, version: String) -> Connection {
-        Connection { server, version, answers: AnswerCache::until_cleared(), shown: HashMap::new(), label: None }
+        Connection { server, version, answers: AnswerCache::until_cleared(), shown: HashMap::new(), label: None, unshown: BTreeSet::new() }
+    }
+
+    /// Notes the fingerprint `schema` holds as the one its server showed, where one server answered it.
+    fn note(&mut self, schema: &Result<crate::Schema, Value>) {
+        let by = self.server.answered();
+        if let (Ok(schema), [server]) = (schema, &by.into_iter().collect::<Vec<_>>()[..]) {
+            self.shown.insert(server.clone(), schema.fingerprint.clone());
+            self.unshown.remove(server);
+        }
     }
 }
 
@@ -46,11 +61,15 @@ impl Connection {
     fn schema(&mut self) -> Result<crate::Schema, Value> {
         self.server.answered();
         let schema = self.fingerprint();
-        let by = self.server.answered();
-        self.label = schema.as_ref().ok().map(|schema| schema.fingerprint.clone());
-        if let (Ok(schema), [server]) = (&schema, &by.into_iter().collect::<Vec<_>>()[..]) {
-            self.shown.insert(server.clone(), schema.fingerprint.clone());
+        self.note(&schema);
+        for _ in 0..UNSHOWN_READS {
+            if schema.is_err() || self.unshown.is_empty() {
+                break;
+            }
+            let again = self.fingerprint();
+            self.note(&again);
         }
+        self.label = schema.as_ref().ok().map(|schema| schema.fingerprint.clone());
         schema
     }
 
@@ -78,10 +97,13 @@ impl Connection {
         let shown = self.shown.clone();
         self.server.answered();
         let analyzed = answers::analyze(&self.server, sql, &mut self.answers);
-        let keep = kept(self.label.as_deref(), &shown, &self.server.answered());
-        // Answers a replica gave before it showed the schema are no answers to keep for the next statement.
+        let by = self.server.answered();
+        let keep = kept(self.label.as_deref(), &shown, &by);
+        // Answers a replica gave before it showed the schema are no answers to keep for the next
+        // statement, and the next read of the fingerprint asks it for its schema.
         if !keep {
             self.answers.clear();
+            self.unshown = by.into_iter().filter(|server| shown.get(server) != self.label.as_ref()).collect();
         }
         match analyzed {
             Ok(analysis) => Ok((analysis, keep)),
