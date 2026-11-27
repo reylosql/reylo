@@ -13,6 +13,7 @@ derived_aliases.sql: many () -> { w: int? }
 json_object_schema.sql: many () -> { o: json { d: json? } }
 json_schema.sql: many () -> { doc: json? }
 json_table_labels.sql: many () -> { x: enum? }
+key_comma_name.sql: many () -> { v: int? }
 key_keyless_lower.sql: many () -> { v: int? }
 key_keyless_lower_last.sql: many () -> { v: int? }
 key_keyless_upper.sql: many () -> { v: int? }

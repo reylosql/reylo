@@ -20,6 +20,8 @@ create table KN (id int primary key, v int);
 create table kn (id int, v int);
 create table PN (id int, v int);
 create table pn (id int primary key, v int);
+-- A name that holds a comma is one name: `pn,z` has no key of `pn`'s.
+create table `pn,z` (id int, v int);
 create table vt (id int primary key, v int);
 create table vw (id int, v int);
 create view VW as select id, v from vt where id = 1;

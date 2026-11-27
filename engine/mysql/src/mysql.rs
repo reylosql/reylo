@@ -66,36 +66,34 @@ fn not_builtin(server: Option<&[Vec<Value>]>) -> HashSet<String> {
     MOVED_OUT.iter().filter(|(from, _)| at >= *from).flat_map(|(_, moved)| moved.iter().map(|n| n.to_string())).collect()
 }
 
-/// One row per column of every unique index of the named tables, in key order, with the column's
-/// type. `?` is the comma-joined table names, because MySQL binds no arrays. A key part over an
-/// expression (MySQL 8.0.13's functional indexes) has no column name.
+/// One row per column of every unique index of a table, in key order, with the column's type.
+/// `?` is the table's name, compared as the server compares names: `find_in_set` would split a name
+/// that holds a comma ([`by_table`]). A key part over an expression (MySQL 8.0.13's functional indexes) has no column name.
 const UNIQUE_KEYS_QUERY: &str = "select s.table_name, s.index_name, s.column_name, c.data_type from information_schema.statistics s \
     left join information_schema.columns c on c.table_schema = s.table_schema and c.table_name = s.table_name and c.column_name = s.column_name \
-    where s.table_schema = database() and s.non_unique = 0 and find_in_set(s.table_name, ?) order by s.table_name, s.index_name, s.seq_in_index";
+    where s.table_schema = database() and s.non_unique = 0 and s.table_name = ? order by s.table_name, s.index_name, s.seq_in_index";
 
-/// One row per column of the named tables and views of the current schema, in order, with its
-/// type. `?` is the comma-joined table names.
+/// One row per column of a table or a view of the current schema, in order, with its type. `?` is
+/// its name.
 const KEY_COLUMNS_QUERY: &str = "select c.table_name, c.column_name, c.data_type from information_schema.columns c \
-    where c.table_schema = database() and find_in_set(c.table_name, ?) order by c.table_name, c.ordinal_position";
+    where c.table_schema = database() and c.table_name = ? order by c.table_name, c.ordinal_position";
 
-/// One row per view among the named tables of the current schema: its name, its defining SELECT
-/// as the server stores it (every name qualified with the schema), and the schema. `?` is the
-/// comma-joined names.
+/// The view of the current schema of a name, if it is one: its name, its defining SELECT as the
+/// server stores it (every name qualified with the schema), and the schema. `?` is the name.
 const VIEW_DEFINITIONS_QUERY: &str = "select v.table_name, v.view_definition, v.table_schema from information_schema.views v \
-    where v.table_schema = database() and find_in_set(v.table_name, ?)";
+    where v.table_schema = database() and v.table_name = ?";
 
-/// One row per column of the named tables and views of the current schema. `?` is the
-/// comma-joined table names.
+/// One row per column of a table or a view of the current schema. `?` is its name.
 const TABLE_COLUMNS_QUERY: &str = "select c.table_name, c.column_name from information_schema.columns c \
-    where c.table_schema = database() and find_in_set(c.table_name, ?) order by c.table_name, c.ordinal_position";
+    where c.table_schema = database() and c.table_name = ? order by c.table_name, c.ordinal_position";
 
-/// One row per enforced CHECK of the named tables of the current database: the table, named as a
-/// column's origin in the prepare names it ([`crate::mysql_params::TYPES_QUERY`]), and the CHECK as
-/// `information_schema` prints it ([`check_clause`]). `?` is the comma-joined table names. A server
-/// before 8.0.16 has neither table, and its error is no CHECK.
+/// One row per enforced CHECK of a table of the current database: the table, named as a column's
+/// origin in the prepare names it ([`crate::mysql_params::TYPES_QUERY`]), and the CHECK as
+/// `information_schema` prints it ([`check_clause`]). `?` is the table's name. A server before
+/// 8.0.16 has neither table, and its error is no CHECK.
 const CHECKS_QUERY: &str = "select if(@@lower_case_table_names = 2, lower(tc.table_name), tc.table_name), cc.check_clause from information_schema.table_constraints tc \
     join information_schema.check_constraints cc on cc.constraint_schema = tc.constraint_schema and cc.constraint_name = tc.constraint_name \
-    where tc.table_schema = database() and tc.constraint_type = 'CHECK' and tc.enforced = 'YES' and find_in_set(tc.table_name, ?) \
+    where tc.table_schema = database() and tc.constraint_type = 'CHECK' and tc.enforced = 'YES' and tc.table_name = ? \
     order by tc.table_name, tc.constraint_name";
 
 /// The statements the MySQL analysis reads; any other is a command ([`lex::Statement`]).
@@ -2878,7 +2876,8 @@ impl Class {
 }
 
 /// A catalog query of one table's name, asked of each of `tables` on its own, so that a later
-/// statement naming it reads no more ([`Host::query_each`]).
+/// statement naming it reads no more ([`Host::query_each`]). Each query compares `table_name = ?`,
+/// which matches the one name as the server compares names.
 pub(crate) fn by_table(host: &Host, sql: &str, tables: &[String]) -> Lazy<Result<Vec<Vec<Value>>, reylo_engine_core::api::DbError>> {
     host.query_each(sql, tables.iter().map(|t| vec![json!(t)]), Scope::Statement)
 }

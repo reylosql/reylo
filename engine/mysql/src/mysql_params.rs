@@ -21,17 +21,17 @@ use std::collections::{HashMap, HashSet};
 /// and a generated column's expression, as `information_schema` prints it ([`refused_by`]), in the
 /// order an INSERT without a column list fills them, which passes over an INVISIBLE column. A
 /// view's column is taken to refuse NULL: what a write through it takes is its table's to say. `?`
-/// is the comma-joined table names, because MySQL binds no arrays.
+/// is one table's name ([`by_table`]).
 const COLUMNS_QUERY: &str = "select c.table_name, c.column_name, if(t.table_type = 'VIEW', 'NO', c.is_nullable), c.extra, c.generation_expression from information_schema.columns c \
     join information_schema.tables t on t.table_schema = c.table_schema and t.table_name = c.table_name \
-    where c.table_schema = database() and find_in_set(c.table_name, ?) order by c.table_name, c.ordinal_position";
+    where c.table_schema = database() and c.table_name = ? order by c.table_name, c.ordinal_position";
 
 /// The enforced CHECKs of the named tables of the current schema, as the server prints each
 /// (MySQL 8.0.16 and later; a server without the views answers an error, and no CHECK refuses
 /// null there).
 const CHECKS_QUERY: &str = "select tc.table_name, cc.check_clause from information_schema.table_constraints tc \
     join information_schema.check_constraints cc on cc.constraint_schema = tc.constraint_schema and cc.constraint_name = tc.constraint_name \
-    where tc.table_schema = database() and tc.constraint_type = 'CHECK' and tc.enforced = 'YES' and find_in_set(tc.table_name, ?)";
+    where tc.table_schema = database() and tc.constraint_type = 'CHECK' and tc.enforced = 'YES' and tc.table_name = ?";
 
 /// Each column's type of the named tables of the current schema, for [`typed`]: its
 /// `data_type`, its `column_type` (`tinyint(1)`, `bit(1)`, `bigint unsigned`), its `extra`, its
@@ -40,7 +40,7 @@ const CHECKS_QUERY: &str = "select tc.table_name, cc.check_clause from informati
 /// which with `lower_case_table_names` 2 (macOS) is in lower case, while the catalog keeps the case
 /// the table was made with.
 pub(crate) const TYPES_QUERY: &str = "select if(@@lower_case_table_names = 2, lower(c.table_name), c.table_name), c.column_name, c.data_type, c.column_type, c.extra, c.column_comment, c.character_set_name from information_schema.columns c \
-    where c.table_schema = database() and find_in_set(c.table_name, ?) order by c.table_name, c.ordinal_position";
+    where c.table_schema = database() and c.table_name = ? order by c.table_name, c.ordinal_position";
 
 /// The parameter each `?` of the rewritten text is, by where it stands as the parser counts:
 /// lines and characters from 1.
