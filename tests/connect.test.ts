@@ -430,9 +430,7 @@ test("MySQL: an analysis interrupted by KILL QUERY while it waits behind an alte
       await new Promise((done) => setTimeout(done, 50));
     }
     // Its rejection is handled from before the kill, so it is never unhandled for a moment.
-    const refused = assert.rejects(analyzing, (err: Error) => !(err instanceof Unreachable) && err.message === "The server interrupted the analysis of this statement: Query execution was interrupted (1317)");
-    await db.query(`kill query ${session}`);
-    await refused;
+    await Promise.all([assert.rejects(analyzing, (err: Error) => !(err instanceof Unreachable) && err.message === "The server interrupted the analysis of this statement: Query execution was interrupted (1317)"), db.query(`kill query ${session}`)]);
     await db.query("commit");
     await altering;
     assert.deepEqual((await c.analyze(statement)).columns.map((col) => col.name), ["id", "name"]);

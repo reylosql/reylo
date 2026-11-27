@@ -403,7 +403,7 @@ test("SQLite: an INTEGER past 2^53 that ceil or coalesce hands back, or a column
   const file = join(root, "app.db");
   const setup = new DatabaseSync(file);
   setup.exec(`create table w (id integer primary key, n integer not null, v);
-    insert into w values (1, 9007199254740993, 9007199254740993), (2, 5, 1e20), (3, 5, 1152921504606846976.0)`);
+    insert into w values (1, 9007199254740993, 9007199254740993), (2, 5, 1e20), (3, 5, 1152921504606846976.0), (4, 5, 9223372036854775807), (5, 5, -9223372036854775808)`);
   setup.close();
   // SQLite hands back the INTEGER n from ceil, floor and trunc, and from coalesce beside a REAL.
   const ceiled = await built(root, "file:./app.db", "ceiled", "select ceil(n) as n from w where id = 1");
@@ -417,6 +417,9 @@ test("SQLite: an INTEGER past 2^53 that ceil or coalesce hands back, or a column
   const bigReal = await built(root, "file:./app.db", "big_real", "select max(n, 1e20) as n from w where id = 2");
   // 2^60, a REAL no driver tells from an INTEGER rounded to it; 1e20 is past every INTEGER.
   const midReal = await built(root, "file:./app.db", "mid_real", "select v as n from w where id = 3");
+  // The largest and least INTEGERs, which a driver that rounds hands over as ±2^63.
+  const largest = await built(root, "file:./app.db", "largest", "select v as n from w where id = 4");
+  const least = await built(root, "file:./app.db", "least", "select v as n from w where id = 5");
   const integers = [ceiled, floored, coalesced, untyped, either, most];
   const past = /Column "n" holds .*9007199254740992|Column "n" holds 9007199254740993/;
   const wholeNumber = /Column "n" holds 9007199254740992, a whole number past .* may be an INTEGER the driver already rounded/;
@@ -456,6 +459,8 @@ test("SQLite: an INTEGER past 2^53 that ceil or coalesce hands back, or a column
   assert.deepEqual(plain(await real.run(s3)), { n: 1e20 }, "sqlite3: a REAL past 2^63 in a column with no type");
   assert.deepEqual(plain(await bigReal.run(s3)), { n: 1e20 }, "sqlite3: a REAL past 2^63 max hands back");
   await assert.rejects(midReal.run(s3), /Column "n" holds 1152921504606847000, a whole number past .* or a REAL/);
+  await assert.rejects(largest.run(s3), /Column "n" holds 9223372036854776000, a whole number past .* or a REAL/);
+  await assert.rejects(least.run(s3), /Column "n" holds -9223372036854776000, a whole number past .* or a REAL/);
   await new Promise((resolve) => s3.close(resolve));
   const wasm = await sqliteWasmCopy(file);
   for (const q of integers) assert.throws(() => q.runSync(wasm), past);
