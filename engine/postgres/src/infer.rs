@@ -301,7 +301,8 @@ pub fn postgres_function_names() -> Vec<&'static str> {
         POSTGRES_GROUPED, POSTGRES_GROUPED_NEVER_NULL, POSTGRES_GROUPED_JSON, POSTGRES_ORDERED_SET, POSTGRES_STRICT, POSTGRES_WINDOW,
         POSTGRES_FRAME_VALUES, POSTGRES_SET_RETURNING, POSTGRES_SERIES, POSTGRES_DATE_PARTS, &["substring", POSTGRES_ENUM_RANGE], crate::jsonshape::POSTGRES_FUNCTIONS,
     ];
-    for list in lists {
+    let from = FROM_FUNCTIONS.iter().map(|(name, ..)| *name).collect::<Vec<_>>();
+    for list in lists.iter().copied().chain([from.as_slice()]) {
         for name in list.iter() {
             if !names.contains(name) {
                 names.push(*name);
@@ -619,6 +620,11 @@ pub struct Fact {
 pub struct Trust {
     /// Operator and function names with a definition outside the built-ins.
     pub shadowed: HashSet<String>,
+    /// The operator and function names the host asked the catalog about, which are all that
+    /// `shadowed` speaks for: a name outside them may be a user's for all the build knows, and
+    /// reads as no built-in. `None` for a host whose database defines no names of its own, which
+    /// trusts every one.
+    pub asked: Option<std::sync::Arc<HashSet<String>>>,
     /// What the catalog says of the overloads of the shadowed names ([`crate::resolution`]): a
     /// call of such a name still reads as the built-in where its operands' types resolve it to
     /// one. `None` leaves every shadowed name proving nothing.
@@ -654,7 +660,12 @@ impl Trust {
     /// Whether `name`, an operator or a function a rule reads, can only resolve to a built-in,
     /// whatever its operands.
     pub fn builtin(&self, name: &str) -> bool {
-        !self.shadowed.contains(name)
+        self.asked(name) && !self.shadowed.contains(name)
+    }
+
+    /// Whether the host asked the catalog about `name` ([`Trust::asked`]).
+    fn asked(&self, name: &str) -> bool {
+        self.asked.as_ref().is_none_or(|asked| asked.contains(name))
     }
 
     /// Whether a call of `name` over operands of these types resolves to the built-in, and the
@@ -668,6 +679,10 @@ impl Trust {
         };
         if !checked {
             return Some(None);
+        }
+        // The catalog was read for the names asked about alone.
+        if kind != Kind::Cast && !self.asked(name) {
+            return None;
         }
         self.overloads.as_ref()?.0.resolve(kind, name, operands)
     }
@@ -697,7 +712,7 @@ impl Trust {
     /// Whether a call of the function `name` with `arity` arguments aggregates, as the built-in
     /// does, whichever overload of it the server picks: none of a user's, or every one an aggregate.
     pub(crate) fn aggregates(&self, name: &str, arity: usize) -> bool {
-        self.builtin(name) || self.overloads.as_ref().and_then(|o| o.0.every_aggregate(name, arity)) == Some(true)
+        self.asked(name) && (self.builtin(name) || self.overloads.as_ref().and_then(|o| o.0.every_aggregate(name, arity)) == Some(true))
     }
 
     /// Whether some row type of the catalog may have an attribute named `name`: as the trust
@@ -708,12 +723,12 @@ impl Trust {
 
     /// Whether no overload of a user's of `name`, of this kind, returns a set.
     fn returns_no_set(&self, kind: Kind, name: &str) -> bool {
-        self.builtin(name) || self.overloads.as_ref().and_then(|o| o.0.returns_set(kind, name)) == Some(false)
+        self.asked(name) && (self.builtin(name) || self.overloads.as_ref().and_then(|o| o.0.returns_set(kind, name)) == Some(false))
     }
 
     /// Whether no operator of a user's named `name`, infix or prefix, returns a set.
     fn operator_returns_no_set(&self, name: &str) -> bool {
-        self.builtin(name) || self.overloads.as_ref().and_then(|o| o.0.operator_returns_set(name)) == Some(false)
+        self.asked(name) && (self.builtin(name) || self.overloads.as_ref().and_then(|o| o.0.operator_returns_set(name)) == Some(false))
     }
 
     /// The check a call of the shadowed `name` needs, where the catalog says what its overloads
@@ -5341,6 +5356,19 @@ mod tests {
         assert!(!resolve(plan("SELECT name FROM t WHERE name = $1", Dialect::Postgres, &untyped).head[0].as_ref().unwrap(), Some(&[col(true, oid::TEXT)])).non_null);
         // A NULL a probe wrote for a parameter is of any type too.
         assert!(!fact("SELECT name FROM t WHERE name = NULL", &[col(true, oid::TEXT)], 0));
+    }
+
+    #[test]
+    fn a_name_the_host_never_asked_about_is_no_built_in() {
+        // Every name a rule reads is asked about, the set-returning functions of FROM included.
+        let names = postgres_function_names();
+        assert!(FROM_FUNCTIONS.iter().all(|(name, ..)| names.contains(name)));
+        let asked = |names: &[&str]| Trust { asked: Some(std::sync::Arc::new(names.iter().map(|n| n.to_string()).collect())), cast_targets: None, ..Trust::default() };
+        let trust = asked(&["lower"]);
+        assert!(trust.builtin("lower") && !trust.builtin("jsonb_each_text") && !trust.aggregates("count", 1));
+        assert_eq!(trust.resolves(Kind::Function, "jsonb_each_text", &[Operand::Unknown]), None);
+        assert!(!first(&plan("SELECT count(*) FROM t", Dialect::Postgres, &trust)).non_null);
+        assert!(first(&plan("SELECT count(*) FROM t", Dialect::Postgres, &asked(&["count"]))).non_null);
     }
 
     #[test]
