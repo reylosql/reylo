@@ -104,6 +104,8 @@ function scalar(t: EngineType, dialect: Dialect, inJson: boolean, input: boolean
     if (t.kind === "geometry" && name === "geometry" && dialect === "postgres") return GEOJSON;
     // pgvector has no cast to JSON, so a vector inside a document is its text.
     if (kind === "vector") return { type: "string" };
+    // A range or a multirange has none either: its text, `[1,5)` or `{[1,3),[5,7)}`, as engine/core writes it.
+    if (t.kind === "range" || t.kind === "multirange") return { type: "string", description: `pg type ${name}` };
   } else if (input) {
     // A MySQL TINYINT(1) or BIT(1) column's parameter takes the truth value its rows return, or the integer it stores.
     if (dialect === "mysql" && kind === "bool" && t.kind !== "boolean") return { anyOf: [{ type: "boolean" }, { type: "integer", format: "int32" }] };

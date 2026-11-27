@@ -101,14 +101,13 @@ impl Server {
         if !database.is_empty() {
             parameters.push(("database".to_string(), database));
         }
-        if let Some(login) = login {
-            let (user, password) = login.split_once(':').unwrap_or((login, ""));
-            headers.push(("X-ClickHouse-User".to_string(), percent(user)));
-            headers.push(("X-ClickHouse-Key".to_string(), percent(password)));
-        }
         let mut pathname = String::new();
+        let mut token = None;
         for pair in query.split('&').filter(|p| !p.is_empty()) {
             let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+            // A name is read decoded, as `@clickhouse/client` reads the URL's parameters.
+            let key = percent(&key.replace('+', " "));
+            let key = key.as_str();
             let value = percent(&value.replace('+', " "));
             let setting = key.strip_prefix("clickhouse_setting_").or_else(|| key.strip_prefix("ch_"));
             match (key, setting, key.strip_prefix("http_header_")) {
@@ -116,12 +115,19 @@ impl Server {
                 (_, _, Some(header)) => headers.push((header.to_string(), value)),
                 ("role", ..) => parameters.push(("role".to_string(), value)),
                 ("pathname", ..) => pathname = format!("/{}", value.trim_matches('/')),
-                ("access_token", ..) => {
-                    headers.retain(|(name, _)| !name.starts_with("X-ClickHouse-"));
-                    headers.push(("Authorization".to_string(), format!("Bearer {value}")));
-                }
+                ("access_token", ..) => token = Some(value),
                 _ => {}
             }
+        }
+        // A bearer token stands in for the login, and for nothing else: a header the URL names, as
+        // the database's, is sent either way.
+        match (token, login) {
+            (Some(token), _) => headers.insert(0, ("Authorization".to_string(), format!("Bearer {token}"))),
+            (None, Some(login)) => {
+                let (user, password) = login.split_once(':').unwrap_or((login, ""));
+                headers.splice(0..0, [("X-ClickHouse-User".to_string(), percent(user)), ("X-ClickHouse-Key".to_string(), percent(password))]);
+            }
+            (None, None) => {}
         }
         // No redirect is followed, as `@clickhouse/client` follows none: one would carry the login's
         // headers to whatever host it names. Its answer is then one the interface does not give.
@@ -271,6 +277,12 @@ mod tests {
         let proxied = Server::of("HTTP://localhost/analytics?pathname=/clickhouse/&access_token=t0ken").unwrap();
         assert_eq!(proxied.endpoint, "http://localhost/clickhouse/");
         assert_eq!(proxied.headers, [("Authorization".to_string(), "Bearer t0ken".to_string())]);
+        // A parameter's name is read decoded.
+        assert_eq!(Server::of("http://localhost/?%63h_database=a").unwrap().parameters, [("database".to_string(), "a".to_string())]);
+        // A header the URL names is sent beside a token, wherever the URL writes the two.
+        for url in ["http://localhost/?http_header_X-ClickHouse-Database=a&access_token=t0ken", "http://localhost/?access_token=t0ken&http_header_X-ClickHouse-Database=a"] {
+            assert_eq!(Server::of(url).unwrap().headers, [("Authorization", "Bearer t0ken"), ("X-ClickHouse-Database", "a")].map(|(k, v)| (k.to_string(), v.to_string())), "{url}");
+        }
     }
 
     #[test]

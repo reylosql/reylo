@@ -5,8 +5,8 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { connect, createServer, type AddressInfo, type Server } from "node:net";
-import { Session } from "../src/analyze.ts";
-import { engine, reason, Unreachable } from "../src/engine.ts";
+import { libpqEnvironment, Session } from "../src/analyze.ts";
+import { engine, reason, Unreachable, withVariables } from "../src/engine.ts";
 import { hostUrl } from "../src/host-url.ts";
 import { nativeBinary } from "../src/native.ts";
 import { mysqlStandIn } from "./mysql-stand-in.ts";
@@ -559,12 +559,37 @@ test("a socket the bridge cannot open is reported with its reason, a Unix socket
   await assert.rejects((await engine("mysql")).open(`mysql://root@localhost/app?socketPath=${encodeURIComponent(path)}`), (e: Error) => e instanceof Unreachable && e.message.startsWith(`cannot open the socket ${path}: connect ENOENT`));
 });
 
+test("the bridge opens the MySQL socket mysql2 would, socketPath before socket, a + in its path a space", { skip: process.platform === "win32" && "its paths are Unix sockets, which Windows names as pipes" }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), "reylo-sock-"));
+  for (const [query, path] of [
+    [`socket=${dir}/a.sock&socketPath=${dir}/b.sock`, `${dir}/b.sock`],
+    [`socketPath=${dir}/b.sock&socket=${dir}/a.sock`, `${dir}/b.sock`],
+    [`socketPath=${dir}/a+b.sock`, `${dir}/a b.sock`],
+  ]) {
+    await assert.rejects((await engine("mysql")).open(`mysql://root@localhost/app?${query}`), (e: Error) => e instanceof Unreachable && e.message.startsWith(`cannot open the socket ${path}: connect ENOENT`), query);
+  }
+});
+
+test("a session's variables stand in for the process's, in every case of a name on Windows", () => {
+  const env = { pgdatabase: "other", PGHOST: "h", PATH: "/bin" };
+  assert.deepEqual(withVariables(env, { PGDATABASE: undefined, PGHOST: "db" }, "win32"), { PGHOST: "db", PATH: "/bin" });
+  assert.deepEqual(withVariables(env, { PGDATABASE: undefined, PGHOST: "db" }, "linux"), { pgdatabase: "other", PGHOST: "db", PATH: "/bin" });
+  // A worker thread's copy of the environment matches names exactly, so a session reads its variables in any case there.
+  assert.deepEqual(libpqEnvironment(env, "win32"), { PGHOST: "h", PGDATABASE: "other" });
+  assert.deepEqual(libpqEnvironment(env, "linux"), { PGHOST: "h" });
+  // Of two spellings, the first in order, whichever the environment lists first.
+  assert.deepEqual(libpqEnvironment({ pgdatabase: "local", pgDatabase: "reporting" }, "win32"), { PGDATABASE: "reporting" });
+  assert.deepEqual(libpqEnvironment({ pgDatabase: "reporting", pgdatabase: "local" }, "win32"), { PGDATABASE: "reporting" });
+});
+
 test("PGHOST names the socket's directory where the URL names no host, as libpq reads it", async () => {
   // As on a system with Unix sockets: the bridge itself is a TCP server, which every system opens.
   const bridged = await hostUrl("postgres://u@/d", { PGHOST: "/var/run/postgresql", PGPORT: "5433" }, "linux");
   assert.ok(bridged.bridge);
   assert.match(bridged.url, /^postgres:\/\/u@127\.0\.0\.1:\d+\/d$/);
   bridged.close();
+  // A `port=` the URL names, even empty, takes no PGPORT, as libpq reads it: the empty one is 5432.
+  await assert.rejects(hostUrl("postgres://u@/d?host=/var/run/postgresql&port=", { PGPORT: "5433" }, "win32"), (e: Error) => /\.s\.PGSQL\.5432,/.test(e.message));
   // A host in the URL, or a TCP host in PGHOST, is no socket.
   assert.equal((await hostUrl("postgres://u@db/d", { PGHOST: "/var/run/postgresql" })).bridge, undefined);
   assert.equal((await hostUrl("postgres://u@/d", { PGHOST: "db.internal" })).bridge, undefined);

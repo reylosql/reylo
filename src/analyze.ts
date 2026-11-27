@@ -8,7 +8,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, w
 import { createHash } from "node:crypto";
 import { join, relative } from "node:path";
 import { anyEngine, DIAGNOSTIC, engine, reason, MissingEngine, REYLO_VERSION, Unreachable, type Analysis, type Engine, type Lexed } from "./engine.ts";
-import { packageDir, resolveProject, sqlitePath, type ResolvedProject } from "./project.ts";
+import { packageDir, resolveProject, sqlitePath, type Dialect, type ResolvedProject } from "./project.ts";
 import { NotMysql, refusedLogin } from "./connection.ts";
 import { keptError } from "./server-errors.ts";
 import { NotPrepared, openProjectDrivers, placeRefusal, projectDriverVersions, type SqliteDriver } from "./sqlite-drivers.ts";
@@ -62,6 +62,20 @@ const OFFLINE_TTL = 60_000;
 // (`releaseConnections`), and a loader (webpack, Rspack, Turbopack) has no such signal. The type
 // check's session keeps its connection.
 const BUILD_IDLE = 250;
+/**
+ * The URL parameters that choose the server or the database a session reads, beside the URL's
+ * host and path, as each dialect's engine reads them (engine/native/src/): libpq's, among them
+ * `user`, which names the role as the URL's user part does, and `options`, which may set the
+ * search path a name is read through; mysql2's socket; and ClickHouse's database, the header that
+ * names it, and the path in front of its interface. They name a session's entries with its server
+ * (`#server`), as `server` in rust/reylo-build/src/analysis.rs names them.
+ */
+const CHOOSING: Record<Dialect, readonly string[]> = {
+  postgres: ["dbname", "host", "hostaddr", "options", "port", "user"],
+  mysql: ["socket", "socketPath"],
+  clickhouse: ["ch_database", "clickhouse_setting_database", "http_header_x-clickhouse-database", "pathname"],
+  sqlite: [],
+};
 
 const sessions = new Map<string, Session>();
 
@@ -87,6 +101,8 @@ export class Session {
   /** Where the project was resolved from, and with what environment, for `#reread`. */
   readonly #dir: string;
   readonly #env: Record<string, string | undefined>;
+  /** The variables of `ENVIRONMENT` as the session started, which its connection reads too: its entries keep one name however the process's environment changes after. */
+  readonly #libpq = libpqEnvironment();
   #io: Promise<Io> | undefined;
   /** The URL the connection opens: the project's, until a command in `direct_url` gives a fresh one. */
   #url: string | undefined;
@@ -134,7 +150,8 @@ export class Session {
     const { project, engine } = await openProject(dir, env);
     // A setting the build step reads (`sqlcommenter`, `allow_nested_arrays`, and `dir`, which places the cache) is part of
     // the key, so a change to it in the project file reaches a running watch process.
-    const key = JSON.stringify([project.root, project.url ?? null, project.error ?? null, project.sqlcommenter, project.allowNestedArrays, project.cache, engine instanceof MissingEngine ? engine.message : null]);
+    // So are libpq's variables, which choose the database the connection reaches and name its entries.
+    const key = JSON.stringify([project.root, project.url ?? null, project.error ?? null, project.sqlcommenter, project.allowNestedArrays, project.cache, engine instanceof MissingEngine ? engine.message : null, libpqEnvironment()]);
     let session = sessions.get(key);
     if (!session) sessions.set(key, (session = new Session(engine, project, BUILD_IDLE, dir, env)));
     return session;
@@ -465,17 +482,16 @@ export class Session {
     return `Cannot type-check against the database at ${this.where()} (${this.project.urlSource}): it is ${e.server}, and Reylo type-checks MySQL statements against MySQL. Point the type check's URL at a MySQL server, 8.4 or later, with the same schema.`;
   }
 
-  /** The server, without credentials, that names this session's entries: none with no URL, which writes none. */
+  /**
+   * The server, without credentials, that names this session's entries: none with no URL, which
+   * writes none. The URL's parameters that choose the server or the database follow it, so that
+   * two databases they tell apart keep an entry each.
+   */
   #server(): string {
     const { dialect, url, root } = this.project;
     if (!url) return "";
     if (dialect === "sqlite") return sqlitePath(url, root);
-    try {
-      const u = new URL(url);
-      return `${u.protocol}//${u.username}@${u.host}${u.pathname}`;
-    } catch {
-      return url;
-    }
+    return serverName(url, dialect, this.#libpq);
   }
 
   /** The database as a person names it: host, port and database, or the SQLite file. */
@@ -590,7 +606,8 @@ export class Session {
     // The engine opens the database itself: on SQLite the file the project names, and the statement
     // is prepared on the app's own SQLite drivers too, which are the app's, not the engine's.
     const target = dialect === "sqlite" ? sqlitePath(url, root) : url;
-    const c = await this.#engine.open(target);
+    // libpq's variables as the session started, which name its entries, set and unset alike.
+    const c = await this.#engine.open(target, Object.fromEntries(ENVIRONMENT.map((name) => [name, this.#libpq[name]])));
     let drivers: SqliteDriver[] | undefined;
     try {
       drivers = dialect === "sqlite" ? await openProjectDrivers(root, target) : undefined;
@@ -617,6 +634,77 @@ export async function releaseConnections(): Promise<void> {
 }
 
 const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
+
+/**
+ * The server `url` names, without credentials: the scheme, the user, the hosts and ports, and the
+ * path, read off the text as `server` in rust/reylo-build/src/analysis.rs reads them (both are held
+ * to entry-name-cases.json), since `URL` refuses a URL libpq reads, as `postgres://app@/shop` and a
+ * list of hosts. Then the parameters that choose the server or the database (`CHOOSING`), as
+ * `?name=value&…`, or nothing where it has none, which keeps the name its entries were written
+ * under. A name is matched decoded, as the engine and the bridge to a Unix socket read it
+ * (src/host-url.ts), and a header's in any case, as HTTP compares header names. A name and its
+ * value are kept as written, since their readers decode a value each their own way (libpq reads a
+ * `+` as a plus, ClickHouse and mysql2 as a space), so that a database written two ways is at most
+ * analyzed again under a name of its own. They keep the URL's order, which decides which of
+ * `socket` and `socketPath` the engine opens. On Postgres, the variables the engine and the bridge
+ * read for a part the URL leaves out (`ENVIRONMENT`) follow them, encoded.
+ */
+function serverName(url: string, dialect: Dialect, env: Record<string, string | undefined>): string {
+  const q = url.indexOf("?");
+  const [base, query] = q < 0 ? [url, ""] : [url.slice(0, q), url.slice(q + 1)];
+  const s = base.indexOf("://");
+  const [scheme, rest] = s < 0 ? ["", base] : [base.slice(0, s), base.slice(s + 3)];
+  const p = rest.indexOf("/");
+  const [authority, path] = p < 0 ? [rest, ""] : [rest.slice(0, p), rest.slice(p)];
+  const a = authority.lastIndexOf("@");
+  const [user, host] = a < 0 ? ["", authority] : [authority.slice(0, a).split(":")[0]!, authority.slice(a + 1)];
+  const chosen = query ? query.split("&").filter((pair) => CHOOSING[dialect].includes(listed(pair))) : [];
+  if (dialect === "postgres") {
+    const named = new Set(chosen.map(listed));
+    // The authority's hosts, each with its port where it writes one: an IPv6 address in brackets.
+    const hosts = host.split(",").filter(Boolean).map((chunk) => /^\[[^\]]*\](?::(.*))?$/.exec(chunk)?.[1] ?? (chunk.startsWith("[") ? undefined : chunk.split(":")[1]));
+    const leftOut: Record<(typeof ENVIRONMENT)[number], boolean> = {
+      PGHOST: hosts.length === 0 && !named.has("host") && !named.has("hostaddr"),
+      // Several hosts with no port take 5432 each, as libpq reads them.
+      PGPORT: hosts.length <= 1 && !hosts.some((port) => port) && !named.has("port"),
+      PGUSER: !user && !named.has("user"),
+      PGDATABASE: (path === "" || path === "/") && !named.has("dbname"),
+      PGOPTIONS: !named.has("options"),
+    };
+    for (const name of ENVIRONMENT) if (leftOut[name] && env[name]) chosen.push(`${name}=${encodeURIComponent(env[name])}`);
+  }
+  return `${scheme}://${user}@${host}${path}${chosen.length ? `?${chosen.join("&")}` : ""}`;
+}
+
+/**
+ * The variables libpq reads for a part of the URL it leaves out, as the engine reads them
+ * (engine/native/src/postgres.rs), but for the system's user name, which a URL with no user takes
+ * on every machine it is copied to, so that a cache built in CI is still read on a laptop.
+ */
+const ENVIRONMENT = ["PGHOST", "PGPORT", "PGUSER", "PGDATABASE", "PGOPTIONS"] as const;
+
+/**
+ * The variables of `ENVIRONMENT` this process has, as the engine's connection reads them when it
+ * opens (src/engine.ts): on Windows in any case of a name, as Windows reads one, since a worker
+ * thread's copy of the environment, as the preload's, matches names exactly, and of two spellings
+ * the first in order, as Node passes a child.
+ */
+export function libpqEnvironment(env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform): Record<string, string> {
+  const value = (name: string) => (platform === "win32" ? env[Object.keys(env).filter((key) => key.toUpperCase() === name).sort()[0] ?? name] : env[name]);
+  return Object.fromEntries(ENVIRONMENT.flatMap((name) => (value(name) ? [[name, value(name)!]] : [])));
+}
+
+/**
+ * A URL parameter's name as `CHOOSING` lists it: decoded, or as written where it does not decode,
+ * and a header's in lower case.
+ */
+function listed(pair: string): string {
+  let name = pair.split("=")[0]!;
+  try {
+    name = decodeURIComponent(name);
+  } catch {}
+  return name.startsWith("http_header_") ? name.toLowerCase() : name;
+}
 
 function readEntry(file: string): Entry | undefined {
   if (!existsSync(file)) return undefined;
@@ -655,7 +743,7 @@ function writeEntry(cache: string, file: string, entry: Entry): void {
  * write), user operators and casts (the trust check reads them), view
  * definitions and column comments (a field's doc comment), and the server settings that change a statement's types;
  * and what the errors a statement may raise are read from: defaults (a domain's too), generated columns, policies and
- * operator classes on Postgres, and triggers, foreign keys, checks with their expressions and whether each is enforced, and every schema's stored functions on MySQL. SQLite's whole schema is
+ * operator classes on Postgres, and triggers, foreign keys, checks with their expressions and whether each is enforced, and stored routines with their arguments on MySQL. SQLite's whole schema is
  * its `sqlite_schema` table, and the functions of the SQLite that opened it are part of what an
  * analysis reads: another Node has another SQLite. A `"char"` column is cast to text:
  * `text || "char"` is ambiguous, and a query the server refuses leaves every entry unverified.
@@ -730,21 +818,41 @@ const CLICKHOUSE_FINGERPRINT = `SELECT concat(version(), ' ', toString(count()),
     UNION ALL SELECT cityHash64('f', name, create_query) FROM system.functions WHERE origin = 'SQLUserDefined'
     UNION ALL SELECT cityHash64('s', name, value) FROM system.settings WHERE changed
   )`;
+/**
+ * MySQL: a statement may read a table, a view or a function of any database on the server
+ * (`other.t`, `other.f()`), so each database's are in it but the server's own and Reylo Migrate's
+ * shadows (`reylo_shadow_…`, each made and dropped by one check under a name of its own, which a
+ * project's statements don't read), unless it is the URL's, as a dry run's shadow is for its type
+ * check: the URL's with no database's name, so that a
+ * database built the same way under another name, beside the same others, has the same
+ * fingerprint, and any other's with its own. `information_schema` lists only what the session's
+ * account may reach, so an account granted only the databases its statements read sees no other;
+ * and the account's TRIGGER privileges as the engine reads them, on the server, on the URL's
+ * database by its own name (a grant on a pattern names the pattern) and on its tables, without which
+ * a written table's triggers are hidden from it.
+ */
+const MYSQL_OWN = (schema: string) => `(${schema} = database() or ${schema} not in ('mysql', 'sys', 'information_schema', 'performance_schema') and left(${schema}, 13) <> 'reylo_shadow_')`;
+const MYSQL_IN = (schema: string) => `if(${schema} = database(), '', ${schema})`;
+const MYSQL_GRANTEE = "concat('''', substring_index(current_user(), '@', 1), '''@''', substring_index(current_user(), '@', -1), '''')";
+const MYSQL_FINGERPRINT = `select concat_ws(' ', @@version, @@sql_mode, count(*), sum(crc32(x)), bit_xor(crc32(x))) from (
+    select concat_ws(' ', 'c', ${MYSQL_IN("table_schema")}, table_name, column_name, ordinal_position, column_type, coalesce(character_set_name, ''), is_nullable, column_key, extra, coalesce(generation_expression, ''), sha2(column_comment, 256)) as x from information_schema.columns where ${MYSQL_OWN("table_schema")}
+    union all select concat_ws(' ', 's', ${MYSQL_IN("table_schema")}, table_name, index_name, non_unique, seq_in_index, column_name) from information_schema.statistics where ${MYSQL_OWN("table_schema")}
+    union all select concat_ws(' ', 'v', ${MYSQL_IN("table_schema")}, table_name, sha2(view_definition, 256)) from information_schema.views where ${MYSQL_OWN("table_schema")}
+    union all select concat_ws(' ', 'r', ${MYSQL_IN("routine_schema")}, routine_name, routine_type, coalesce(dtd_identifier, ''), sha2(coalesce(routine_definition, ''), 256)) from information_schema.routines where ${MYSQL_OWN("routine_schema")}
+    union all select concat_ws(' ', 'a', ${MYSQL_IN("specific_schema")}, specific_name, routine_type, ordinal_position, coalesce(parameter_mode, ''), coalesce(parameter_name, ''), dtd_identifier, coalesce(character_set_name, '')) from information_schema.parameters where ${MYSQL_OWN("specific_schema")} and ordinal_position > 0
+    union all select concat_ws(' ', 'g', ${MYSQL_IN("event_object_schema")}, event_object_table, trigger_name, event_manipulation, action_timing) from information_schema.triggers where ${MYSQL_OWN("event_object_schema")}
+    union all select concat_ws(' ', 'f', ${MYSQL_IN("constraint_schema")}, table_name, constraint_name, referenced_table_name, update_rule, delete_rule) from information_schema.referential_constraints where ${MYSQL_OWN("constraint_schema")}
+    union all select concat_ws(' ', 'k', ${MYSQL_IN("table_schema")}, table_name, constraint_name, constraint_type, enforced) from information_schema.table_constraints where ${MYSQL_OWN("table_schema")}
+    union all select concat_ws(' ', 'h', ${MYSQL_IN("constraint_schema")}, constraint_name, sha2(check_clause, 256)) from information_schema.check_constraints where ${MYSQL_OWN("constraint_schema")}
+    union all select concat_ws(' ', 'u', privilege_type) from information_schema.user_privileges where grantee = ${MYSQL_GRANTEE} and privilege_type = 'TRIGGER'
+    union all select concat_ws(' ', 'u', '', privilege_type) from information_schema.schema_privileges where grantee = ${MYSQL_GRANTEE} and privilege_type = 'TRIGGER' and table_schema = database()
+    union all select concat_ws(' ', 'u', '', table_name, privilege_type) from information_schema.table_privileges where grantee = ${MYSQL_GRANTEE} and privilege_type = 'TRIGGER' and table_schema = database()
+  ) t`;
 /** Each dialect's schema fingerprint query. The Rust crate keeps copies (rust/reylo-build/src/fingerprint-*.sql), which tests/rust-fingerprints.test.ts holds to these. */
 export const FINGERPRINT: Record<ResolvedProject["dialect"], string> = {
   postgres: POSTGRES_FINGERPRINT,
   clickhouse: CLICKHOUSE_FINGERPRINT,
-  mysql: `select concat_ws(' ', @@version, @@sql_mode, count(*), sum(crc32(x)), bit_xor(crc32(x))) from (
-    select concat_ws(' ', 'c', table_name, column_name, ordinal_position, column_type, coalesce(character_set_name, ''), is_nullable, column_key, extra, coalesce(generation_expression, ''), sha2(column_comment, 256)) as x from information_schema.columns where table_schema = database()
-    union all select concat_ws(' ', 's', table_name, index_name, non_unique, seq_in_index, column_name) from information_schema.statistics where table_schema = database()
-    union all select concat_ws(' ', 'v', table_name, sha2(view_definition, 256)) from information_schema.views where table_schema = database()
-    union all select concat_ws(' ', 'r', routine_name, routine_type, coalesce(dtd_identifier, ''), sha2(coalesce(routine_definition, ''), 256)) from information_schema.routines where routine_schema = database()
-    union all select concat_ws(' ', 'p', routine_schema, routine_name) from information_schema.routines where routine_schema <> database() and routine_type = 'FUNCTION'
-    union all select concat_ws(' ', 'g', event_object_table, trigger_name, event_manipulation, action_timing) from information_schema.triggers where event_object_schema = database()
-    union all select concat_ws(' ', 'f', table_name, constraint_name, referenced_table_name, update_rule, delete_rule) from information_schema.referential_constraints where constraint_schema = database()
-    union all select concat_ws(' ', 'k', table_name, constraint_name, constraint_type, enforced) from information_schema.table_constraints where table_schema = database()
-    union all select concat_ws(' ', 'h', constraint_name, sha2(check_clause, 256)) from information_schema.check_constraints where constraint_schema = database()
-  ) t`,
+  mysql: MYSQL_FINGERPRINT,
   sqlite: `select type, name, tbl_name, coalesce(sql, '') from sqlite_schema
     union all select 'function', name, type, narg from pragma_function_list order by 1, 2, 3, 4`,
 };

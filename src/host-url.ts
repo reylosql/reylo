@@ -66,14 +66,15 @@ function postgresSocket(base: string, pairs: string[], env: Record<string, strin
   const [, encodedHost = "", authorityPort] = /^(.*?)(?::(\d+))?$/.exec(authority) ?? [];
   const host = params.host ?? (encodedHost ? decodeURIComponent(encodedHost) : params.hostaddr ? undefined : env.PGHOST);
   if (!host?.startsWith("/") || host.includes(",")) return undefined;
-  const port = params.port || authorityPort || env.PGPORT || "5432";
+  // A `port=` the query names, even empty, takes no `PGPORT`: libpq reads an empty one as 5432.
+  const port = params.port !== undefined ? params.port || "5432" : authorityPort || env.PGPORT || "5432";
   // Its TLS settings too: a Unix socket carries none, and the bridge offers none.
   return { path: `${host.replace(/\/$/, "")}/.s.PGSQL.${port}`, params: ["host", "port", "sslmode", "ssl"] };
 }
 
-/** The socket file a mysql2 URL names: `socketPath`, or `socket`. */
+/** The socket file a mysql2 URL names: `socketPath`, or `socket`, a `+` in it a space, as mysql2 reads a URL's parameters. */
 function mysqlSocket(pairs: string[]): { path: string; params: string[] } | undefined {
-  const params = Object.fromEntries(pairs.map(splitPair));
+  const params = Object.fromEntries(pairs.map((pair) => splitPair(pair.replaceAll("+", " "))));
   const path = params.socketPath || params.socket;
   // Its TLS settings too: the bridge takes TLS out of the server's greeting (`gateMysql`), and a
   // Unix socket carries none.
