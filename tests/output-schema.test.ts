@@ -22,17 +22,22 @@ import { clickhouseDatabase, clickhouseLive, closeSessions, DRIVERS, INDEX, mysq
 // the same values.
 
 /** Rows as JSON writes them, by the convention the output schema states: a BigInt as the integer it is, bytes as their base64, a Set as an array of its members. */
-function asJson(rows: unknown): unknown {
-  return JSON.parse(
-    JSON.stringify(rows, function (this: Record<string, unknown>, key, written) {
-      const v = this[key];
-      if (typeof v === "bigint") return (JSON as unknown as { rawJSON(text: string): unknown }).rawJSON(String(v));
-      if (v instanceof Uint8Array) return Buffer.from(v).toString("base64");
-      if (v instanceof Set) return [...v];
-      return written;
-    }),
-  );
+function asJson(rows: unknown): string {
+  return JSON.stringify(rows, function (this: Record<string, unknown>, key, written) {
+    const v = this[key];
+    if (typeof v === "bigint") return (JSON as unknown as { rawJSON(text: string): unknown }).rawJSON(String(v));
+    if (v instanceof Uint8Array) return Buffer.from(v).toString("base64");
+    if (v instanceof Set) return [...v];
+    return written;
+  });
 }
+
+/** JSON read back exactly, a whole number past 2^53 - 1 as a BigInt of its digits, which Reylo's validator refuses as a number that may already be another one. */
+const exactly = (text: string): unknown => JSON.parse(text, (_key, x, context?: { source?: string }) => (typeof x === "number" && !Number.isSafeInteger(x) && /^-?\d+$/.test(context?.source ?? "") ? BigInt(context!.source!) : x));
+
+/** A run's refusal of a 64-bit integer inside a document JSON.parse would round, which only a type of 64-bit integers may meet. */
+const refusesRounded = (message: string) => /holds, inside its JSON.*, the integer -?\d+, which is (past|below)/.test(message);
+const wide = /int8|bigint|Int64|UInt64/i;
 
 /**
  * ajv, as a consumer of the schemas reads them, with every format they name held to what it claims:
@@ -101,13 +106,17 @@ async function check(root: string, cases: readonly Case[], statements: (table: s
         continue;
       }
       let rows: unknown;
+      let text: string;
       try {
-        rows = asJson(await run(q));
+        text = asJson(await run(q));
+        rows = JSON.parse(text);
       } catch (e) {
-        problems.push(`${about}: the run throws ${(e as Error).message.split("\n")[0]}`);
+        const message = (e as Error).message.split("\n")[0]!;
+        // An edge of a 64-bit integer inside a document is refused rather than returned rounded.
+        if (!(refusesRounded(message) && wide.test(c[0]))) problems.push(`${about}: the run throws ${message}`);
         continue;
       }
-      const error = validate(q.outputSchema, rows);
+      const error = validate(q.outputSchema, exactly(text));
       if (error !== undefined) problems.push(`${about}: ${error.message} in ${JSON.stringify(rows)} against ${JSON.stringify(q.outputSchema)}`);
       for (const [which, schema] of [["output", q.outputSchema], ["input", q.inputSchema]] as const) {
         try {
