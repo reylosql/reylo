@@ -46,13 +46,13 @@ const hashOf = (...parts: (string | Buffer)[]) => {
 
 /**
  * The hash a drawn card's address carries (`?<hash>`): of what the card is drawn from, the page's
- * title, the drawing (`docs-kit/og`) and the site's config, so that a preview cached under the old
- * card is fetched again once the card changes. For a site's own route that draws a card too.
+ * title (`parts`), the drawing (`docs-kit/og`) and the site's config, so that a preview cached under
+ * the old card is fetched again once the card changes. For a site's own route that draws a card too.
  */
-export async function ogCardHash(title: string): Promise<string> {
+export async function ogCardHash(...parts: string[]): Promise<string> {
   const drawing = await readFile(createRequire(path.resolve('package.json')).resolve('docs-kit/og'));
   const config = await Promise.all(['docs.config.ts', 'docs.config.tsx'].filter((file) => existsSync(file)).map((file) => readFile(file)));
-  return hashOf(title, '\0', drawing, ...config);
+  return hashOf(...parts.flatMap((part) => [part, '\0']), drawing, ...config);
 }
 
 /**
