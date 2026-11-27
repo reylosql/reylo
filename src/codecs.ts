@@ -3,8 +3,9 @@
 // family is a kind of the type descriptor format (spec/index.ts). A codec reaches every position
 // Reylo decodes itself: a row's columns, an array's elements, a Postgres row value's fields, a
 // ClickHouse tuple's elements, by name or by place, and a map's pairs, a tagged union's value, a
-// structured parameter's members. A value inside a JSON document the
-// statement builds is the document's, and keeps the type JSON gives it. Every codec is exact or
+// structured parameter's members. A ClickHouse Variant takes a codec only where every member is of
+// its family, since its decoded value no longer says which member it is. A value inside a JSON
+// document the statement builds is the document's, and keeps the type JSON gives it. Every codec is exact or
 // refuses a value it cannot hold: a number refuses a decimal a double does not hold, and a Temporal
 // class refuses what no Temporal value is (`infinity`, MySQL's zero date, Postgres's `24:00:00`, an
 // interval whose parts differ in sign). A 64-bit integer has no codec: a bigint is its one exact

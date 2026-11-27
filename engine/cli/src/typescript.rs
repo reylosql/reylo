@@ -745,6 +745,13 @@ fn render_type(t: &Value, in_json: bool, dialect: &str, codecs: &Value) -> Strin
                 .collect::<Vec<_>>()
                 .join(" | ");
         }
+        // A ClickHouse Variant's value is its member's own, so its type is the union of its
+        // members' (src/render.ts); a member of no known type leaves any value. A codec of the
+        // Variant whole took it above; past that no codec reaches a member.
+        "union" if !in_json && dialect == "clickhouse" => {
+            let members = dedupe(items(&t["members"]).iter().map(|m| render_type(m, false, dialect, NO_CODECS)).collect());
+            return if members.iter().any(|m| m == "unknown") { "unknown".into() } else { members.join(" | ") };
+        }
         k @ ("range" | "multirange") if !in_json && dialect == "postgres" => {
             let range = range_of(&render_type(&t["subtype"], false, dialect, codecs), false);
             return if k == "range" { range } else { format!("({range})[]") };
@@ -1677,6 +1684,21 @@ mod tests {
         assert_eq!(column_kind(&with_bases(&ints, a["domains"].as_object().unwrap()), "postgres"), "{int[]}[]");
         assert_eq!(printed(&a, "postgres", &Value::Null, false).returns, "{ x: ((number | null)[] | null)[] }[]");
         assert_eq!(printed(&a, "postgres", &Value::Null, true).returns, "{ x: NestedArray<NestedArray<number | null> | null> }[]");
+    }
+
+    #[test]
+    fn a_clickhouse_variant_is_whichever_of_its_types_its_value_has() {
+        // `Variant(Array(UInt8), String)`, and a Variant with a member of no known type.
+        let bytes = json!({ "kind": "array", "element": { "type": { "kind": "integer", "bits": 8, "unsigned": true, "label": "UInt8" } } });
+        let a = analysis(
+            json!([
+                { "name": "v", "nullable": true, "type": { "kind": "union", "members": [bytes.clone(), { "kind": "text", "label": "String" }] } },
+                { "name": "w", "nullable": true, "type": { "kind": "union", "members": [bytes, { "kind": "unknown" }] } },
+            ]),
+            json!([]),
+            "many",
+        );
+        assert_eq!(printed(&a, "clickhouse", &Value::Null, false).returns, "{ v: number[] | string | null; w: unknown | null }[]");
     }
 
     #[test]

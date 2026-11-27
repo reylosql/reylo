@@ -87,6 +87,15 @@ test("a union is either", () => {
   assert.equal(renderType(doc({ kind: "array", element: { type: oneOf({ kind: "boolean" }, my("bigint")), nullable: true } }), false, "mysql"), "(boolean | number | null)[]");
   // A member whose JSON form is unknown is nothing known inside a document.
   assert.equal(renderType(oneOf(my("bigint"), { kind: "opaque", label: "mystery" }), true, "mysql"), "Json");
+  // A ClickHouse Variant is whichever of its types its value has, each as a column of that type
+  // is, an array among them; one member of no known type leaves any value.
+  const bytes = array({ kind: "integer", bits: 8, unsigned: true }, false);
+  assert.equal(renderType(oneOf(bytes, { kind: "text" }), false, "clickhouse"), "number[] | string");
+  assert.equal(renderType(oneOf(bytes, { kind: "unknown" }), false, "clickhouse"), "unknown");
+  // A codec reaches a Variant whose members are all of its family, and no member of any other.
+  const decimal = (precision: number): EngineType => ({ kind: "decimal", precision, min_scale: 2, max_scale: 2 });
+  assert.equal(renderType(oneOf(decimal(9), decimal(18)), false, "clickhouse", { decimal: "number" }), "number");
+  assert.equal(renderType(oneOf(array(decimal(9), false), { kind: "text" }), false, "clickhouse", { decimal: "number" }), "string[] | string");
 });
 
 test("pgvector's vector and halfvec are arrays of numbers, as columns and as parameters; inside a document their text", () => {
