@@ -765,7 +765,7 @@ export default {
 };
 ```
 
-D1 rounds an integer past 2^53, so Reylo throws an error rather than return it, even for a `BIGINT` column.
+D1 rounds an integer past 2^53, so Reylo throws an error rather than return it, even for a `BIGINT` column. A whole number from 2^53 to 2^63 in a column with no type throws too, since it may be such an integer.
 
 ### Durable Objects
 
@@ -791,7 +791,7 @@ export class Board extends DurableObject {
 }
 ```
 
-The storage rounds an integer past 2^53, so Reylo throws rather than return one, even from a `BIGINT` column. It can't bind a `bigint` parameter past 2^53 either. Reylo rejects one unless it's written to a `BIGINT` column.
+The storage rounds an integer past 2^53, so Reylo throws rather than return one, even from a `BIGINT` column. A whole number from 2^53 to 2^63 in a column with no type throws too, since it may be such an integer. It can't bind a `bigint` parameter past 2^53 either. Reylo rejects one unless it's written to a `BIGINT` column.
 
 ### `sqlite3`
 
@@ -805,7 +805,7 @@ const db = new sqlite3.Database("app.db");
 const user = await getUser.run(db, { id: 1 });
 ```
 
-The driver rounds an integer past 2^53, so Reylo throws rather than return one, even from a `BIGINT` column. It can't bind a `bigint` parameter past 2^53 either. Reylo rejects one unless it's written to a `BIGINT` column.
+The driver rounds an integer past 2^53, so Reylo throws rather than return one, even from a `BIGINT` column. A whole number from 2^53 to 2^63 in a column with no type throws too, since it may be such an integer. It can't bind a `bigint` parameter past 2^53 either. Reylo rejects one unless it's written to a `BIGINT` column.
 
 ### `sqlite`
 
@@ -824,7 +824,7 @@ await getUser.run(db, { id: 1 });
 await db.exec("commit");
 ```
 
-The driver rounds an integer past 2^53, so Reylo throws rather than return one, even from a `BIGINT` column. It can't bind a `bigint` parameter past 2^53 either. Reylo rejects one unless it's written to a `BIGINT` column.
+The driver rounds an integer past 2^53, so Reylo throws rather than return one, even from a `BIGINT` column. A whole number from 2^53 to 2^63 in a column with no type throws too, since it may be such an integer. It can't bind a `bigint` parameter past 2^53 either. Reylo rejects one unless it's written to a `BIGINT` column.
 
 ### `Bun.sql`
 
@@ -847,7 +847,7 @@ await db.begin(async (tx) => {
 });
 ```
 
-Without `safeIntegers`, Bun rounds an integer past 2^53, so Reylo throws rather than return one. Before Bun 1.4.4, `Bun.sql` returns no rows for a query with a `"` inside a single-quoted string. Pass such text as a parameter instead.
+Without `safeIntegers`, Bun rounds an integer past 2^53, so Reylo throws rather than return one. A whole number from 2^53 to 2^63 in a column with no type throws either way, since it may be such an integer. Before Bun 1.4.4, `Bun.sql` returns no rows for a query with a `"` inside a single-quoted string. Pass such text as a parameter instead.
 
 ### Drizzle
 

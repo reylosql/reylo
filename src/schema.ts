@@ -241,9 +241,11 @@ function scalar(t: EngineType, dialect: Dialect, input: boolean): Schema {
     }
     const kinds = columnKind(t, dialect).split("|");
     if (kinds.length > 1) {
-      // A NUMERIC: whichever storage class the row stored, an integer being a number too.
+      // A NUMERIC, or a number SQLite computes: whichever storage class the row holds, an integer
+      // being a number too.
       const types = [...new Set(kinds.map((k) => kindSchema(scalarKind(k), t, dialect).type as string))];
-      return { type: types.includes("number") ? types.filter((type) => type !== "integer") : types };
+      const type = types.includes("number") ? types.filter((type) => type !== "integer") : types;
+      return { type: type.length === 1 ? type[0] : type };
     }
     // A column of a table that is not STRICT declared with an integer's name: SQLite keeps a REAL
     // there that it cannot convert, which `.run()` returns as the number it is (src/decode-sqlite.ts).
