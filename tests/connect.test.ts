@@ -429,8 +429,10 @@ test("MySQL: an analysis interrupted by KILL QUERY while it waits behind an alte
       assert.ok(tries < 100, "the analysis never waited for the table's metadata lock");
       await new Promise((done) => setTimeout(done, 50));
     }
+    // Its rejection is handled from before the kill, so it is never unhandled for a moment.
+    const refused = assert.rejects(analyzing, (err: Error) => !(err instanceof Unreachable) && err.message === "The server interrupted the analysis of this statement: Query execution was interrupted (1317)");
     await db.query(`kill query ${session}`);
-    await assert.rejects(analyzing, (err: Error) => !(err instanceof Unreachable) && err.message === "The server interrupted the analysis of this statement: Query execution was interrupted (1317)");
+    await refused;
     await db.query("commit");
     await altering;
     assert.deepEqual((await c.analyze(statement)).columns.map((col) => col.name), ["id", "name"]);
