@@ -24,10 +24,10 @@
 // and a column whose kind is `bool` (src/values.ts) is made a boolean after the driver, a value
 // other than 0 or 1 refused (`truth`).
 import { lastOfEach, namesInResult, rowOf } from "./row.ts";
-import { bigInteger, coerce, columnKind, DecodeError, describe, truth, utf8, withFraction, type Columns, type Kind } from "./values.ts";
+import { bigInteger, coerce, DecodeError, describe, truth, utf8, withFraction, type Columns, type Kind } from "./values.ts";
 import { bunRows } from "./decode.ts";
 import { readMysqlError } from "./query-error.ts";
-import type { AnyClient as Client, Bound, Marks, QueryModule, Runtime } from "./execute.ts";
+import { literalsAtMarks, takesFloat, type AnyClient as Client, type Bound, type Marks, type QueryModule, type Runtime } from "./execute.ts";
 import type { SqlMode } from "./engine-core.ts";
 
 type AnyClient = Record<string, any>;
@@ -521,21 +521,14 @@ function asBuffer(v: unknown) {
  * the statement's strings under, a mark need not be a placeholder of the session's, and the number
  * goes as it is.
  */
-function signedZeros(query: QueryModule<"mysql">, { text, values, names, marks }: Bound): { text: string; values: unknown[] } {
-  if (marks?.length !== values.length || query.sqlMode !== undefined) return { text, values };
-  const zero = (v: unknown, i: number) => {
-    const type = query.inputs?.[names[i]!]?.type;
-    return Object.is(v, -0) && type !== undefined && columnKind(type, "mysql") === "float" && text.slice(...marks[i]!) === "?";
-  };
-  let written = "";
-  let at = 0;
-  const kept: unknown[] = [];
-  values.forEach((v, i) => {
-    if (!zero(v, i)) return void kept.push(v);
-    written += text.slice(at, marks[i]![0]) + "(-0e0)";
-    at = marks[i]![1];
+function signedZeros(query: QueryModule<"mysql">, bound: Bound): { text: string; values: unknown[] } {
+  if (query.sqlMode !== undefined) return bound;
+  // A type its value decides between (`:i + :u`, a BIGINT or a DOUBLE) takes the DOUBLE -0 mysql2
+  // binds, as a structured parameter's member does (src/rows.ts).
+  return literalsAtMarks(bound, (v, i) => {
+    const type = query.inputs?.[bound.names[i]!]?.type;
+    return Object.is(v, -0) && type !== undefined && takesFloat(type, "mysql") ? "(-0e0)" : undefined;
   });
-  return { text: written + text.slice(at), values: kept };
 }
 
 /** A MySQL statement's rows on each MySQL driver's client, or undefined on any other client. */

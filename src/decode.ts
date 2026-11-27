@@ -28,7 +28,7 @@
 // row, and a built-in catalog table's row type is below 10000 too.
 import { civilFromDays, coerce, DecodeError, elementKind, isRowKind, numbersInJson, scalarKind, textDecoder, utf8, wholeArrayKind, withFraction, withinDimensions, type Columns, type Decoder, type JsonNumbers, type Kind } from "./values.ts";
 import { lastOfEach, namesInResult, rowOf, type RowBuilder } from "./row.ts";
-import { arrayLiteral, asByteaHex, EFFECT_SQL, isJsonValue, jsonText, jsonValue, postgresText, type AnyClient as Client, type Bound, type EffectSql, type Marks, type QueryModule, type Runtime } from "./execute.ts";
+import { arrayLiteral, asByteaHex, EFFECT_SQL, isJsonValue, jsonElements, jsonText, postgresText, type AnyClient as Client, type Bound, type EffectSql, type Marks, type QueryModule, type Runtime } from "./execute.ts";
 import { readPostgresError } from "./query-error.ts";
 
 type AnyClient = Record<string, any>;
@@ -997,7 +997,7 @@ async function runPostgres(c: Client, query: QueryModule<"postgres">, { text, va
   // left the connection out of step. Each element of a `jsonb[]` is a JSON value.
   const bound = values.map((v, i) => {
     const t = type(i);
-    return Array.isArray(v) && t?.kind === "array" && !isJsonParam(v, i) ? arrayLiteral(t.element.type.kind === "json" ? v.map((e) => (e == null ? e : JSON.stringify(e))) : v, query.inputs?.[names[i]!]?.delimiter) : v;
+    return Array.isArray(v) && t?.kind === "array" && !isJsonParam(v, i) ? arrayLiteral(t.element.type.kind === "json" ? jsonElements(v, names[i]!) : v, query.inputs?.[names[i]!]?.delimiter) : v;
   });
   // A JSON parameter goes to pg's family, PGlite and Neon as its JSON text, and to postgres.js
   // as its JSON text declared `unknown` (below). Bun.sql serializes a value for a JSON
@@ -1008,7 +1008,7 @@ async function runPostgres(c: Client, query: QueryModule<"postgres">, { text, va
   // client made with `prepare: false`, as one behind a pooler in transaction mode is, learns no
   // parameter's type and sends an object as its String() ("invalid input syntax for type json"),
   // so it gets the JSON text, which the server reads as the parameter's type.
-  const json = () => bound.map((v, i) => (isJsonParam(v, i) ? jsonText(v) : v));
+  const json = () => bound.map((v, i) => (isJsonParam(v, i) ? jsonText(v, "postgres", names[i]!) : v));
   // Effect SQL's client (src/effect.ts) binds a string as an untyped text parameter, which the
   // server reads as the parameter's type, and a number or a Date by its JavaScript type, so every
   // value goes as the text Postgres reads.
@@ -1045,8 +1045,16 @@ async function runPostgres(c: Client, query: QueryModule<"postgres">, { text, va
     // as it is either way. A query without inputs gets its values as they are, as on every driver.
     const bun = typeof c.commitDistributed === "function";
     // Each handle Bun.sql gives out, a transaction's, a savepoint's and a reserved connection's too, carries its client's options.
-    const bunJson = bun && c.options?.prepare === false ? jsonText : (v: unknown) => ({ toJSON: () => jsonValue(v) });
-    const mapped = bun ? bound.map((v, i) => (isJsonParam(v, i) ? bunJson(v) : v)) : query.inputs ? bound.map((v, i) => c.typed(postgresText(query, names[i]!, v), 705)) : bound;
+    // The value its toJSON() returns is the JSON text read back, a -0 in it as JSON.rawJSON("-0"),
+    // which Bun writes as it is, where JSON.stringify writes 0.
+    const raw = (JSON as { rawJSON?: (text: string) => unknown }).rawJSON;
+    const bunJson = (v: unknown, i: number) => {
+      const written = jsonText(v, "postgres", names[i]!);
+      if (c.options?.prepare === false || written === undefined) return written;
+      const value: unknown = JSON.parse(written, (_key, x: unknown) => (Object.is(x, -0) && raw !== undefined ? raw("-0") : x));
+      return { toJSON: () => value };
+    };
+    const mapped = bun ? bound.map((v, i) => (isJsonParam(v, i) ? bunJson(v, i) : v)) : query.inputs ? bound.map((v, i) => c.typed(postgresText(query, names[i]!, v), 705)) : bound;
     if (!bun) return await postgresJs(c, text, mapped, query.columns, query.row);
     return (await bunRaw(c, text, mapped, query.columns, query.row)) ?? bunRows(await c.unsafe(text, mapped), query.columns, true);
   }

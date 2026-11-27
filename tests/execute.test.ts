@@ -902,7 +902,7 @@ test("mysql: mariadb, which writes a value that is not a Buffer as JSON, gets a 
   }
 });
 
-test("mysql: a DOUBLE or FLOAT of -0 goes to mariadb and PlanetScale, which write a number into the statement and -0 as 0, written in at each of its places as the float (-0e0), the rest left to the driver; mysql2 gets the number, which it binds as a DOUBLE", async () => {
+test("mysql: a DOUBLE or FLOAT of -0, and one of a type its value decides between that may be a DOUBLE, goes to mariadb and PlanetScale, which write a number into the statement and -0 as 0, written in at each of its places as the float (-0e0), the rest left to the driver; mysql2 gets the number, which it binds as a DOUBLE", async () => {
   // A query defined by hand may name a parameter twice, which a build refuses; the first place types it.
   const text = "update r set d = ?, f = ?, i = ? + ?, payload = json_array(?)";
   const q: QueryModule<"mysql"> = { dialect: "mysql", sql: "update r set d = :d, f = :f, i = :i + :u, payload = json_array(:d)", params: ["d", "f", "i", "u"], text, order: ["d", "f", "i", "u", "d"], marks: [[17, 18], [24, 25], [31, 32], [35, 36], [59, 60]], inputs: { d: { type: myType("double") }, f: { type: myType("float") }, i: { type: myType("int") }, u: { type: oneOf(myType("bigint"), myType("double")) } } };
@@ -911,8 +911,8 @@ test("mysql: a DOUBLE or FLOAT of -0 goes to mariadb and PlanetScale, which writ
   const planetscale = { execute: async (sql: string, values: unknown[] | null) => (seen.push([sql, values]), { rows: [] }) };
   const mysql2 = { query: async () => [[], []], execute: async (options: { sql: string }, values: unknown[]) => (seen.push([options.sql, values]), [[], []]) };
   for (const client of [mariadb, planetscale, mysql2]) await execute(client as never, q, { d: -0, f: -0, i: -0, u: -0 });
-  const written = "update r set d = (-0e0), f = (-0e0), i = ? + ?, payload = json_array((-0e0))";
-  assert.deepEqual(seen, [[written, [-0, -0]], [written, [-0, -0]], [text, [-0, -0, -0, -0, -0]]]);
+  const written = "update r set d = (-0e0), f = (-0e0), i = ? + (-0e0), payload = json_array((-0e0))";
+  assert.deepEqual(seen, [[written, [-0]], [written, [-0]], [text, [-0, -0, -0, -0, -0]]]);
   // A -0 alone leaves no value for the driver to write.
   const alone: QueryModule<"mysql"> = { dialect: "mysql", sql: "select coalesce(:d, d) as x from r", params: ["d"], text: "select coalesce(?, d) as x from r", order: ["d"], marks: [[16, 17]], inputs: { d: { type: myType("double") } } };
   seen.length = 0;

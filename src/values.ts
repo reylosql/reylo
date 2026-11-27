@@ -105,6 +105,78 @@ export function numbersInJson(v: unknown, at: JsonNumbers, column = ""): unknown
   return v;
 }
 
+/** JSON text the writer puts in as it is (src/rows.ts: a 64-bit integer's digits, a float's -0 or infinity). */
+export class RawJson {
+  readonly text: string;
+  constructor(text: string) {
+    this.text = text;
+  }
+}
+
+/**
+ * A value as the JSON text the database reads, written as JSON.stringify writes it (each value's
+ * `toJSON()` read, a key whose value is undefined left out) but for the numbers JSON.stringify
+ * writes as null or 0, the inverse of `numbersInJson`. -0 keeps its sign: `-0` on Postgres, which
+ * writes a float's -0 so in a document, and `-0e0` on MySQL and SQLite, whose JSON reads `-0` as the
+ * integer 0. NaN and the infinities go where the database's JSON holds them: on Postgres as the
+ * text it writes for a float's inside a document, `"NaN"`, `"Infinity"` and `"-Infinity"`, and on
+ * SQLite an infinity as a number past a double's range, as SQLite writes one; the rest, which no
+ * value of the database holds, is refused through `fail`, with the place in the value where it
+ * stands (`at /n`, after `at`), rather than stored as null.
+ */
+export function writeJson(v: unknown, dialect: Dialect, fail: (message: string) => never, at = ""): string | undefined {
+  let special = false;
+  // The value as JSON.stringify writes it, where it holds no number that writes another, which the
+  // replacer sees after each `toJSON()`.
+  const plain = JSON.stringify(v, (_key, x: unknown) => {
+    if (x instanceof RawJson || (typeof x === "number" && (!Number.isFinite(x) || Object.is(x, -0)))) special = true;
+    return x;
+  });
+  return special ? jsonOf("", v, at, (n, place) => jsonNumber(n, place, dialect, fail)) : plain;
+}
+
+/** A number inside a document as the database reads it (`writeJson`). */
+function jsonNumber(n: number, at: string, dialect: Dialect, fail: (message: string) => never): string {
+  if (Object.is(n, -0)) return dialect === "postgres" ? "-0" : "-0e0";
+  if (Number.isFinite(n)) return String(n);
+  if (dialect === "postgres") return `"${n}"`;
+  if (dialect === "sqlite" && !Number.isNaN(n)) return n > 0 ? "9e999" : "-9e999";
+  return fail(`${at ? `at ${at} ` : ""}is ${n}, which ${dialect === "mysql" ? "MySQL" : dialect === "sqlite" ? "SQLite" : "ClickHouse"} holds no value for: write null or a string in its place.`);
+}
+
+/**
+ * JSON.stringify's algorithm (SerializeJSONProperty), each number written by `number` and each
+ * place named by its JSON Pointer, `at`. It runs on a value JSON.stringify has written once
+ * already (`writeJson`), which has thrown on a BigInt or a cycle.
+ */
+function jsonOf(key: string, value: unknown, at: string, number: (n: number, at: string) => string): string | undefined {
+  if (value !== null && typeof value === "object") {
+    const toJSON = (value as { toJSON?: unknown }).toJSON;
+    if (typeof toJSON === "function") value = toJSON.call(value, key);
+  }
+  if (value instanceof RawJson) return value.text;
+  if (value instanceof Number) value = Number(value);
+  else if (value instanceof String) value = String(value);
+  else if (value instanceof Boolean) value = value.valueOf();
+  else if (isRawJson(value)) return value.rawJSON;
+  if (typeof value === "number") return number(value, at);
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  const o = value as Record<string, unknown>;
+  if (Array.isArray(value)) return `[${Array.from({ length: value.length }, (_, i) => jsonOf(String(i), o[i], `${at}/${i}`, number) ?? "null").join(",")}]`;
+  return `{${Object.keys(o)
+    .flatMap((k) => {
+      const text = jsonOf(k, o[k], `${at}/${k.replace(/~/g, "~0").replace(/\//g, "~1")}`, number);
+      return text === undefined ? [] : [`${JSON.stringify(k)}:${text}`];
+    })
+    .join(",")}}`;
+}
+
+/** A value `JSON.rawJSON()` made, which JSON.stringify writes as its text. */
+function isRawJson(v: unknown): v is { rawJSON: string } {
+  const is = (JSON as { isRawJSON?: (v: unknown) => boolean }).isRawJSON;
+  return typeof is === "function" && is(v);
+}
+
 const POINT = "{ x: number; y: number }";
 
 /** The TypeScript type of each scalar kind: what a value of that kind is at run time. */

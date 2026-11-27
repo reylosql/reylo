@@ -9,7 +9,7 @@
 import type { EngineType, JsonSchema } from "./engine-type.ts";
 import type { Marks } from "./execute.ts";
 import { validate, withDefaults } from "./json-schema.ts";
-import { columnKind, describe, given, hstoreText, ParameterError, postgresInterval, postgresLiteral, postgresYear, vectorText, zoned } from "./values.ts";
+import { columnKind, describe, given, hstoreText, ParameterError, postgresInterval, postgresLiteral, postgresYear, RawJson as Raw, vectorText, writeJson, zoned } from "./values.ts";
 
 export { describe, zoned } from "./values.ts";
 
@@ -43,14 +43,6 @@ const INTEGERS: Record<string, readonly [bigint, bigint]> = {
   // SQLite's INTEGER is a 64-bit integer.
   integer: [-TWO_63, TWO_63 - BigInt(1)],
 };
-
-/** Raw JSON text for a value the writer puts in as it is. */
-class Raw {
-  readonly text: string;
-  constructor(text: string) {
-    this.text = text;
-  }
-}
 
 /**
  * Checks a structured parameter's value against its column list, and gives the value to bind:
@@ -98,8 +90,8 @@ export function prepareRows(name: string, type: RowsType, value: unknown, dialec
         const filled = withDefaults(f.schema, checked);
         const failure = validate(f.schema, filled);
         if (failure) fail(`${where}"${f.name}"${failure.path ? ` at ${failure.path}` : ""} ${failure.message}.`);
-        put(f.name, jsonMember(f, filled, dialect));
-      } else put(f.name, jsonMember(f, checked, dialect));
+        put(f.name, jsonMember(f, filled, dialect, (message) => fail(`${where}"${f.name}" ${message}`)));
+      } else put(f.name, jsonMember(f, checked, dialect, (message) => fail(`${where}"${f.name}" ${message}`)));
     }
     // One statement inserts every row of a call, so on MySQL, which copies no default, its column
     // list is the same for each: a key one row leaves out and another gives cannot have its
@@ -118,16 +110,16 @@ export function prepareRows(name: string, type: RowsType, value: unknown, dialec
   const keys = present ?? new Set(type.fields.map((f) => f.name));
   if (inserted && !type.fields.some((f) => keys.has(f.name))) fail("every key is left out, so the insert would name no column; give one at least.");
   const shaped = type.one ? out[0] : out;
-  return { value: dialect === "postgres" ? shaped : write(shaped), present: keys };
+  return { value: dialect === "postgres" ? shaped : writeJson(shaped, dialect, fail), present: keys };
 }
 
 /**
- * A JSON member's value as JSON.stringify writes it, where the rows go to the database as JSON
- * text: it reads a value's `toJSON()` (a Date's) and leaves out a key whose value is undefined, as
- * a JSON parameter of its own is written. Postgres takes the rows as they are.
+ * A JSON member's value as a JSON parameter of its own is written (src/values.ts, `writeJson`),
+ * where the rows go to the database as JSON text: it reads a value's `toJSON()` (a Date's) and
+ * leaves out a key whose value is undefined. Postgres takes the rows as they are, and writes them so.
  */
-function jsonMember(f: RowField, v: unknown, dialect: Dialect): unknown {
-  return dialect !== "postgres" && f.type.kind === "json" ? new Raw(JSON.stringify(v)) : v;
+function jsonMember(f: RowField, v: unknown, dialect: Dialect, fail: (message: string) => never): unknown {
+  return dialect !== "postgres" && f.type.kind === "json" ? new Raw(writeJson(v, dialect, fail)!) : v;
 }
 
 /** One value checked against its type, as the JSON the database reads; `fail` says why not. */
@@ -405,18 +397,6 @@ function decimal(type: EngineType, written: string, v: unknown, fail: (message: 
     if (whole.length > precision - scale) fail(`is ${written}, which holds at most ${precision - scale} digit${precision - scale === 1 ? "" : "s"} before the point; got ${text}.`);
   }
   return typeof v === "bigint" ? v.toString() : v;
-}
-
-/** The checked rows as JSON text, each `Raw` value (a 64-bit integer's digits, -0, an infinity) as it is. */
-function write(v: unknown): string {
-  if (v instanceof Raw) return v.text;
-  if (Array.isArray(v)) return `[${v.map(write).join(",")}]`;
-  if (v !== null && typeof v === "object") {
-    return `{${Object.entries(v as Record<string, unknown>)
-      .map(([k, x]) => `${JSON.stringify(k)}:${write(x)}`)
-      .join(",")}}`;
-  }
-  return JSON.stringify(v);
 }
 
 /**
