@@ -631,9 +631,9 @@ impl Builder<'_> {
         let shape = self.build(e);
         // A value a query in scope may group by WITH ROLLUP is NULL in its super-aggregate rows,
         // whatever builds it: an object, a subquery, or a fallback that is never NULL itself
-        // (`ifnull(…, json_array())`), as is one inside it ([`Builder::rolled_key`]). One over an
-        // aggregate or a window call of its own query is no GROUP BY item, which can hold neither.
-        if self.rolled_key() && self.own_aggregates(e) == 0 { force_nullable(shape) } else { shape }
+        // (`ifnull(…, json_array())`), as is one inside it ([`Builder::rolled_key`]). One that calls
+        // an aggregate of its own query is no GROUP BY item, which can hold none.
+        if self.rolled_key() && !crate::mysql::has_aggregate(e) { force_nullable(shape) } else { shape }
     }
 
     fn build(&mut self, e: &Expr) -> Shape {

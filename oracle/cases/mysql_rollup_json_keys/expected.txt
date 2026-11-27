@@ -1,9 +1,11 @@
+aggregate_text.sql: many () -> { o: json { count(: varchar(≤20)? }?, n: bigint }
 alias_in_key.sql: many () -> { o: json { t: varchar(≤20)? }?, p: json { t: varchar(≤20)? }?, n: bigint }
 alias_past_ascii.sql: many () -> { É: json { t: varchar(≤20)? }?, n: bigint }
 coalesce.sql: many () -> { o: json?, n: bigint }
 correlated.sql: many () -> { o: json { k: { t: varchar(≤20)? }? }?, n: bigint }
 derived.sql: many () -> { o: json { t: varchar(≤20)? }?, n: bigint }
 ifnull_key.sql: many () -> { o: json { k: int?[]? }?, n: bigint }
+ifnull_key_having.sql: many () -> { o: json { k: int?[]? }?, n: bigint }
 letter_case.sql: many () -> { o: json { T: varchar(≤20)? }?, n: bigint }
 nested.sql: many () -> { o: json { k: { t: varchar(≤20)? }? }?, n: bigint }
 outer_derived.sql: many () -> { o: json { k: { t: varchar(≤20)? }? }? }
@@ -11,5 +13,5 @@ subquery.sql: one () -> { o: json { k: { t: varchar(≤20)? }? }? }
 view.sql: many () -> { o: json { t: varchar(≤20)? }?, n: bigint }
 view_in_subquery.sql: one () -> { o: json { k: { t: varchar? }? }? }
 view_schema.sql: many () -> { o: json { t: varchar(≤20)? }?, n: bigint }
-window_key.sql: many () -> { w: json ({ t: varchar(≤20)? }?)[] }
+window_key.sql: many () -> { w: json ({ t: varchar(≤20)? }?)[]? }
 with_query.sql: many () -> { o: json { t: varchar(≤20)? }?, n: bigint }
