@@ -1495,7 +1495,7 @@ impl Type {
                 if i.bounds.exclusive_min.is_some() || i.bounds.exclusive_max.is_some() {
                     return fail("a whole-number kind writes its bounds inclusive".into());
                 }
-                check_order(&i.bounds, decimal_order).or_else(fail)?;
+                check_order(&i.bounds, number_order).or_else(fail)?;
             }
             Kind::Uuid(u) => {
                 if let Some(versions) = &u.versions {
@@ -1511,10 +1511,10 @@ impl Type {
                 if f.exponent_bits == 0 || f.mantissa_bits == 0 {
                     return fail("a float's widths are positive".into());
                 }
-                check_bounds(&f.bounds, decimal_order).or_else(fail)?;
+                check_bounds(&f.bounds, number_order).or_else(fail)?;
             }
             Kind::Decimal(d) => {
-                check_bounds(&d.bounds, decimal_order).or_else(fail)?;
+                check_bounds(&d.bounds, number_order).or_else(fail)?;
                 if let (Some(min), Some(max)) = (d.min_scale, d.max_scale) {
                     if min > max {
                         return fail(format!("min_scale {min} is above max_scale {max}"));
@@ -1581,22 +1581,22 @@ impl Type {
                     slot(content, "<json>")?;
                 }
             }
-            Kind::Date(d) => check_bounds(&d.bounds, text_order).or_else(fail)?,
+            Kind::Date(d) => check_bounds(&d.bounds, |a, b| moment_order(&self.kind, a, b)).or_else(fail)?,
             Kind::Time(t) => {
                 check_tick(&t.tick).or_else(fail)?;
-                check_bounds(&t.bounds, text_order).or_else(fail)?;
+                check_bounds(&t.bounds, |a, b| time_order(t, a, b)).or_else(fail)?;
             }
             Kind::DateTime(t) => {
                 check_tick(&t.tick).or_else(fail)?;
-                check_bounds(&t.bounds, text_order).or_else(fail)?;
+                check_bounds(&t.bounds, |a, b| moment_order(&self.kind, a, b)).or_else(fail)?;
             }
             Kind::Instant(t) => {
                 check_tick(&t.tick).or_else(fail)?;
-                check_bounds(&t.bounds, text_order).or_else(fail)?;
+                check_bounds(&t.bounds, |a, b| moment_order(&self.kind, a, b)).or_else(fail)?;
             }
             Kind::ZonedDateTime(t) => {
                 check_tick(&t.tick).or_else(fail)?;
-                check_bounds(&t.bounds, text_order).or_else(fail)?;
+                check_bounds(&t.bounds, |a, b| moment_order(&self.kind, a, b)).or_else(fail)?;
             }
             Kind::Duration(d) => match (duration_has_time(&d.max).map_err(|why| format!("{here}: {why}"))?, &d.tick) {
                 (true, Some(tick)) => check_tick(tick).or_else(fail)?,
@@ -1643,7 +1643,7 @@ impl Type {
     }
 }
 
-fn check_bounds(b: &Bounds, order: fn(&str, &str) -> Option<std::cmp::Ordering>) -> Result<(), String> {
+fn check_bounds(b: &Bounds, order: impl Fn(&str, &str) -> Option<std::cmp::Ordering>) -> Result<(), String> {
     if b.min.is_some() && b.exclusive_min.is_some() {
         return Err("min beside exclusive_min".into());
     }
@@ -1653,7 +1653,7 @@ fn check_bounds(b: &Bounds, order: fn(&str, &str) -> Option<std::cmp::Ordering>)
     check_order(b, order)
 }
 
-fn check_order(b: &Bounds, order: fn(&str, &str) -> Option<std::cmp::Ordering>) -> Result<(), String> {
+fn check_order(b: &Bounds, order: impl Fn(&str, &str) -> Option<std::cmp::Ordering>) -> Result<(), String> {
     let low = b.min.as_deref().or(b.exclusive_min.as_deref());
     let high = b.max.as_deref().or(b.exclusive_max.as_deref());
     if let (Some(low), Some(high)) = (low, high) {
@@ -1676,18 +1676,170 @@ fn short_bounds(b: &Bounds) -> Option<String> {
     (!low.is_empty() || !high.is_empty()).then(|| format!("{low}..{high}"))
 }
 
-/// Two numbers in canonical decimal text, compared, where both read as `f64` without loss of
-/// order (an exponent such as `1e131072` reads as infinity, which still orders it).
-fn decimal_order(a: &str, b: &str) -> Option<std::cmp::Ordering> {
-    let (x, y) = (a.parse::<f64>().ok()?, b.parse::<f64>().ok()?);
-    x.partial_cmp(&y)
+/// Two numbers in decimal text compared as the numbers they write, digit by digit, so that no
+/// 64-bit bound past 2^53 and no decimal of many digits loses its place, and `numeric`'s reach,
+/// `1e131072`, compares without its digits written out.
+fn number_order(a: &str, b: &str) -> Option<std::cmp::Ordering> {
+    use std::cmp::Ordering::{Equal, Greater, Less};
+    let ((a_below, a_point, a_digits), (b_below, b_point, b_digits)) = (number(a)?, number(b)?);
+    let magnitude = match (a_digits.is_empty(), b_digits.is_empty()) {
+        (true, true) => Equal,
+        (true, false) => Less,
+        (false, true) => Greater,
+        (false, false) => a_point.cmp(&b_point).then_with(|| a_digits.cmp(&b_digits)),
+    };
+    Some(match (a_below, b_below) {
+        (false, false) => magnitude,
+        (true, true) => magnitude.reverse(),
+        (true, false) => Less,
+        (false, true) => Greater,
+    })
 }
 
-/// Two dates or times in ISO 8601, compared: by their text where both have four-digit years and
-/// no sign, else not at all.
-fn text_order(a: &str, b: &str) -> Option<std::cmp::Ordering> {
-    let plain = |s: &str| !s.starts_with(['+', '-']);
-    (plain(a) && plain(b)).then(|| a.cmp(b))
+/// A number's decimal text, with a sign, a fraction or an exponent where it has them, as what
+/// orders it: whether it is below zero, the power of ten that writes it as `0.` and its
+/// significant digits (4 for `1250`, -1 for `0.05`), and those digits, from the first that is not
+/// zero to the last. `None` for text that writes no number.
+fn number(text: &str) -> Option<(bool, i64, String)> {
+    let (minus, body) = match text.strip_prefix('-') {
+        Some(body) => (true, body),
+        None => (false, text.strip_prefix('+').unwrap_or(text)),
+    };
+    let (mantissa, exponent) = match body.split_once(['e', 'E']) {
+        Some((mantissa, exponent)) => (mantissa, exponent.parse::<i64>().ok()?),
+        None => (body, 0),
+    };
+    let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    if (whole.is_empty() && fraction.is_empty()) || !whole.bytes().chain(fraction.bytes()).all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let digits = format!("{whole}{fraction}");
+    let significant = digits.trim_start_matches('0');
+    let point = (whole.len() as i64 - (digits.len() - significant.len()) as i64).checked_add(exponent)?;
+    let significant = significant.trim_end_matches('0');
+    Some((minus && !significant.is_empty(), point, significant.to_string()))
+}
+
+/// Two times of day compared as the times they write ([`clock`]): their `HH:MM:SS`, whose fixed
+/// width orders as the time does, a leap second's `60` before `24:00:00`, then their fractions.
+/// Where they keep an offset, by their text: the format does not say how two times with offsets
+/// order.
+fn time_order(t: &TimeType, a: &str, b: &str) -> Option<std::cmp::Ordering> {
+    if t.offset {
+        return Some(a.cmp(b));
+    }
+    let ((_, a_fraction, ""), (_, b_fraction, "")) = (clock(a)?, clock(b)?) else { return None };
+    Some((&a[..8], a_fraction).cmp(&(&b[..8], b_fraction)))
+}
+
+/// Two of a date-bearing kind's values compared as the moments they write ([`moment`]).
+fn moment_order(kind: &Kind, a: &str, b: &str) -> Option<std::cmp::Ordering> {
+    let ((a, a_fraction, _), (b, b_fraction, _)) = (moment(kind, a)?, moment(kind, b)?);
+    Some((a, a_fraction).cmp(&(b, b_fraction)))
+}
+
+/// A date-bearing kind's value in ISO 8601, as the kind writes it (`-4713-11-24`,
+/// `2026-11-14T18:14:00.5`, `2026-11-14T18:14:00Z`, `2026-11-14T10:14:00-08:00[America/Los_Angeles]`),
+/// as what orders it: its seconds from 1970-01-01T00:00:00 in the proleptic Gregorian calendar, in
+/// UTC where it writes an offset, and the digits of its fraction of a second without a trailing
+/// zero, which order as the fraction does; and the zone a zoned date and time names. `None` for
+/// text that is none of the kind's.
+fn moment<'a>(kind: &Kind, text: &'a str) -> Option<(i64, &'a str, &'a str)> {
+    let (days, rest) = date(text)?;
+    let midnight = days * 86_400;
+    let (seconds, fraction, rest) = match (kind, rest.strip_prefix('T')) {
+        (Kind::Date(_), None) => return rest.is_empty().then_some((midnight, "", "")),
+        (Kind::DateTime(_) | Kind::Instant(_) | Kind::ZonedDateTime(_), Some(time)) => clock(time)?,
+        _ => return None,
+    };
+    match kind {
+        Kind::DateTime(_) if rest.is_empty() => Some((midnight + seconds, fraction, "")),
+        Kind::Instant(_) if offset(rest) == Some((0, "")) => Some((midnight + seconds, fraction, "")),
+        Kind::ZonedDateTime(_) => {
+            let (east, zone) = offset(rest)?;
+            let named = zone.strip_prefix('[').and_then(|z| z.strip_suffix(']')).is_some_and(|z| !z.is_empty());
+            named.then_some((midnight + seconds - east, fraction, zone))
+        }
+        _ => None,
+    }
+}
+
+/// The calendar date an ISO 8601 text starts with, its year of four digits, or more after a sign
+/// (`-4713-11-24`, `+5874897-12-31`), as its days from 1970-01-01 in the proleptic Gregorian
+/// calendar, and the rest of the text; `None` where the text starts with no such date.
+fn date(text: &str) -> Option<(i64, &str)> {
+    let sign = usize::from(text.starts_with(['+', '-']));
+    let digits = text[sign..].bytes().take_while(u8::is_ascii_digit).count();
+    if digits < 4 || (sign == 0 && digits > 4) || text.as_bytes().get(sign + digits) != Some(&b'-') {
+        return None;
+    }
+    let (year, rest) = text.split_at(sign + digits);
+    let year = i64::from(year.parse::<i32>().ok()?);
+    let (month, day) = (two_digits(rest, 1)?, two_digits(rest, 4)?);
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let last = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => 28 + i64::from(leap),
+        _ => return None,
+    };
+    if rest.as_bytes()[3] != b'-' || !(1..=last).contains(&day) {
+        return None;
+    }
+    // Days from 1970-01-01, each year counted from March, so that a leap day ends it.
+    let year = if month <= 2 { year - 1 } else { year };
+    let of_era = year.rem_euclid(400);
+    let of_year = (153 * ((month + 9) % 12) + 2) / 5 + day - 1;
+    Some((year.div_euclid(400) * 146_097 + of_era * 365 + of_era / 4 - of_era / 100 + of_year - 719_468, &rest[6..]))
+}
+
+/// The time of day an ISO 8601 text starts with, `HH:MM:SS` and any fraction of a second, up to
+/// `24:00:00` and with a leap second's `60`, as its seconds from midnight, the digits of its
+/// fraction without a trailing zero, and the rest of the text; `None` where the text starts with
+/// no such time.
+fn clock(text: &str) -> Option<(i64, &str, &str)> {
+    let (hours, minutes, seconds) = (two_digits(text, 0)?, two_digits(text, 3)?, two_digits(text, 6)?);
+    if text.as_bytes()[2] != b':' || text.as_bytes()[5] != b':' {
+        return None;
+    }
+    let (fraction, rest) = match text[8..].strip_prefix('.') {
+        Some(after) => match after.bytes().take_while(u8::is_ascii_digit).count() {
+            0 => return None,
+            n => after.split_at(n),
+        },
+        None => ("", &text[8..]),
+    };
+    let fraction = fraction.trim_end_matches('0');
+    let time = (hours < 24 && minutes < 60 && seconds <= 60) || (hours, minutes, seconds, fraction) == (24, 0, 0, "");
+    time.then_some((hours * 3_600 + minutes * 60 + seconds, fraction, rest))
+}
+
+/// The UTC offset an ISO 8601 text starts with, `Z` or a sign and `HH`, `HH:MM` or `HH:MM:SS`,
+/// as its seconds east of UTC, and the rest of the text.
+fn offset(text: &str) -> Option<(i64, &str)> {
+    if let Some(rest) = text.strip_prefix('Z') {
+        return Some((0, rest));
+    }
+    let east = match text.as_bytes().first()? {
+        b'+' => 1,
+        b'-' => -1,
+        _ => return None,
+    };
+    let (mut seconds, mut rest) = (two_digits(text, 1).filter(|hours| *hours < 24)? * 3_600, &text[3..]);
+    for unit in [60, 1] {
+        let Some(part) = rest.strip_prefix(':') else { break };
+        seconds += two_digits(part, 0).filter(|n| *n < 60)? * unit;
+        rest = &part[2..];
+    }
+    Some((east * seconds, rest))
+}
+
+/// The number the two ASCII digits at `at` write.
+fn two_digits(text: &str, at: usize) -> Option<i64> {
+    match *text.as_bytes().get(at..at + 2)? {
+        [a, b] if a.is_ascii_digit() && b.is_ascii_digit() => Some(i64::from(a - b'0') * 10 + i64::from(b - b'0')),
+        _ => None,
+    }
 }
 
 fn check_size(size: &Size) -> Result<(), String> {
