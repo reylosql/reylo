@@ -365,13 +365,24 @@ test("Postgres: a rows member of an array of whole arrays, or of segments and in
   await client.connect();
   try {
     // Postgres reads a JSON array inside a member as one more dimension, so a whole array goes as its text.
-    await sql.unsafe(`create domain ints as int4[]; create table g (id int4 primary key, tags ints[], segs lseg[], cells int4[])`);
-    const insert = await built(root, url.href, "insert_g", "insert into g :g::rows(id int4 not null, tags ints[], segs lseg[], cells int4[])");
+    await sql.unsafe(`create domain ints as int4[]; create type pair as (a int4, b text); create domain pairs as pair[]; create domain spans as int4range[];
+      create table g (id int4 primary key, tags ints[], duos pairs[], spans spans[], segs lseg[], cells int4[])`);
+    const insert = await built(root, url.href, "insert_g", "insert into g :g::rows(id int4 not null, tags ints[], duos pairs[], spans spans[], segs lseg[], cells int4[])");
     const seg = [{ x: 0, y: 0 }, { x: 1, y: 1 }];
     let id = 0;
-    for (const db of [sql, client]) await insert.run(db, { g: [{ id: ++id, tags: [[1, 2], [[3]], null], segs: [[seg], [null]], cells: [[[1, 2]], [[3, null]]] }, { id: ++id, tags: [null, [4]], segs: [seg], cells: [5] }] });
-    const text = await sql.unsafe("select id, tags::text, segs::text, cells::text from g order by id");
-    const want = [{ tags: '{"{1,2}","{{3}}",NULL}', segs: '{{"[(0,0),(1,1)]"},{NULL}}', cells: "{{{1,2}},{{3,NULL}}}" }, { tags: '{NULL,"{4}"}', segs: '{"[(0,0),(1,1)]"}', cells: "{5}" }];
+    for (const db of [sql, client]) {
+      await insert.run(db, {
+        g: [
+          { id: ++id, tags: [[1, 2], [[3]], null], duos: [[{ a: 1, b: "x,y" }]], spans: [[{ lower: 1, upper: 3, bounds: "[)" }, { empty: true }]], segs: [[seg], [null]], cells: [[[1, 2]], [[3, null]]] },
+          { id: ++id, tags: [null, [4]], duos: null, spans: null, segs: [seg], cells: [5] },
+        ],
+      });
+    }
+    const text = await sql.unsafe("select id, tags::text, duos::text, spans::text, segs::text, cells::text from g order by id");
+    const want = [
+      { tags: '{"{1,2}","{{3}}",NULL}', duos: '{"{\\"(1,\\\\\\"x,y\\\\\\")\\"}"}', spans: '{"{\\"[1,3)\\",empty}"}', segs: '{{"[(0,0),(1,1)]"},{NULL}}', cells: "{{{1,2}},{{3,NULL}}}" },
+      { tags: '{NULL,"{4}"}', duos: null, spans: null, segs: '{"[(0,0),(1,1)]"}', cells: "{5}" },
+    ];
     assert.deepEqual(plain(text), [1, 2, 3, 4].map((n) => ({ id: n, ...want[(n - 1) % 2]! })));
   } finally {
     await client.end();

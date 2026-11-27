@@ -163,7 +163,10 @@ function check(type: EngineType, written: string, v: unknown, dialect: Dialect, 
         return v.map((e, i) => {
           if (e === null) return null;
           const at = (message: string) => fail(`element ${i + 1} ${message}`);
-          if (whole) return postgresLiteral(type.element.type, check(type.element.type, element, e, dialect, at), (message) => at(`is ${message}`));
+          if (whole) {
+            check(type.element.type, element, e, dialect, at);
+            return postgresLiteral(type.element.type, e, (message) => at(`is ${message}`));
+          }
           const level = dialect === "postgres" && Array.isArray(e) && isLevel(kind, e);
           return check(level ? type : type.element.type, level ? written : element, e, dialect, at);
         });
