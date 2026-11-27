@@ -79,6 +79,9 @@ pub struct Rules {
     pub double_quoted_strings: bool,
     /// Whether `[…]` quotes a name (SQLite), where elsewhere it is a subscript or an array.
     pub bracketed_names: bool,
+    /// Whether a byte-order mark at a token's start is whitespace (SQLite), where it starts a name on
+    /// Postgres and MySQL and is one of ClickHouse's Unicode spaces. Inside a name it is the name's.
+    pub byte_order_mark: bool,
     /// Whether typographic quotes quote, as in text pasted from a word processor: `‘…’` a string
     /// and `“…”` a name, each to its first closing quote, with no escape (ClickHouse).
     pub typographic_quotes: bool,
@@ -102,12 +105,13 @@ impl Rules {
             backslash_in_names: false,
             double_quoted_strings: false,
             bracketed_names: false,
+            byte_order_mark: false,
             typographic_quotes: false,
             dollar: Dollar::Nothing,
         };
         match dialect {
             Dialect::Postgres => Rules { carriage_return_ends_comment: true, nested_comments: true, escape_strings: true, dollar: Dollar::Quote, ..base },
-            Dialect::Sqlite => Rules { vertical_tab: false, open_comment_runs_on: true, bracketed_names: true, ..base },
+            Dialect::Sqlite => Rules { vertical_tab: false, open_comment_runs_on: true, bracketed_names: true, byte_order_mark: true, ..base },
             Dialect::Mysql => Rules { dashes_need_a_space: true, hash: Hash::Always, backslash_in_strings: true, double_quoted_strings: true, ..base },
             Dialect::Clickhouse => Rules { unicode_spaces: true, hash: Hash::BeforeSpaceOrBang, slash_comments: true, nested_comments: true, backslash_in_strings: true, backslash_in_names: true, typographic_quotes: true, dollar: Dollar::Heredoc, ..base },
         }
@@ -122,6 +126,7 @@ impl Rules {
         match b.get(i) {
             Some(b' ' | b'\t' | b'\n' | b'\r' | 0x0c) => 1,
             Some(0x0b) if self.vertical_tab || (i > 0 && matches!(b[i - 1], b' ' | b'\t' | b'\n' | b'\r' | 0x0c | 0x0b)) => 1,
+            Some(0xef) if self.byte_order_mark && b.get(i + 1..i + 3) == Some(&[0xbb, 0xbf]) => 3,
             Some(&c) if c >= 0x80 && self.unicode_spaces => unicode_space(&b[i..]),
             _ => 0,
         }

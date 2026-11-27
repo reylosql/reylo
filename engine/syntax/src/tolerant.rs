@@ -197,9 +197,9 @@ fn word(z: &[u8], at: usize) -> (usize, u16) {
     (z[at..].iter().position(|c| !is_word(*c)).unwrap_or(z.len() - at), WORD)
 }
 
-/// A ClickHouse word, which ends at a space past ASCII as at any other.
+/// A ClickHouse word, which ends at a space past ASCII as at any other, and before a typographic quote.
 fn clickhouse_word(z: &[u8], at: usize) -> (usize, u16) {
-    let end = (at..z.len()).find(|&i| !is_word(z[i]) || (z[i] >= 0x80 && clickhouse_space(z, i) > 0)).unwrap_or(z.len());
+    let end = (at..z.len()).find(|&i| !is_word(z[i]) || (z[i] >= 0x80 && (clickhouse_space(z, i) > 0 || typographic(z, i).is_some()))).unwrap_or(z.len());
     ((end - at).max(1), WORD)
 }
 
@@ -683,6 +683,7 @@ mod tests {
         assert_eq!(parse(Flavor::ClickHouse, "SELECT 1 /* a /* b */ AS x").errors.len(), 1);
         assert!(parse(Flavor::ClickHouse, "SELECT 1 // ( it's\n AS x").errors.is_empty());
         assert!(parse(Flavor::ClickHouse, "SELECT ‘( it's’ AS s, “(” AS n").errors.is_empty());
+        assert!(parse(Flavor::ClickHouse, "SELECT 1 AS“a(b”").errors.is_empty());
         assert_eq!(statements(Flavor::ClickHouse, "SELECT\u{a0}$h$a;b$h$; SELECT 2"), 2);
     }
 

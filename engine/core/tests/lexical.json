@@ -135,16 +135,32 @@
       }
     },
     {
-      "about": "A byte-order mark is a name's bytes but on ClickHouse",
+      "about": "A byte-order mark is a name's bytes on Postgres, and whitespace at a token's start on SQLite and ClickHouse",
       "text": "\ufeff-- one\nselect 1",
       "readings": {
         "postgres": {
           "comments": ["-- one"],
           "prose": ""
         },
+        "sqlite": {
+          "comments": ["-- one"],
+          "prose": "one"
+        },
         "clickhouse": {
           "comments": ["-- one"],
           "prose": "one"
+        }
+      }
+    },
+    {
+      "about": "SQLite skips a byte-order mark at a token's start, and keeps one inside a name",
+      "text": "select \ufeff$x as x, 1 as y\ufeff",
+      "readings": {
+        "sqlite": {
+          "params": ["x"]
+        },
+        "postgres": {
+          "params": []
         }
       }
     },

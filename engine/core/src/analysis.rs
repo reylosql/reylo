@@ -204,11 +204,16 @@ fn placed_columns(columns: usize, targets: Option<&[ResultTarget]>) -> Vec<Optio
 /// the list after its `RETURNING`, else after its first `select` outside parentheses, up to the
 /// clause that ends it; inside the parentheses of a statement or a first arm written in them. `None`
 /// where the text has no such list, an item is empty, or the lexer refuses the text. Strings,
-/// quoted names, dollar quotes and comments are the lexer's spans ([`Lexed::opaque`]), read by the
-/// dialect's rules, and so is whitespace.
+/// quoted names, dollar quotes, comments and placeholders are the lexer's spans
+/// ([`Lexed::opaque`], [`Lexed::placeholders`]), read by the dialect's rules, and so is whitespace.
 pub fn result_items(sql: &str, dialect: Dialect) -> Option<Vec<(usize, usize)>> {
-    let opaque = lex::lex(sql, dialect).ok()?.opaque;
-    items_of(sql, &Rules::of(dialect), &opaque)
+    // A placeholder is code read whole, as ClickHouse's `{e:Enum8('(' = 1)}` holds a type whose
+    // strings and parentheses are no part of the list's.
+    let lexed = lex::lex(sql, dialect).ok()?;
+    let mut spans = lexed.opaque;
+    spans.extend(lexed.placeholders.iter().map(|p| (p.start, p.end)));
+    spans.sort_unstable();
+    items_of(sql, &Rules::of(dialect), &spans)
 }
 
 fn items_of(sql: &str, rules: &Rules, opaque: &[(usize, usize)]) -> Option<Vec<(usize, usize)>> {
@@ -610,6 +615,8 @@ mod result_items {
         assert_eq!(texts(r"select e'\', 2 as x, '\' from (select 1 as e)", Dialect::Sqlite).unwrap(), [r"e'\'", "2 as x", r"'\'"]);
         assert_eq!(texts("SELECT $h$a, b$h$ AS s, 2 AS t", Dialect::Clickhouse).unwrap(), ["$h$a, b$h$ AS s", "2 AS t"]);
         assert_eq!(texts("SELECT 1 AS a // , b\n, ‘x, y’ AS s", Dialect::Clickhouse).unwrap(), ["1 AS a", "‘x, y’ AS s"]);
+        // A placeholder is read whole, its type's strings and parentheses too.
+        assert_eq!(texts("SELECT {x:Enum8('(' = 1)} AS \"a b\", 2 AS y", Dialect::Clickhouse).unwrap(), ["{x:Enum8('(' = 1)} AS \"a b\"", "2 AS y"]);
         // A vertical tab is whitespace, and a no-break space is a name's on Postgres.
         assert_eq!(texts("select\u{b}a,\u{b}b\u{b}from t", Dialect::Postgres).unwrap(), ["a", "b"]);
         assert_eq!(texts("select a,\u{a0}b from t", Dialect::Postgres).unwrap(), ["a", "\u{a0}b"]);

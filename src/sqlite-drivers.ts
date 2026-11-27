@@ -95,7 +95,7 @@ export function withoutSqlean(sql: string, name: string): string | undefined {
   const opens = (at: number): boolean => {
     let j = at;
     for (;;) {
-      while (j < sql.length && (/[ \t\n\f\r]/.test(sql[j]!) || (sql[j] === "\v" && /[ \t\n\f\r\v]/.test(sql[j - 1] ?? "")))) j++;
+      while (j < sql.length && (/[ \t\n\f\r\ufeff]/.test(sql[j]!) || (sql[j] === "\v" && /[ \t\n\f\r\v]/.test(sql[j - 1] ?? "")))) j++;
       if (sql.startsWith("--", j)) {
         const end = sql.indexOf("\n", j);
         if (end < 0) return false;

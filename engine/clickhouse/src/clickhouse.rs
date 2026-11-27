@@ -548,10 +548,14 @@ fn is_identifier(name: &str) -> bool {
     chars.next().is_some_and(|c| c.is_alphabetic() || c == '_') && chars.all(|c| c.is_alphanumeric() || c == '_')
 }
 
-/// The length of the name `text` opens with: letters, digits and `_`, or a name in backquotes or
-/// double quotes, in which a backslash escapes.
+/// The length of the name `text` opens with: letters, digits and `_`, a name in backquotes or
+/// double quotes, in which a backslash escapes, or one in typographic quotes, `“…”`, to its first
+/// `”` (`lexical::Rules::typographic_quotes`).
 fn name_length(text: &str) -> Option<usize> {
     let bytes = text.as_bytes();
+    if let Some(inside) = text.strip_prefix('“') {
+        return inside.find('”').map(|at| '“'.len_utf8() + at + '”'.len_utf8());
+    }
     match *bytes.first()? {
         quote @ (b'`' | b'"') => {
             let mut i = 1;
@@ -607,13 +611,15 @@ fn names_itself(item: &str) -> bool {
     let alias = || {
         let bytes = item.as_bytes();
         let start = match *bytes.last()? {
+            // A name in typographic quotes ends at its first `”`, so it opens at the `“` whose first `”` is the last.
+            _ if item.ends_with('”') => item.match_indices('“').map(|(at, _)| at).find(|&at| name_length(&item[at..]) == Some(item.len() - at))?,
             quote @ (b'`' | b'"') => (0..bytes.len() - 1).rev().find(|&i| bytes[i] == quote && (i == 0 || bytes[i - 1] != b'\\'))?,
             _ => bytes.iter().rposition(|b| !(b.is_ascii_alphanumeric() || *b == b'_' || *b >= 0x80)).map_or(0, |i| i + 1),
         };
         (name_length(&item[start..]) == Some(item.len() - start)).then_some(())?;
         let before = item[..start].trim_end();
         let word = before.len().checked_sub(2).and_then(|at| before.get(at..))?;
-        (word.eq_ignore_ascii_case("as") && before[..before.len() - 2].ends_with(|c: char| c.is_whitespace() || c == ')' || c == ']' || c == '\'' || c == '`' || c == '"')).then_some(())
+        (word.eq_ignore_ascii_case("as") && before[..before.len() - 2].ends_with(|c: char| c.is_whitespace() || matches!(c, ')' | ']' | '\'' | '`' | '"' | '’' | '”'))).then_some(())
     };
     column || alias().is_some()
 }
@@ -2746,6 +2752,8 @@ mod tests {
         assert!(!is_star("match(name, 'a.* b')") && !is_star("'t.*'"));
         assert_eq!(named("SELECT id, match(name, 'a.* b') FROM users", &[("id", "UInt64"), ("match(name, 'a.* b')", "UInt8")]).len(), 1);
         assert!(names_itself("a.b.c") && names_itself("`a b`") && names_itself("f(x) AS `a b`") && names_itself("x as y") && names_itself("(1)AS y"));
+        // A name in typographic quotes, which ClickHouse reads as it reads one in backquotes.
+        assert!(names_itself("“a b”") && names_itself("1 AS “a b”") && names_itself("‘x’ AS “a b”") && !names_itself("1 + “a”"));
         assert!(!names_itself("a + b") && !names_itself("f(x)") && !names_itself("pair.1") && !names_itself("CAST(x AS String)") && !names_itself("x IS NULL"));
     }
 

@@ -8,14 +8,14 @@ export type Leading = { prose: string; end: number };
 
 /**
  * The whitespace before a statement's first token, as each dialect reads it (`engine/core/src/lexical.rs`):
- * ASCII's, with the vertical tab (on SQLite only inside a run another space starts), and on ClickHouse Unicode's spaces too. A no-break
+ * ASCII's, with the vertical tab (on SQLite only inside a run another space starts), a byte-order mark on SQLite, and on ClickHouse Unicode's spaces too. A no-break
  * space is a character of a name elsewhere, so JavaScript's `\s`, which takes it, reads a comment
  * after one as the statement's leading comment where the database reads a name first.
  */
 const SPACES: Record<Dialect | "none", RegExp> = {
   postgres: /^[ \t\n\r\f\v]*/,
   mysql: /^[ \t\n\r\f\v]*/,
-  sqlite: /^(?:[ \t\n\r\f][ \t\n\r\f\v]*)?/,
+  sqlite: /^(?:[ \t\n\r\f][ \t\n\r\f\v]*|\ufeff)*/,
   clickhouse: /^[ \t\n\r\f\v\u0085\u00a0\u180e\u2000-\u200d\u2028\u2029\u202f\u205f\u2060\u3000\ufeff]*/,
   none: /^[ \t\n\r\f\v]*/,
 };
