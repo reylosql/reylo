@@ -15,6 +15,7 @@ use crate::cardinality::{self, Catalog};
 use crate::dialect::Dialect;
 use crate::host::{as_bool, as_str, as_strings, as_u32, Host, Lazy};
 use crate::infer::{self, Trust};
+use reylo_engine_core::refusal::{self, Cmp, Probe};
 use crate::jsonshape;
 use crate::levels::Columns;
 use crate::lex::{self, Lexed, Rewritten, Target};
@@ -146,13 +147,14 @@ pub const CHECKS_QUERY: &str = concat!(
 /// Whether each column of the named relations refuses null, for a parameter written to it
 /// ([`Engine::nullable_params`]): `(relation, attnum, column, whether its NOT NULL or a domain of
 /// its type's declared NOT NULL refuses it, or the relation is a view, whose columns say nothing
-/// of what the table or the rule or trigger behind it takes, the enforced CHECKs of the table that read the column,
-/// the CHECKs of every domain of its type)`, each CHECK as the server prints it. A CHECK refuses
-/// null where it tests the column `IS NOT NULL` among its conjuncts ([`refuses_null`]); a NOT VALID
-/// one still checks every row written. A CHECK `NOT ENFORCED` (PostgreSQL 18), which checks
-/// nothing, is the one the server prints with those words last. `$1` is `text[]` of relation
-/// names as the statement writes them, schema-qualified or resolved through the search path, `$2`
-/// how many; the relation is named as `$1` names it.
+/// of what the table or the rule or trigger behind it takes, the enforced CHECKs of the table that
+/// read the column, the CHECKs of every domain of its type, and a generated column's expression)`,
+/// each CHECK and expression as the server prints it. A CHECK refuses null where it is false
+/// wherever the column is NULL ([`refuses_null`]); a NOT VALID one still checks every row written.
+/// A CHECK `NOT ENFORCED` (PostgreSQL 18), which checks nothing, is the one the server prints with
+/// those words last. `$1` is `text[]` of relation names as the statement writes them,
+/// schema-qualified or resolved through the search path, `$2` how many; the relation is named as
+/// `$1` names it.
 pub const REFUSES_NULL_QUERY: &str = concat!(
     "WITH RECURSIVE rels(name, oid) AS (SELECT DISTINCT x.name, c.oid FROM ",
     cardinality::names!("$1::pg_catalog.text[]", "$2::pg_catalog.int4", "x"),
@@ -174,7 +176,9 @@ pub const REFUSES_NULL_QUERY: &str = concat!(
           AND NOT (pg_catalog.pg_get_constraintdef(k.oid) OPERATOR(pg_catalog.~~) '% NOT ENFORCED'::pg_catalog.text)), \
       ARRAY(SELECT pg_catalog.pg_get_expr(k.conbin, '0'::pg_catalog.oid, true) FROM domains d \
         JOIN pg_catalog.pg_constraint k ON k.contypid OPERATOR(pg_catalog.=) d.oid AND k.contype OPERATOR(pg_catalog.=) 'c'::pg_catalog.\"char\" \
-        WHERE d.attrelid OPERATOR(pg_catalog.=) a.attrelid AND d.attnum OPERATOR(pg_catalog.=) a.attnum) \
+        WHERE d.attrelid OPERATOR(pg_catalog.=) a.attrelid AND d.attnum OPERATOR(pg_catalog.=) a.attnum), \
+      (SELECT pg_catalog.pg_get_expr(g.adbin, g.adrelid, true) FROM pg_catalog.pg_attrdef g \
+        WHERE a.attgenerated OPERATOR(pg_catalog.<>) ''::pg_catalog.\"char\" AND g.adrelid OPERATOR(pg_catalog.=) a.attrelid AND g.adnum OPERATOR(pg_catalog.=) a.attnum) \
     FROM rels r JOIN pg_catalog.pg_class c ON c.oid OPERATOR(pg_catalog.=) r.oid \
       JOIN pg_catalog.pg_attribute a ON a.attrelid OPERATOR(pg_catalog.=) c.oid AND a.attnum OPERATOR(pg_catalog.>) 0 AND NOT a.attisdropped"
 );
@@ -1379,8 +1383,9 @@ impl<'a> Engine<'a> {
     /// (`marked`), and each one that is, bare, with no cast, the whole value written to a column
     /// that may hold null, wherever it is written (a parameter that also fills a column that
     /// refuses null cannot be null). A column refuses null by its `NOT NULL`, by its domain's
-    /// (declared `not null`, or checking `VALUE IS NOT NULL`), or by a CHECK that tests it `IS NOT
-    /// NULL` ([`refuses_null`]). Any other cast parameter is its cast's type, which the cast states
+    /// (declared `not null`, or a CHECK false for a NULL `VALUE`), by a CHECK that is false
+    /// wherever it is NULL ([`refuses_null`]), or by a NOT NULL generated column that is NULL
+    /// wherever it is. Any other cast parameter is its cast's type, which the cast states
     /// whole, and nothing else lets a parameter take null: not a `coalesce` of it, not a null test.
     /// The rules take every other parameter as a non-null value, which is what its TypeScript type
     /// promises. Beside them, each marked parameter written whole to a column that refuses null, as
@@ -1397,14 +1402,35 @@ impl<'a> Engine<'a> {
         written.dedup();
         let refusing = by_relation(self.host, REFUSES_NULL_QUERY, &written);
         let prefetched = self.prefetch(relations);
-        let (refusing, ()) = (refusing?, prefetched?);
-        // Per relation, by attribute: whether the column refuses null.
+        let trust = trust(self.host);
+        let (refusing, (), trust) = (refusing?, prefetched?, trust?);
+        let rows = refusing.unwrap_or_default();
+        // Per relation, by attribute: whether the column refuses null itself, by its NOT NULL, a
+        // CHECK or its domain.
         let mut refuses: HashMap<(String, i32), bool> = HashMap::new();
-        for row in refusing.unwrap_or_default() {
+        // Per relation, every column, and each generated one with whether it refuses null itself
+        // and its expression.
+        let mut columns_of: HashMap<&str, Vec<String>> = HashMap::new();
+        let mut generated: HashMap<&str, Vec<(String, bool, Probe)>> = HashMap::new();
+        for row in &rows {
             let (Some(relation), Some(attnum), Some(column), Some(not_null)) = (row.first().and_then(as_str), row.get(1).and_then(as_u32), row.get(2).and_then(as_str), row.get(3).and_then(as_bool)) else { continue };
-            let checked = row.get(4).and_then(as_strings).unwrap_or_default().iter().any(|check| refuses_null(check, column));
-            let domain = row.get(5).and_then(as_strings).unwrap_or_default().iter().any(|check| refuses_null(check, "value"));
-            refuses.insert((relation.to_string(), attnum as i32), not_null || checked || domain);
+            let checked = row.get(4).and_then(as_strings).unwrap_or_default().iter().any(|check| refuses_null(check, column, &trust));
+            let domain = row.get(5).and_then(as_strings).unwrap_or_default().iter().any(|check| refuses_null(check, "value", &trust));
+            let refused = not_null || checked || domain;
+            refuses.insert((relation.to_string(), attnum as i32), refused);
+            columns_of.entry(relation).or_default().push(column.to_string());
+            if let Some(expression) = row.get(6).and_then(as_str) {
+                generated.entry(relation).or_default().push((column.to_string(), refused, probe_text(expression, &trust).unwrap_or(Probe::Unknown)));
+            }
+        }
+        // A column a NULL in which a generated column that refuses null refuses: one its
+        // expression is NULL wherever it is ([`refusal::refused_by_generated`]).
+        let by_generated: HashMap<&str, HashSet<String>> = generated.iter().map(|(relation, g)| (*relation, refusal::refused_by_generated(&columns_of[relation], g))).collect();
+        for row in &rows {
+            let (Some(relation), Some(attnum), Some(column)) = (row.first().and_then(as_str), row.get(1).and_then(as_u32), row.get(2).and_then(as_str)) else { continue };
+            if by_generated.get(relation).is_some_and(|refused| refused.contains(column)) {
+                refuses.insert((relation.to_string(), attnum as i32), true);
+            }
         }
         let columns = self.columns_by_name.borrow();
         // The column `column` of `relation` names, and whether it refuses null; a column the
@@ -3523,32 +3549,127 @@ pub fn with_values(ty: Type, values: Option<&[String]>, string: bool) -> Type {
     }
 }
 
-/// The strings a CHECK, as the server prints it, keeps the column `column` to (`VALUE` in a
-/// domain's): `col = ANY (ARRAY['a'::text, …])` or `col = 'a'`, alone, among the conjuncts of an
-/// AND (each one of them restricts), or beside `col IS NULL` under an OR, which only lets NULL
-/// through as well. A cast to a string type around the column or a value is the server's own
-/// (`v::text = ANY (ARRAY['x'::character varying]::text[])` for a `varchar`). Anything else
-/// proves nothing.
-/// Whether a CHECK, as the server prints it, refuses null in `column` (`value` for a domain's):
-/// one of its conjuncts tests the column `IS NOT NULL`, which a null makes false where any other
-/// test of it would be unknown, and so pass.
-fn refuses_null(text: &str, column: &str) -> bool {
-    use syntax::postgres::protobuf::node::Node as N;
-    use syntax::postgres::protobuf::{BoolExprType, NullTestType};
-    let Ok(parsed) = crate::stack::parse(&format!("SELECT {text}")) else { return false };
-    let Some(N::SelectStmt(select)) = parsed.protobuf.stmts.first().and_then(|s| s.stmt.as_deref()).and_then(|s| s.node.as_ref()) else { return false };
-    let Some(N::ResTarget(target)) = select.target_list.first().and_then(|t| t.node.as_ref()) else { return false };
-    fn conjunct(node: &syntax::postgres::protobuf::Node, column: &str) -> bool {
-        match node.node.as_ref() {
-            Some(N::BoolExpr(b)) if b.boolop == BoolExprType::AndExpr as i32 => b.args.iter().any(|a| conjunct(a, column)),
-            Some(N::NullTest(t)) if t.nulltesttype == NullTestType::IsNotNull as i32 => match t.arg.as_deref().and_then(|a| a.node.as_ref()) {
-                Some(N::ColumnRef(c)) => matches!(c.fields.as_slice(), [f] if matches!(f.node.as_ref(), Some(N::String(s)) if s.sval == column)),
-                _ => false,
-            },
-            _ => false,
+/// A CHECK or a generated column's expression, as the server prints it, as
+/// [`refusal::with_null`] reads it ([`probe`]); `None` for text the parser does not read.
+fn probe_text(text: &str, trust: &Trust) -> Option<Probe> {
+    let parsed = crate::stack::parse(&format!("SELECT {text}")).ok()?;
+    let Some(NodeEnum::SelectStmt(select)) = parsed.protobuf.stmts.first()?.stmt.as_deref()?.node.as_ref() else { return None };
+    let Some(NodeEnum::ResTarget(target)) = select.target_list.first()?.node.as_ref() else { return None };
+    Some(probe(target.val.as_deref()?, trust))
+}
+
+/// Whether a CHECK, as the server prints it, refuses null in `column` (`value` for a domain's): it
+/// is false wherever the column is NULL ([`refusal::check_refuses`]), as `IS NOT NULL` is, and as
+/// `coalesce` with a default that fails it, `IS DISTINCT FROM NULL` and `IS TRUE` are. A CHECK
+/// that is NULL there passes, as one that only compares the column is.
+fn refuses_null(text: &str, column: &str, trust: &Trust) -> bool {
+    probe_text(text, trust).is_some_and(|p| refusal::check_refuses(&p, column))
+}
+
+/// An expression as [`refusal::with_null`] reads it, as Postgres evaluates it: a column by its
+/// name; NULL, a boolean, an integer, an integer cast to a number type and a string cast to a
+/// string type (a string alone may be read as a row, all of whose fields are NULL); the null and
+/// boolean tests, `IS [NOT] DISTINCT FROM`, AND, OR and NOT; a CASE without an operand; COALESCE
+/// and NULLIF; a comparison; and the operators and functions NULL for a NULL operand
+/// ([`infer::POSTGRES_STRICT_OPERATORS`], [`infer::POSTGRES_STRICT`]). An operator or a function
+/// counts only where it is the built-in whatever its operands' types ([`Trust::checked`]), and so
+/// does the `=` that `IS DISTINCT FROM` and NULLIF compare two values with.
+fn probe(node: &syntax::postgres::protobuf::Node, trust: &Trust) -> Probe {
+    use syntax::postgres::protobuf::{a_const::Val, AExprKind, BoolExprType, BoolTestType, NullTestType};
+    let at = |n: &Option<Box<syntax::postgres::protobuf::Node>>| n.as_deref().map_or(Probe::Unknown, |n| probe(n, trust));
+    let boxed = |n: &Option<Box<syntax::postgres::protobuf::Node>>| Box::new(at(n));
+    let builtin = |name: &str| !trust.checked(name);
+    let integer = |text: &str| text.parse::<i64>().ok();
+    match node.node.as_ref() {
+        Some(NodeEnum::AConst(c)) if c.isnull => Probe::Null,
+        Some(NodeEnum::AConst(c)) => match &c.val {
+            Some(Val::Ival(i)) => Probe::Int(i.ival.into()),
+            Some(Val::Boolval(b)) => Probe::Int(b.boolval.into()),
+            Some(Val::Fval(f)) => integer(&f.fval).map_or(Probe::Value, Probe::Int),
+            _ => Probe::Unknown,
+        },
+        Some(NodeEnum::TypeCast(cast)) => {
+            let target = cast.type_name.as_ref().filter(|t| t.array_bounds.is_empty()).and_then(|t| infer::builtin_name(&t.names));
+            match (cast.arg.as_deref().and_then(|a| a.node.as_ref()), target.as_deref()) {
+                (Some(NodeEnum::AConst(c)), _) if c.isnull => Probe::Null,
+                (Some(NodeEnum::AConst(c)), Some("int2" | "int4" | "int8" | "numeric" | "float4" | "float8")) => match &c.val {
+                    Some(Val::Ival(i)) => Probe::Int(i.ival.into()),
+                    Some(Val::Fval(f)) => integer(&f.fval).map_or(Probe::Value, Probe::Int),
+                    _ => Probe::Unknown,
+                },
+                (Some(NodeEnum::AConst(c)), Some("text" | "varchar" | "bpchar" | "name")) if matches!(c.val, Some(Val::Sval(_))) => Probe::Value,
+                _ => Probe::Unknown,
+            }
         }
+        Some(NodeEnum::ColumnRef(c)) => match c.fields.as_slice() {
+            [f] => match f.node.as_ref() {
+                Some(NodeEnum::String(s)) => Probe::Column(s.sval.clone()),
+                _ => Probe::Unknown,
+            },
+            _ => Probe::Unknown,
+        },
+        Some(NodeEnum::NullTest(t)) => Probe::IsNull { arg: boxed(&t.arg), not: t.nulltesttype == NullTestType::IsNotNull as i32 },
+        Some(NodeEnum::BooleanTest(t)) => {
+            let arg = boxed(&t.arg);
+            match BoolTestType::try_from(t.booltesttype) {
+                Ok(BoolTestType::IsTrue) => Probe::IsTrue { arg, not: false },
+                Ok(BoolTestType::IsNotTrue) => Probe::IsTrue { arg, not: true },
+                Ok(BoolTestType::IsFalse) => Probe::IsFalse { arg, not: false },
+                Ok(BoolTestType::IsNotFalse) => Probe::IsFalse { arg, not: true },
+                Ok(BoolTestType::IsUnknown) => Probe::IsNull { arg, not: false },
+                Ok(BoolTestType::IsNotUnknown) => Probe::IsNull { arg, not: true },
+                _ => Probe::Unknown,
+            }
+        }
+        Some(NodeEnum::BoolExpr(b)) => {
+            let mut args = b.args.iter().map(|a| probe(a, trust));
+            match BoolExprType::try_from(b.boolop) {
+                Ok(BoolExprType::NotExpr) if b.args.len() == 1 => Probe::Not(Box::new(args.next().unwrap_or(Probe::Unknown))),
+                Ok(op @ (BoolExprType::AndExpr | BoolExprType::OrExpr)) => {
+                    let first = args.next().unwrap_or(Probe::Unknown);
+                    args.fold(first, |l, r| if op == BoolExprType::AndExpr { Probe::And(Box::new(l), Box::new(r)) } else { Probe::Or(Box::new(l), Box::new(r)) })
+                }
+                _ => Probe::Unknown,
+            }
+        }
+        Some(NodeEnum::AExpr(e)) => {
+            let name = infer::builtin_name(&e.name);
+            match (AExprKind::try_from(e.kind), name.as_deref()) {
+                (Ok(AExprKind::AexprDistinct | AExprKind::AexprNotDistinct), _) => Probe::Same { left: boxed(&e.lexpr), right: boxed(&e.rexpr), not: e.kind == AExprKind::AexprDistinct as i32, exact: builtin("=") },
+                (Ok(AExprKind::AexprNullif), _) => Probe::NullIf { value: boxed(&e.lexpr), other: boxed(&e.rexpr), exact: builtin("=") },
+                (Ok(AExprKind::AexprOp), Some(op)) if builtin(op) => {
+                    let cmp = match op {
+                        "=" => Some(Cmp::Eq),
+                        "<>" => Some(Cmp::NotEq),
+                        "<" => Some(Cmp::Lt),
+                        ">" => Some(Cmp::Gt),
+                        "<=" => Some(Cmp::LtEq),
+                        ">=" => Some(Cmp::GtEq),
+                        _ => None,
+                    };
+                    match cmp {
+                        Some(op) if e.lexpr.is_some() => Probe::Compare { op, left: boxed(&e.lexpr), right: boxed(&e.rexpr), exact: true },
+                        _ if infer::POSTGRES_STRICT_OPERATORS.contains(&op) => Probe::Strict([&e.lexpr, &e.rexpr].into_iter().filter(|n| n.is_some()).map(at).collect()),
+                        _ => Probe::Unknown,
+                    }
+                }
+                _ => Probe::Unknown,
+            }
+        }
+        Some(NodeEnum::CoalesceExpr(c)) => Probe::Coalesce(c.args.iter().map(|a| probe(a, trust)).collect()),
+        Some(NodeEnum::CaseExpr(c)) if c.arg.is_none() => Probe::Case {
+            arms: c.args.iter().filter_map(|w| match w.node.as_ref() {
+                Some(NodeEnum::CaseWhen(w)) => Some((at(&w.expr), at(&w.result))),
+                _ => None,
+            }).collect(),
+            otherwise: c.defresult.as_ref().map(|d| Box::new(probe(d, trust))),
+        },
+        Some(NodeEnum::FuncCall(f)) if f.over.is_none() && f.agg_filter.is_none() && f.agg_order.is_empty() && !f.agg_star && !f.agg_distinct && !f.func_variadic => match infer::builtin_name(&f.funcname) {
+            Some(name) if infer::POSTGRES_STRICT.contains(&name.as_str()) && builtin(&name) && !f.args.is_empty() => Probe::Strict(f.args.iter().map(|a| probe(a, trust)).collect()),
+            _ => Probe::Unknown,
+        },
+        _ => Probe::Unknown,
     }
-    target.val.as_deref().is_some_and(|v| conjunct(v, column))
 }
 
 /// Whether a CHECK on array column `column` (`VALUE` in a domain's) keeps every element non-null:
@@ -5296,6 +5417,47 @@ mod tests {
     }
 
     #[test]
+    fn a_check_or_a_generated_expression_refuses_null_as_postgres_evaluates_it() {
+        use reylo_engine_core::refusal::{with_null, Known};
+        let trust = Trust::default();
+        // As PostgreSQL 18 prints them: a CHECK false wherever the column is NULL refuses it.
+        for (check, refuses) in [
+            ("a IS NOT NULL", true),
+            ("COALESCE(a, 0) > 0", true),
+            ("COALESCE(a, 0::numeric) > 0::numeric", true),
+            ("a IS NOT DISTINCT FROM 1", true),
+            ("a IS TRUE", true),
+            ("NOT a IS NULL", true),
+            ("b > 0 AND a IS NOT NULL", true),
+            ("COALESCE(a, ''::text) <> ''::text", false),
+            ("COALESCE(a, 1) > 0", false),
+            ("a IS NOT FALSE", false),
+            ("a IS NULL OR a > 0", false),
+            ("a IS NOT NULL OR b IS NOT NULL", false),
+            // A string alone may be read as a row whose fields are all NULL.
+            ("COALESCE(a, '(,)') IS NOT NULL", false),
+        ] {
+            assert_eq!(refuses_null(check, "a", &trust), refuses, "{check}");
+        }
+        for (expression, null) in [
+            ("a + 1", true),
+            ("lower(a)", true),
+            ("CASE WHEN a IS NULL THEN NULL::integer ELSE 1 END", true),
+            ("CASE WHEN a > 0 THEN 'p'::text WHEN a <= 0 THEN 'n'::text ELSE NULL::text END", true),
+            ("COALESCE(a, 0)", false),
+            ("CASE WHEN a > 0 THEN 'p'::text ELSE 'n'::text END", false),
+            ("a || 'x'::text", false),
+        ] {
+            assert_eq!(probe_text(expression, &trust).is_some_and(|p| with_null(&p, "a") == Known::Null), null, "{expression}");
+        }
+        // An operator a user also defined may answer anything for NULL.
+        let shadowed = Trust { shadowed: [">".to_string(), "+".to_string()].into(), ..Trust::default() };
+        assert!(!refuses_null("COALESCE(a, 0) > 0", "a", &shadowed));
+        assert!(!probe_text("a + 1", &shadowed).is_some_and(|p| with_null(&p, "a") == Known::Null));
+        assert!(refuses_null("a IS NOT NULL", "a", &shadowed));
+    }
+
+    #[test]
     fn a_check_keeps_null_out_of_an_array_column() {
         assert!(check_items("array_position(tags, NULL::text) IS NULL", "tags", false));
         assert!(check_items("array_position(VALUE, NULL::text) IS NULL", "labels", false));
@@ -5706,21 +5868,24 @@ mod tests {
     fn a_parameter_may_be_null_cast_to_nullable_or_written_bare_to_a_column_that_holds_null() {
         // A server with one table, `users (id int primary key, name text not null, email text,
         // score numeric, n int, doc jsonb, meta json not null, nick text check (nick is not null),
-        // mail required_email, code text check (code <> '' and code is not null), tag tag_text)`,
-        // where the domain `required_email` is declared `not null` and the domain `tag_text`
-        // checks `VALUE IS NOT NULL`, describing every statement with no result column and every
-        // parameter as text.
-        let columns = [("id", true), ("name", true), ("email", false), ("score", false), ("n", false), ("doc", false), ("meta", true), ("nick", false), ("mail", false), ("code", false), ("tag", false)];
+        // mail required_email, code text check (code <> '' and code is not null), tag tag_text,
+        // lim int check (coalesce(lim, 0) > 0), base int, g int generated always as (base * 2)
+        // stored not null)`, where the domain `required_email` is declared `not null` and the
+        // domain `tag_text` checks `VALUE IS NOT NULL`, describing every statement with no result
+        // column and every parameter as text.
+        let columns = [("id", true), ("name", true), ("email", false), ("score", false), ("n", false), ("doc", false), ("meta", true), ("nick", false), ("mail", false), ("code", false), ("tag", false), ("lim", false), ("base", false), ("g", true)];
         let refusals = |i: usize, name: &str| -> Vec<Value> {
+            let generated = if name == "g" { json!("base * 2") } else { Value::Null };
             let (not_null, checks, domain): (bool, Vec<&str>, Vec<&str>) = match name {
-                "id" | "name" | "meta" | "mail" => (true, vec![], vec![]),
+                "id" | "name" | "meta" | "mail" | "g" => (true, vec![], vec![]),
+                "lim" => (false, vec!["COALESCE(lim, 0) > 0"], vec![]),
                 "nick" => (false, vec!["nick IS NOT NULL"], vec![]),
                 "code" => (false, vec!["code <> ''::text AND code IS NOT NULL"], vec![]),
                 "tag" => (false, vec![], vec!["VALUE IS NOT NULL"]),
                 "score" => (false, vec!["score > 0::numeric"], vec![]),
                 _ => (false, vec![], vec![]),
             };
-            vec![json!("users"), json!(i + 1), json!(name), json!(not_null), json!(checks), json!(domain)]
+            vec![json!("users"), json!(i + 1), json!(name), json!(not_null), json!(checks), json!(domain), generated]
         };
         let analyzed = |sql: &str| {
             let mut answers: HashMap<String, Answer> = HashMap::new();
@@ -5769,6 +5934,9 @@ mod tests {
         // passes, `score > 0`, leaves the column nullable.
         assert_eq!(nullable("INSERT INTO users (name, nick, mail, code, tag) VALUES (:name, :nick, :mail, :code, :tag)"), "name nick mail code tag");
         assert_eq!(nullable("UPDATE users SET nick = :nick, mail = :mail, code = :code, tag = :tag, score = :score WHERE id = :id"), "nick mail code tag score? id");
+        // A CHECK false wherever the column is NULL, and a NOT NULL generated column NULL wherever
+        // it is, refuse it too.
+        assert_eq!(nullable("UPDATE users SET lim = :lim, base = :base, n = :n WHERE id = :id"), "lim base n? id");
         // A cast parameter is its cast's type, never null, however it is written; so is an expression.
         assert_eq!(nullable("INSERT INTO users (name, email) VALUES (:name::text, :email::text) ON CONFLICT (email) DO UPDATE SET name = excluded.name RETURNING id"), "name email");
         assert_eq!(nullable("INSERT INTO users (name, email, score, n, doc, meta) VALUES (:name::text, :email::text, :score::numeric, :n::int, :doc::jsonb, :meta::json)"), "name email score n doc meta");
