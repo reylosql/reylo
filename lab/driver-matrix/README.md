@@ -231,7 +231,7 @@ S12 is new, for an array whose element's own value is an array (a segment, a pol
 
 ## Run (2026-11-26): numbers JSON has none for, and fractions of a time
 
-The `typed` row has new columns: on Postgres a float8 of -0 and of NaN, a float4 of -Infinity, a `time(6)` of `12:00:00.05` and a domain over bytea; on MySQL a DOUBLE of -0 and a `TIME(6)` of `12:00:00.05`; on SQLite a REAL infinity and -0 in a column with no type. S11 compares the -0 as its text, and S11c is new. The full run, on Node 26.11.1 and 24.22.3, Bun 1.4.4 and Miniflare 4.20260730.0, with the containers in colima and a throwaway Postgres 18 standing in for the shared Postgres 14 (`DM_PG_URL`), wrote [RESULTS.md](RESULTS.md): 75 jobs and 6550 rows, with 6408 pass, 60 fail, 63 unsupported, 16 skip and 3 not run, and 32 of 124 control rows failing as designed.
+The `typed` row has new columns: on Postgres a float8 of -0 and of NaN, a float4 of -Infinity, a `time(6)` of `12:00:00.05` and a domain over bytea; on MySQL a DOUBLE of -0 and a `TIME(6)` of `12:00:00.05`; on SQLite a REAL infinity and -0 in a column with no type. S11 compares the -0 as its text, and S11c is new. The full run, on Node 26.11.1 and 24.22.3, Bun 1.4.4 and Miniflare 4.20260730.0, with the containers in colima and a throwaway Postgres 18 standing in for the shared Postgres 14 (`DM_PG_URL`), wrote [RESULTS.md](RESULTS.md), S12 included: 75 jobs and 6643 rows, with 6501 pass, 60 fail, 63 unsupported, 16 skip and 3 not run, and 32 of 127 control rows failing as designed.
 
 | Rows | Result | Diagnosis |
 | --- | --- | --- |
