@@ -307,6 +307,12 @@ test("the run time refuses an integer past 2^53 - 1 where a 64-bit integer stand
   const integerOrReal = { kind: "union", label: "INTEGER", members: [{ kind: "integer", bits: 64 }, { kind: "float", exponent_bits: 11, mantissa_bits: 52, infinity: true }] } as EngineType;
   assert.deepEqual(jsonNumbers(doc(record([field("n", integerOrReal)])), false, "sqlite"), { keys: [["n", "integer"]] });
   assert.equal(jsonNumbers(doc(record([field("n", integerOrReal)])), false, "postgres"), undefined);
+  // So does such a value in an array or an object the engine describes by a schema, `json_array(id, amount)` and `json_group_object(k, amount)`.
+  const integerOrRealSchema = { anyOf: [{ type: "integer", format: "int64" }, { type: "number", format: "double" }, { type: "null" }] };
+  const builtArray = { kind: "json", schema: { "$schema": "https://json-schema.org/draft/2020-12/schema", type: "array", prefixItems: [{ type: "integer", format: "int64" }, integerOrRealSchema], items: false } } as EngineType;
+  assert.deepEqual(jsonNumbers(builtArray, false, "sqlite"), { items: false, elements: ["integer", "integer"] });
+  assert.deepEqual(jsonNumbers({ kind: "json", schema: { "$schema": "https://json-schema.org/draft/2020-12/schema", type: "object", additionalProperties: integerOrRealSchema } } as EngineType, false, "sqlite"), { keys: [], others: "integer" });
+  assert.deepEqual(jsonNumbers(builtArray, false, "postgres"), { items: false, elements: ["integer", null] });
   // `JSON_ARRAY(big, n)` with a nullable int beside the bigint: each place an integer of one width or another.
   assert.deepEqual(jsonNumbers({ kind: "json", schema: { "$schema": "https://json-schema.org/draft/2020-12/schema", type: "array", items: { anyOf: [{ type: "integer", format: "int64" }, { type: "integer", format: "int32" }] } } } as EngineType), { items: "integer" });
   // An integer or a float at a place holds numbers a double holds exactly.

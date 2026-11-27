@@ -169,6 +169,12 @@ test("a JSON parameter's NaN, infinities and -0 go in as each database's JSON re
   const { rawJSON } = JSON as unknown as { rawJSON(text: string): never };
   await execute(bun, pq, { doc: { id: rawJSON("9007199254740993"), z: -0 }, docs: null });
   assert.deepEqual([...seen], [[`{"id":9007199254740993,"z":-0}`, null]]);
+  // So does a BigInt, and each value's toJSON() runs once, by Reylo's writer.
+  seen.length = 0;
+  let calls = 0;
+  await execute(bun, pq, { doc: { id: 9007199254740993n, at: { toJSON: () => (++calls === 1 ? "first" : "again") } }, docs: null });
+  assert.deepEqual([...seen], [[`{"id":9007199254740993,"at":"first"}`, null]]);
+  assert.equal(calls, 1);
   // MySQL and SQLite read -0 from `-0e0`; SQLite an infinity from a number past a double's range.
   const mq: QueryModule<"mysql"> = { dialect: "mysql", sql: "select cast(:doc as json)", params: ["doc"], inputs: { doc: json } };
   const lq: QueryModule<"sqlite"> = { dialect: "sqlite", sql: "select json(:doc)", params: ["doc"], inputs: { doc: json } };

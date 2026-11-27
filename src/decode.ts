@@ -1045,19 +1045,14 @@ async function runPostgres(c: Client, query: QueryModule<"postgres">, { text, va
     // as it is either way. A query without inputs gets its values as they are, as on every driver.
     const bun = typeof c.commitDistributed === "function";
     // Each handle Bun.sql gives out, a transaction's, a savepoint's and a reserved connection's too, carries its client's options.
-    // Where the JSON text is another than JSON.stringify writes (a NaN, an infinity, -0 or a BigInt in it), the
-    // value its toJSON() returns is that text read back, each number and string as JSON.rawJSON of
-    // its own text, which Bun has and writes as it is, so an integer past 2^53 keeps its digits.
+    // Bun.sql serializes a value for a JSON parameter itself, so a prepared one gets the JSON text
+    // Reylo writes read back, each number and string as JSON.rawJSON of its own text, which Bun has
+    // and writes as it is: a NaN, an infinity or -0 as its database reads it, a BigInt as its
+    // digits, and each value's toJSON() run once, by Reylo's writer.
     const raw = (JSON as { rawJSON?: (text: string) => unknown }).rawJSON;
     const bunJson = (v: unknown, i: number) => {
       const written = jsonText(v, "postgres", names[i]!);
       if (c.options?.prepare === false || written === undefined) return written;
-      // JSON.stringify throws on a BigInt, whose text JSON.rawJSON then carries.
-      let plain: string | undefined;
-      try {
-        plain = JSON.stringify(jsonValue(v));
-      } catch {}
-      if (written === plain) return { toJSON: () => jsonValue(v) };
       const value: unknown = JSON.parse(written, (_key, x: unknown, context?: { source?: string }) => (raw === undefined ? x : (typeof x === "number" || typeof x === "string") && context?.source !== undefined ? raw(context.source) : typeof x === "number" ? raw(Object.is(x, -0) ? "-0" : String(x)) : x));
       return { toJSON: () => value };
     };

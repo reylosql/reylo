@@ -1175,4 +1175,9 @@ test("a JSON parameter's BigInt is written as its digits, whatever toJSON an app
   assert.throws(() => writeJson([2n ** 64n], "mysql", fail), /^TypeError: at \/0 is the BigInt 18446744073709551616, which MySQL reads from JSON as a float: its 64-bit integers run from -9223372036854775808 to 18446744073709551615\.$/);
   assert.throws(() => writeJson({ n: 2n ** 63n }, "sqlite", fail), /^TypeError: at \/n is the BigInt 9223372036854775808, which SQLite reads from JSON as a float/);
   assert.equal(writeJson([2n ** 64n], "postgres", fail), "[18446744073709551616]");
+  // A getter runs once.
+  let reads = 0;
+  const once = Object.defineProperty({}, "n", { enumerable: true, get: () => (++reads === 1 ? 9007199254740993n : 1n) });
+  assert.equal(writeJson(once, "postgres", fail), '{"n":9007199254740993}');
+  assert.equal(reads, 1);
 });

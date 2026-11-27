@@ -195,7 +195,7 @@ export function jsonNumbers(t: EngineType, inJson = false, dialect: Dialect = "p
     }
     case "json":
       if (t.content !== undefined) return jsonNumbers(t.content.type, true, dialect);
-      return dialect === "clickhouse" || t.schema === undefined ? undefined : schemaNumbers(schemaOf(t));
+      return dialect === "clickhouse" || t.schema === undefined ? undefined : schemaNumbers(schemaOf(t), dialect);
     default:
       return undefined;
   }
@@ -225,33 +225,43 @@ function integerOnly(schema: unknown): boolean {
   return kinds.includes("integer") && kinds.every((k) => k === "integer" || k === "null");
 }
 
-function schemaNumbers(schema: unknown): JsonNumbers | undefined {
+/** Whether a schema admits no number but a float, which on SQLite stands beside an integer where an integer column may hold a REAL. */
+function floatOnly(schema: unknown): boolean {
+  if (schema === null || typeof schema !== "object" || Array.isArray(schema)) return false;
+  const m = schema as Record<string, unknown>;
+  if (Array.isArray(m.anyOf)) return m.anyOf.every((s) => floatOnly(s) || !admitsNumber(s));
+  const kinds = kindsOf(m);
+  return kinds.includes("number") && kinds.every((k) => k === "number" || k === "null");
+}
+
+function schemaNumbers(schema: unknown, dialect: Dialect): JsonNumbers | undefined {
   if (schema === null || typeof schema !== "object" || Array.isArray(schema)) return undefined;
   const m = schema as Record<string, unknown>;
   if (Array.isArray(m.anyOf)) {
     // Each alternative's reading, where they agree: an integer or null reads as the integer, and so
-    // does a 64-bit integer beside a narrower one, whose numbers hold to 2^53; an integer or a float
-    // reads as neither, since a float's number past 2^53 is exact.
+    // does a 64-bit integer beside a narrower one, whose numbers hold to 2^53, and on SQLite beside
+    // a float, as an integer column that may hold a REAL reads (`jsonNumbers`); elsewhere an integer
+    // or a float reads as neither, since a float's number past 2^53 is exact.
     const read = m.anyOf.flatMap((s) => {
-      const at = schemaNumbers(s);
-      return at !== undefined ? [at] : !admitsNumber(s) || integerOnly(s) ? [] : [undefined];
+      const at = schemaNumbers(s, dialect);
+      return at !== undefined ? [at] : !admitsNumber(s) || integerOnly(s) || (dialect === "sqlite" && floatOnly(s)) ? [] : [undefined];
     });
     return read.length && read.every((at) => at !== undefined && JSON.stringify(at) === JSON.stringify(read[0])) ? read[0] : undefined;
   }
   const kinds = kindsOf(m);
   if (kinds.includes("integer") && m.format === "int64" && kinds.every((k) => k === "integer" || k === "null")) return "integer";
   if (kinds.includes("array")) {
-    const elements = Array.isArray(m.prefixItems) ? m.prefixItems.map((s) => schemaNumbers(s) ?? null) : [];
-    const items = typeof m.items === "object" ? schemaNumbers(m.items) : undefined;
+    const elements = Array.isArray(m.prefixItems) ? m.prefixItems.map((s) => schemaNumbers(s, dialect) ?? null) : [];
+    const items = typeof m.items === "object" ? schemaNumbers(m.items, dialect) : undefined;
     return items === undefined && !elements.some((at) => at !== null) ? undefined : { items: items ?? false, ...(elements.some((at) => at !== null) ? { elements } : {}) };
   }
   if (kinds.includes("object")) {
     const properties = m.properties !== null && typeof m.properties === "object" && !Array.isArray(m.properties) ? (m.properties as Record<string, unknown>) : {};
     const keys = Object.entries(properties).flatMap(([key, s]): [string, JsonNumbers][] => {
-      const at = schemaNumbers(s);
+      const at = schemaNumbers(s, dialect);
       return at === undefined ? [] : [[key, at]];
     });
-    const others = typeof m.additionalProperties === "object" ? schemaNumbers(m.additionalProperties) : undefined;
+    const others = typeof m.additionalProperties === "object" ? schemaNumbers(m.additionalProperties, dialect) : undefined;
     return keys.length || others !== undefined ? { keys, ...(others === undefined ? {} : { others }) } : undefined;
   }
   return undefined;
