@@ -231,6 +231,11 @@ test("mysql and sqlite: each value as a driver binds it, and decode takes every 
     ],
   });
   assert.deepEqual(lite["~standard"].query.encode({ ok: true }), [1]);
+  // `.run()` writes -0 and an infinity in at their marks, which some drivers bind as other values;
+  // a Standard Query's values bind to the module's own text, so they go as they are.
+  const real = defineQuery<{ r: number }, { r: number }, "one", "sqlite">({ dialect: "sqlite", sql: "select :r as r", params: ["r"], text: "select ? as r", order: ["r"], marks: [[7, 8]], inputs: { r: { type: { kind: "float", exponent_bits: 11, mantissa_bits: 52, infinity: true } } }, columns: [["r", "float"]] });
+  assert.deepEqual(real["~standard"].query.encode({ r: Infinity }), [Infinity]);
+  assert.ok(Object.is(real["~standard"].query.encode({ r: -0 })[0], -0));
   assert.deepEqual(lite["~standard"].query.decode([[1n, 0n]]), [{ id: 1n, ok: false }]);
 
   // SQLite decodes through `.run()`'s own normalizing: a value of a storage class the column's type

@@ -1376,7 +1376,9 @@ fn quoted(place: &Place, name: &str) -> String {
         return name.to_string();
     }
     match dialect {
-        Dialect::Mysql | Dialect::ClickHouse => format!("`{}`", name.replace('`', "``")),
+        Dialect::Mysql => format!("`{}`", name.replace('`', "``")),
+        // ClickHouse reads a backslash in backquotes as an escape, as it does in a string.
+        Dialect::ClickHouse => format!("`{}`", name.replace('\\', "\\\\").replace('`', "\\`")),
         Dialect::SqlServer => format!("[{}]", name.replace(']', "]]")),
         _ => format!("\"{}\"", name.replace('"', "\"\"")),
     }
@@ -1607,7 +1609,7 @@ mod tests {
 
     #[test]
     fn quotes_a_name_only_where_the_dialect_needs_it() {
-        for (dialect, name, written) in [(Dialect::Postgres, "users", "users"), (Dialect::Postgres, "camelCase", "\"camelCase\""), (Dialect::Postgres, "two words", "\"two words\""), (Dialect::Postgres, "order", "\"order\""), (Dialect::Postgres, "user", "\"user\""), (Dialect::Postgres, "table", "\"table\""), (Dialect::Sqlite, "index", "\"index\""), (Dialect::Sqlite, "name", "name"), (Dialect::Mysql, "camelCase", "camelCase"), (Dialect::Mysql, "two words", "`two words`"), (Dialect::SqlServer, "a]b", "[a]]b]")] {
+        for (dialect, name, written) in [(Dialect::Postgres, "users", "users"), (Dialect::Postgres, "camelCase", "\"camelCase\""), (Dialect::Postgres, "two words", "\"two words\""), (Dialect::Postgres, "order", "\"order\""), (Dialect::Postgres, "user", "\"user\""), (Dialect::Postgres, "table", "\"table\""), (Dialect::Sqlite, "index", "\"index\""), (Dialect::Sqlite, "name", "name"), (Dialect::Mysql, "camelCase", "camelCase"), (Dialect::Mysql, "two words", "`two words`"), (Dialect::Mysql, "a`b\\c", "`a``b\\c`"), (Dialect::ClickHouse, "two words", "`two words`"), (Dialect::ClickHouse, "a`b\\c", "`a\\`b\\\\c`"), (Dialect::SqlServer, "a]b", "[a]]b]")] {
             assert_eq!(quoted(&Place::new(dialect), name), written);
         }
     }

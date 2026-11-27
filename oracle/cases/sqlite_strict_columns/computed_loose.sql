@@ -1,0 +1,1 @@
+select n + 1 as plus, -n as negated, abs(n) as absolute, coalesce(n, 0) as filled, ifnull(n, 0) as ifnulled, nullif(n, 7) as nulled, iif(id > 0, n, 0) as chosen, case when id > 0 then n else 0 end as cased, max(n, 0) as larger, n % 2 as remainder, cast(n as integer) as cast_back, length(n) as len from loose

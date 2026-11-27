@@ -247,7 +247,7 @@ select ddl from (
 
 /** The schema as the page shows it where the database refuses to give it: each table's columns, as a CREATE TABLE writes them. */
 function schemaText(dialect: Dialect, cat: Catalog): string {
-  const q = (name: string) => (/^[a-z_][a-z0-9_]*$/.test(name) ? name : dialect === "mysql" || dialect === "clickhouse" ? `\`${name}\`` : `"${name.replace(/"/g, '""')}"`);
+  const q = (name: string) => (/^[a-z_][a-z0-9_]*$/.test(name) ? name : dialect === "mysql" ? `\`${name.replace(/`/g, "``")}\`` : dialect === "clickhouse" ? `\`${name.replace(/[\\`]/g, "\\$&")}\`` : `"${name.replace(/"/g, '""')}"`);
   return cat.tables
     .map((t) => {
       const width = Math.max(...t.columns.map((c) => q(c.name).length));
