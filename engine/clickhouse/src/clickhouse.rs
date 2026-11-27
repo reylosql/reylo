@@ -611,8 +611,9 @@ fn names_itself(item: &str) -> bool {
     let alias = || {
         let bytes = item.as_bytes();
         let start = match *bytes.last()? {
-            // A name in typographic quotes ends at its first `”`, so it opens at the `“` whose first `”` is the last.
-            _ if item.ends_with('”') => item.match_indices('“').map(|(at, _)| at).find(|&at| name_length(&item[at..]) == Some(item.len() - at))?,
+            // A name in typographic quotes, as the lexer's span that ends the item: a `“` in an earlier
+            // string or comment opens none.
+            _ if item.ends_with('”') => lex::lex(item, Dialect::Clickhouse).ok()?.opaque.last().filter(|&&(_, end)| end == item.len())?.0,
             quote @ (b'`' | b'"') => (0..bytes.len() - 1).rev().find(|&i| bytes[i] == quote && (i == 0 || bytes[i - 1] != b'\\'))?,
             _ => bytes.iter().rposition(|b| !(b.is_ascii_alphanumeric() || *b == b'_' || *b >= 0x80)).map_or(0, |i| i + 1),
         };
@@ -2754,6 +2755,7 @@ mod tests {
         assert!(names_itself("a.b.c") && names_itself("`a b`") && names_itself("f(x) AS `a b`") && names_itself("x as y") && names_itself("(1)AS y"));
         // A name in typographic quotes, which ClickHouse reads as it reads one in backquotes.
         assert!(names_itself("“a b”") && names_itself("1 AS “a b”") && names_itself("‘x’ AS “a b”") && !names_itself("1 + “a”"));
+        assert!(names_itself("'“' AS “a b”") && names_itself("“a“b”") && names_itself("1 /* “ */ AS “a b”"));
         assert!(!names_itself("a + b") && !names_itself("f(x)") && !names_itself("pair.1") && !names_itself("CAST(x AS String)") && !names_itself("x IS NULL"));
     }
 
