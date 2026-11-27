@@ -187,7 +187,7 @@ impl<'a> From<'a> {
                 let unqualified = name.0.len() == 1;
                 let (source, columns) = match ctes.iter().rposition(|(n, _, _, _)| unqualified && *n == lower) {
                     // A WITH query MySQL may read otherwise where it is read has no rows to follow.
-                    Some(_) if self.keys.rebound => (Source::Other, Vec::new()),
+                    Some(_) if self.keys.rebound.has(&lower) => (Source::Other, Vec::new()),
                     Some(at) => match ctes[at].1 {
                         Some(body) => (Source::Query(body, ctes[..ctes[at].2].to_vec()), overlay(&ctes[at].3, &own)),
                         None => (Source::Other, Vec::new()),

@@ -221,14 +221,47 @@ pub fn with_outlives_operand(q: &Query) -> bool {
 /// and where a part the walk does not follow, an expression's subquery, holds a WITH. Nothing that
 /// follows a name to its WITH query reads such a statement.
 pub fn with_rebound(q: &Query) -> bool {
-    rebound_in(q, &[]).unwrap_or(true)
+    !matches!(rebound(q), Rebound::None)
 }
 
-/// [`with_rebound`] for `q`, read inside the WITH queries of the queries around it (`scope`,
-/// outermost first): whether its WITH declares a name one of those it reads names as a table,
-/// itself or through the others, or a query inside it does. `None` where a part the walk does
+/// The WITH queries of a statement that MySQL may read otherwise where they are read
+/// ([`with_rebound`]).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub enum Rebound {
+    #[default]
+    None,
+    /// These, by name in lower case.
+    Named(HashSet<String>),
+    /// Any of them: a part the walk does not follow holds a WITH.
+    All,
+}
+
+impl Rebound {
+    /// Whether the WITH query named `name` may be one.
+    pub fn has(&self, name: &str) -> bool {
+        match self {
+            Rebound::None => false,
+            Rebound::Named(names) => names.contains(&name.to_ascii_lowercase()),
+            Rebound::All => true,
+        }
+    }
+}
+
+/// The WITH queries of `q` MySQL may read otherwise where they are read.
+pub fn rebound(q: &Query) -> Rebound {
+    let mut names = HashSet::new();
+    match rebound_in(q, &[], &mut names) {
+        None => Rebound::All,
+        Some(()) if names.is_empty() => Rebound::None,
+        Some(()) => Rebound::Named(names),
+    }
+}
+
+/// [`rebound`] for `q`, read inside the WITH queries of the queries around it (`scope`,
+/// outermost first): each of those it reads, itself or through the others, that names as a table
+/// a name its WITH declares, and those of each query inside it. `None` where a part the walk does
 /// not follow holds a WITH.
-fn rebound_in(q: &Query, scope: &[Cte]) -> Option<bool> {
+fn rebound_in(q: &Query, scope: &[Cte], names: &mut HashSet<String>) -> Option<()> {
     let mut inner = scope.to_vec();
     if let Some(own) = &q.with {
         // A name the query's own WITH declares is its own, but in an own WITH query written up to
@@ -245,19 +278,19 @@ fn rebound_in(q: &Query, scope: &[Cte]) -> Option<bool> {
             })
             .cloned()
             .collect();
-        if reached(&around, &q.to_string()).into_iter().any(|cte| reads_any(&cte.query, &own.cte_tables)) {
-            return Some(true);
+        for cte in reached(&around, &q.to_string()) {
+            if reads_any(&cte.query, &own.cte_tables) {
+                names.insert(cte.alias.name.value.to_ascii_lowercase());
+            }
         }
         inner.extend(own.cte_tables.iter().cloned());
     }
     let mut below = Vec::new();
     children(q, &mut below)?;
     for child in below {
-        if rebound_in(child, &inner)? {
-            return Some(true);
-        }
+        rebound_in(child, &inner, names)?;
     }
-    Some(false)
+    Some(())
 }
 
 /// The WITH queries of `ctes` that `text` reads, and those they read in turn, in any order, as
@@ -892,6 +925,17 @@ mod tests {
         assert_eq!(targets("select * from (select * from (select 1) e) d").len(), 1);
         assert!(targets("select * from users u, lateral (select u.id) d").is_empty());
         assert_eq!(targets("with recursive r as (select 1 as n union all select n + 1 from r where n < 3) select n from r").len(), 0);
+    }
+
+    #[test]
+    fn only_the_with_queries_a_nested_with_reads_again_are_rebound() {
+        let sql = "with o as (select 1 as x), z as (select x from tu) select o.x from o where exists (with tu as (select 1 as x) select 1 from z)";
+        assert_eq!(rebound(&query(sql)), Rebound::Named(["z".to_string()].into_iter().collect()));
+        // Through a WITH between them, the one that reads the name.
+        let sql = "with z as (select x from tu) select d.x from (with y as (select x from z) select e.x from (with tu as (select 1 as x) select x from y) e) d";
+        assert_eq!(rebound(&query(sql)), Rebound::Named(["z".to_string()].into_iter().collect()));
+        assert_eq!(rebound(&query("with z as (select x from tu) select x from z")), Rebound::None);
+        assert_eq!(rebound(&query("with z as (select x from tu) select (select 1 from z where x in (select 1)) as k")), Rebound::None);
     }
 
     #[test]

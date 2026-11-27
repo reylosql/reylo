@@ -64,7 +64,7 @@ pub fn plan(q: &Query, columns: &Columns) -> Plan {
     // aggregate's arguments valid under its GROUP BY, which a probe of them carries ([`group_of`]).
     let groups = group_of(select).into_iter().map(|g| (0, g)).collect();
     let rolled = usize::from(crate::mysql_nulls::rolls_up(&select.group_by));
-    let mut b = Builder { stack: vec![top], columns, ctes: with_names(q), rebound: crate::mysql_derived::with_rebound(q), wanted: Vec::new(), next_ctx: 0, drafts: Vec::new(), overflowed: false, booleans: Vec::new(), either: Vec::new(), digits: Vec::new(), reads: Reads::Itself, grouped, groups, in_aggregate: 0, rolled, rollups: (rolled > 0).then_some(0).into_iter().collect(), rowless: HashSet::new(), windows: select.named_window.clone() };
+    let mut b = Builder { stack: vec![top], columns, ctes: with_names(q), rebound: crate::mysql_derived::rebound(q), wanted: Vec::new(), next_ctx: 0, drafts: Vec::new(), overflowed: false, booleans: Vec::new(), either: Vec::new(), digits: Vec::new(), reads: Reads::Itself, grouped, groups, in_aggregate: 0, rolled, rollups: (rolled > 0).then_some(0).into_iter().collect(), rowless: HashSet::new(), windows: select.named_window.clone() };
     if b.may_be_rowless(select) {
         b.rowless.insert(0);
     }
@@ -404,9 +404,9 @@ struct Builder<'a> {
     columns: &'a Columns,
     /// The WITH queries in scope where the builder stands, whose names are no tables'.
     ctes: Vec<Cte>,
-    /// Whether MySQL may read a WITH query of the statement otherwise where it is read
-    /// ([`crate::mysql_derived::with_rebound`]): then no WITH query's columns are followed.
-    rebound: bool,
+    /// The WITH queries of the statement MySQL may read otherwise where they are read
+    /// ([`crate::mysql_derived::rebound`]), whose columns are not followed.
+    rebound: crate::mysql_derived::Rebound,
     wanted: Vec<String>,
     next_ctx: usize,
     drafts: Vec<Draft>,
@@ -541,7 +541,7 @@ impl Builder<'_> {
                         // the reference names it is surely the one read: a name in another case
                         // may be a table where table names are compared as written.
                         Some(t) => match self.ctes.iter().rev().find(|c| c.name.eq_ignore_ascii_case(t)) {
-                            Some(cte) if cte.name == *t && !self.rebound => Source::Columns(cte.columns.clone()),
+                            Some(cte) if cte.name == *t && !self.rebound.has(t) => Source::Columns(cte.columns.clone()),
                             Some(_) => Source::Unknown,
                             None => Source::Catalog(t.clone()),
                         },
