@@ -192,12 +192,15 @@ const PARAMS: [type: string, name: string, value: unknown, back?: unknown][] = [
 const row = (pairs: [string, unknown][]) => Object.fromEntries(pairs);
 
 test("a ClickHouse type's name reads into its parts and writes back on one line", () => {
-  for (const name of ["UInt64", "Nullable(String)", "Decimal(18, 4)", "DateTime64(3, 'UTC')", "Enum8('admin' = 1, 'it\\'s' = -2)", "Tuple(n UInt8, s Nullable(String))", "Tuple(`a b` UInt8)", "Tuple()", "Map(String, Array(UInt8))", "Variant(String, UInt8)", "AggregateFunction(quantiles(0.5, 0.9), UInt64)", "JSON(a.b UInt32, max_dynamic_paths = 8, SKIP c.d)"]) {
+  for (const name of ["UInt64", "Nullable(String)", "Decimal(18, 4)", "DateTime64(3, 'UTC')", "Enum8('admin' = 1, 'it\\'s' = -2)", "Tuple(n UInt8, s Nullable(String))", "Tuple(`a b` UInt8)", "Tuple(`a.b` UInt8, b String)", "Nested(`a.b` UInt8, `select` String)", "Tuple(`NULL` UInt8, `Values` String)", "Tuple(`a\\nb` UInt8)", "Enum8('a\\nb' = 1, 'c\\td' = 2, 'e\\rf' = 3, 'g\\0h' = 4, 'i\\bj' = 5, 'k\\fl' = 6)", "Tuple()", "Map(String, Array(UInt8))", "Variant(String, UInt8)", "AggregateFunction(quantiles(0.5, 0.9), UInt64)", "JSON(`a.b` UInt32, max_dynamic_paths = 8, SKIP c.d)"]) {
     assert.equal(typeName(parseType(name)!), name);
   }
   // As a describe writes a tuple with names, a member a line, and as a result's header writes it.
   assert.equal(canonical("Tuple(\n    x Float64,\n    y Tuple(\n        z String))"), "Tuple(x Float64, y Tuple(z String))");
   assert.equal(canonical("Decimal(18,4)"), "Decimal(18, 4)");
+  // A module built before member names with a dot were quoted holds them bare, and a result naming the same members is not changed.
+  assert.equal(canonical("Tuple(a.1 UInt8, a..b String, a. UInt8)"), canonical("Tuple(`a.1` UInt8, `a..b` String, `a.` UInt8)"));
+  assert.notEqual(canonical("Tuple(a.2 UInt8)"), canonical("Tuple(`a.1` UInt8)"));
   assert.equal(parseType("Array(String"), undefined);
   assert.equal(parseType("UInt64 extra"), undefined);
 });
