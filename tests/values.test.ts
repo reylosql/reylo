@@ -1192,6 +1192,14 @@ test("a JSON parameter's BigInt is written as its digits, whatever toJSON an app
   } finally {
     delete (BigInt.prototype as unknown as { toJSON?: unknown }).toJSON;
   }
+  // So is one BigInt inherits.
+  Object.defineProperty(Object.prototype, "toJSON", { configurable: true, writable: true, value: function (this: unknown) { return typeof this === "bigint" ? Number(this) : this; } });
+  try {
+    assert.equal(writeJson({ n: 9007199254740993n }, "sqlite", fail), '{"n":9007199254740993}');
+    assert.throws(() => writeJson({ n: 2n ** 63n }, "sqlite", fail), /the BigInt 9223372036854775808, which SQLite reads/);
+  } finally {
+    delete (Object.prototype as unknown as { toJSON?: unknown }).toJSON;
+  }
   // A getter runs once.
   let reads = 0;
   const once = Object.defineProperty({}, "n", { enumerable: true, get: () => (++reads === 1 ? 9007199254740993n : 1n) });

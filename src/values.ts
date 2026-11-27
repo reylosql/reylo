@@ -191,8 +191,8 @@ export function writeJson(v: unknown, dialect: Dialect, fail: (message: string) 
   // An app's `BigInt.prototype.toJSON` runs before any replacer sees the BigInt it turns into text
   // or a rounded number, so then the value is written by the algorithm below, which reads each
   // property once and a BigInt before its toJSON().
-  // Found by its property, whose getter, if it has one, runs only when JSON.stringify reads it.
-  const bigintHook = Object.getOwnPropertyDescriptor(BigInt.prototype, "toJSON") !== undefined;
+  // Found by its property, its own or one it inherits, whose getter runs only when JSON.stringify reads it.
+  const bigintHook = "toJSON" in BigInt.prototype;
   if (rawJson !== undefined && !bigintHook) {
     const places = new WeakMap<object, string>();
     return JSON.stringify(v, function (this: object, key: string, x: unknown) {
