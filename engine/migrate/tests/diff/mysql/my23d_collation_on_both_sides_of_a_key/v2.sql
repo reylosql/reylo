@@ -1,0 +1,1 @@
+create table p (code varchar(10) collate utf8mb4_bin primary key); create table c (id int primary key, code varchar(10) collate utf8mb4_bin, foreign key (code) references p (code)); create table q (code varchar(10) primary key); create table r (id int primary key, code varchar(10), constraint r_code foreign key (code) references q (code));
