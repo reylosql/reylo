@@ -35,9 +35,11 @@ function asJson(rows: unknown): string {
 /** JSON read back exactly, a whole number past 2^53 - 1 as a BigInt of its digits, which Reylo's validator refuses as a number that may already be another one. */
 const exactly = (text: string): unknown => JSON.parse(text, (_key, x, context?: { source?: string }) => (typeof x === "number" && !Number.isSafeInteger(x) && /^-?\d+$/.test(context?.source ?? "") ? BigInt(context!.source!) : x));
 
-/** A run's refusal of a 64-bit integer inside a document JSON.parse would round, which only a type of 64-bit integers may meet. */
+/** A run's refusal of a 64-bit integer inside a document, which JSON.parse would round. */
 const refusesRounded = (message: string) => /holds, inside its JSON.*, the integer -?\d+, which is (past|below)/.test(message);
-const wide = /int8|bigint|Int64|UInt64/i;
+const SAFE = BigInt(Number.MAX_SAFE_INTEGER);
+/** Whether a case of 64-bit integers holds one past 2^53 - 1, which every document of it must refuse. */
+const unsafe = ([name, , values]: Case) => /int8|bigint|Int64|UInt64/i.test(name) && values.some((v) => (v.match(/-?\d{16,}/g) ?? []).some((d) => BigInt(d) > SAFE || BigInt(d) < -SAFE));
 
 /**
  * ajv, as a consumer of the schemas reads them, with every format they name held to what it claims:
@@ -96,8 +98,11 @@ async function check(root: string, cases: readonly Case[], statements: (table: s
   const problems: string[] = [];
   const typed: { file: string; about: string; json: unknown }[] = [];
   for (const [i, c] of cases.entries()) {
-    for (const [j, sql] of statements(`t${i}`, c).entries()) {
+    // A case a document refuses also has its column read on its own, which holds every value.
+    const refused = unsafe(c);
+    for (const [j, sql] of [...statements(`t${i}`, c), ...(refused ? [`select c from t${i}`] : [])].entries()) {
       const about = `${c[0]}: ${sql}`;
+      const document = refused && /json/i.test(sql);
       let q: Built;
       try {
         q = await built(root, `q${i}_${j}`, `${sql}\n`);
@@ -113,7 +118,11 @@ async function check(root: string, cases: readonly Case[], statements: (table: s
       } catch (e) {
         const message = (e as Error).message.split("\n")[0]!;
         // An edge of a 64-bit integer inside a document is refused rather than returned rounded.
-        if (!(refusesRounded(message) && wide.test(c[0]))) problems.push(`${about}: the run throws ${message}`);
+        if (!(document && refusesRounded(message))) problems.push(`${about}: the run throws ${message}`);
+        continue;
+      }
+      if (document) {
+        problems.push(`${about}: a document holding a 64-bit integer past 2^53 - 1 came back, which JSON.parse rounds: ${text}`);
         continue;
       }
       const error = validate(q.outputSchema, exactly(text));
