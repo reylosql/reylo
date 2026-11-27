@@ -513,18 +513,18 @@ fn reads_any(q: &Query, ctes: &[Cte]) -> bool {
 }
 
 /// The names, in lower case, a query reads as tables of its FROMs at any depth, but those a WITH
-/// around the reading declares: a WITH query's name in the query's own body, and in a WITH
-/// query's, the names before it (all of them in a RECURSIVE WITH). `None` where a part the walk
-/// does not follow holds a WITH.
+/// around the reading surely declares: one spelled as written there, since names may compare as
+/// written, a WITH query's name in the query's own body, and in a WITH query's, the names before
+/// it (and its own in a RECURSIVE WITH). `None` where a part the walk does not follow holds a
+/// WITH.
 fn free_tables(q: &Query) -> Option<HashSet<String>> {
     fn tables(item: &TableWithJoins, bound: &HashSet<String>, out: &mut HashSet<String>) {
         for factor in std::iter::once(&item.relation).chain(item.joins.iter().map(|j| &j.relation)) {
             match factor {
                 TableFactor::Table { name, .. } => {
                     if let [ObjectNamePart::Identifier(t)] = name.0.as_slice() {
-                        let t = t.value.to_ascii_lowercase();
-                        if !bound.contains(&t) {
-                            out.insert(t);
+                        if !bound.contains(&t.value) {
+                            out.insert(t.value.to_ascii_lowercase());
                         }
                     }
                 }
@@ -549,10 +549,10 @@ fn free_tables(q: &Query) -> Option<HashSet<String>> {
         children(q, &mut kids)?;
         let mut own = 0;
         if let Some(with) = &q.with {
-            let names: Vec<String> = with.cte_tables.iter().map(|c| c.alias.name.value.to_ascii_lowercase()).collect();
+            let names: Vec<String> = with.cte_tables.iter().map(|c| c.alias.name.value.clone()).collect();
             for (i, cte) in with.cte_tables.iter().enumerate() {
                 let mut seen = bound.clone();
-                seen.extend(names[..if with.recursive { names.len() } else { i }].iter().cloned());
+                seen.extend(names[..if with.recursive { i + 1 } else { i }].iter().cloned());
                 walk(&cte.query, &seen, out)?;
             }
             inner.extend(names);
@@ -1011,6 +1011,10 @@ mod tests {
             "with z as (select x from t4) select t3.k from t3 join z on z.x in (with t4 as (select 1 as x) select z.x from z)",
             "with z as (select x from t4) select (with t4 as (select 1 as x) select json_arrayagg(z.x) from z) as j",
             "with z as (select x from t4) select 'a_' like 'a#_' escape (with t4 as (select '#' as x) select x from z) as matched",
+            // A name in another case, or declared after the WITH query in a RECURSIVE WITH, may be
+            // the one around.
+            "with z as (with T4 as (select 1 as x) select x from t4) select d.x from (with t4 as (select 2 as x) select x from z) d",
+            "with recursive z as (with recursive a as (select x from t4), t4 as (select 1 as x) select x from a) select d.x from (with t4 as (select 2 as x) select x from z) d",
             "with z as (select x from t4) select d.x from (with rollupx as (select 1 as x), t4 as (select 2 as x) select z.x from z) d",
             // Through a WITH between them: e reads y, y reads z, and z's t4 is e's own.
             "with z as (select x from t4) select d.x from (with y as (select x from z) select e.x from (with t4 as (select 1 as x) select x from y) e) d",
