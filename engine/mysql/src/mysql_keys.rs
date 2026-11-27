@@ -23,7 +23,7 @@
 //! two strings of different collations compare under one the server picks, and an exact number
 //! compared with a FLOAT or DOUBLE compares as a double.
 
-use crate::mysql::{compares_as_is, const_limit, deterministic, is_variable, one_before_limit, reads_column, select_of, value_class, Class, Keys};
+use crate::mysql::{builtin, compares_as_is, const_limit, deterministic, is_dual, is_variable, one_before_limit, reads_column, select_of, value_class, Class, Keys};
 use crate::mysql_names::Reads;
 use syntax::mysql::ast::{self, Distinct, Expr, GroupByExpr, JoinConstraint, JoinOperator, ObjectNamePart, Query, Select, SelectItem, SelectItemQualifiedWildcardKind, SetExpr, TableFactor, TableWithJoins};
 use std::cell::RefCell;
@@ -114,11 +114,13 @@ struct From<'a> {
     /// another case is, on a server that keeps case, an enclosing item's spelled the same.
     enclosed: bool,
     keys: &'a Keys,
+    /// The WITH queries the SELECT sees, which its subqueries see too.
+    ctes: Ctes<'a>,
 }
 
 impl<'a> From<'a> {
     fn read(s: &'a Select, ctes: &[Cte<'a>], enclosed: bool, keys: &'a Keys) -> From<'a> {
-        let mut from = From { items: Vec::new(), conjuncts: Vec::new(), merged: false, refused: None, enclosed, keys };
+        let mut from = From { items: Vec::new(), conjuncts: Vec::new(), merged: false, refused: None, enclosed, keys, ctes: ctes.to_vec() };
         for twj in &s.from {
             from.flatten(twj, ctes, false);
         }
@@ -372,11 +374,114 @@ impl<'a> From<'a> {
     /// of `i`, only columns of `done` items and of enclosing queries, gives every row one value,
     /// and compares the column as it is.
     fn equates(&self, e: &Expr, i: usize, column: &str, class: Option<Class>, done: &[bool]) -> bool {
+        let own = |side: &Expr| matches!(self.place_expr(side), Some(Placed::Item(j, c)) if j == i && c == column);
+        if let Expr::InSubquery { expr, subquery, negated: false } = e {
+            return own(expr) && self.subquery_value(subquery, class, i, done, true);
+        }
         let Expr::BinaryOp { left, op: ast::BinaryOperator::Eq, right } = e else { return false };
         [(left, right), (right, left)].into_iter().any(|(side, value)| {
-            let own = matches!(self.place_expr(side), Some(Placed::Item(j, c)) if j == i && c == column);
-            own && self.reads(value).is_some_and(|read| read.iter().all(|j| *j != i && done[*j])) && self.compares(class, value)
+            own(side)
+                && match value.as_ref() {
+                    Expr::Subquery(q) => self.subquery_value(q, class, i, done, false),
+                    value => self.reads(value).is_some_and(|read| read.iter().all(|j| *j != i && done[*j])) && self.compares(class, value),
+                }
         })
+    }
+
+    /// Whether subquery `q`, compared with a key column of item `i` that compares as `class`, is one
+    /// value for every row: a plain SELECT of one column over tables, which reads no column of `i`,
+    /// of this FROM only `done` items' and otherwise only its own tables' and enclosing queries',
+    /// calls nothing that changes from row to row, and returns an exact number, as the key is one:
+    /// as with a column, both sides must be exact numbers ([`From::compares`]). The server refuses a
+    /// scalar subquery of more than one row; IN takes any number, so for it (`bounded`) the
+    /// subquery must be proved to return one row at most.
+    fn subquery_value(&self, q: &Query, class: Option<Class>, i: usize, done: &[bool], bounded: bool) -> bool {
+        let Some(s) = plain(q) else { return false };
+        let [SelectItem::UnnamedExpr(value) | SelectItem::ExprWithAlias { expr: value, .. }] = s.projection.as_slice() else { return false };
+        let GroupByExpr::Expressions(group, modifiers) = &s.group_by else { return false };
+        if q.with.is_some() || !modifiers.is_empty() || !class.is_some_and(Class::exact) {
+            return false;
+        }
+        let sub = From::read(s, &self.ctes, true, self.keys);
+        if sub.refused.is_some() || sub.merged || !sub.items.iter().all(|it| matches!(it.source, Source::Table(_)) && !it.renamed) {
+            return false;
+        }
+        // Its ORDER BY picks which row a LIMIT keeps, so a column of the query around there is a
+        // value per row as well.
+        let ordered: Vec<&Expr> = match q.order_by.as_ref().map(|o| &o.kind) {
+            None => Vec::new(),
+            Some(ast::OrderByKind::Expressions(terms)) => terms.iter().map(|t| &t.expr).collect(),
+            Some(_) => return false,
+        };
+        let limits: Vec<&Expr> = match &q.limit_clause {
+            None => Vec::new(),
+            Some(ast::LimitClause::LimitOffset { limit, offset, limit_by }) => limit.iter().chain(offset.iter().map(|o| &o.value)).chain(limit_by).collect(),
+            Some(ast::LimitClause::OffsetCommaLimit { offset, limit }) => vec![offset, limit],
+        };
+        let exprs = std::iter::once(value).chain(sub.conjuncts.iter().map(|c| c.expr)).chain(group).chain(s.having.iter()).chain(ordered).chain(limits);
+        exprs.into_iter().all(|e| self.one_value_beside(&sub, e, i, done))
+            && sub.output_class(value).is_some_and(Class::exact)
+            && (!bounded || at_most_one_in(q, &self.ctes, true, self.keys).is_ok())
+    }
+
+    /// Whether `e`, an expression of subquery `sub` of this FROM, reads only `sub`'s own columns,
+    /// enclosing queries' and `done` items' other than `i`, and calls nothing that changes from row
+    /// to row but `min`, `max` and `count`, which give the subquery's rows one value.
+    fn one_value_beside(&self, sub: &From, e: &Expr, i: usize, done: &[bool]) -> bool {
+        let all = |e: &Expr| self.one_value_beside(sub, e, i, done);
+        if is_variable(e) {
+            return false;
+        }
+        match e {
+            Expr::Identifier(_) | Expr::CompoundIdentifier(_) => match sub.place_expr(e) {
+                Some(Placed::Item(..)) => true,
+                Some(Placed::Outside) => match self.place_expr(e) {
+                    Some(Placed::Item(j, _)) => j != i && done[j],
+                    Some(Placed::Outside) => true,
+                    _ => false,
+                },
+                _ => false,
+            },
+            Expr::Value(_) | Expr::TypedString { .. } => true,
+            Expr::Nested(inner) | Expr::UnaryOp { expr: inner, .. } | Expr::Cast { expr: inner, .. } | Expr::IsNull(inner) | Expr::IsNotNull(inner) => all(inner),
+            Expr::BinaryOp { left, right, .. } => all(left) && all(right),
+            Expr::InList { expr, list, .. } => all(expr) && list.iter().all(all),
+            Expr::Between { expr, low, high, .. } => all(expr) && all(low) && all(high),
+            Expr::Function(f) if f.over.is_none() && f.filter.is_none() && f.within_group.is_empty() => {
+                let counted = matches!(builtin(f).as_str(), "min" | "max" | "count");
+                (counted || deterministic(&Expr::Function(ast::Function { args: ast::FunctionArguments::None, ..f.clone() })))
+                    && match &f.args {
+                        ast::FunctionArguments::None => true,
+                        ast::FunctionArguments::List(list) => list.clauses.is_empty() && list.args.iter().all(|a| match a {
+                            ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(x)) => all(x),
+                            ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Wildcard) => counted,
+                            _ => false,
+                        }),
+                        ast::FunctionArguments::Subquery(_) => false,
+                    }
+            }
+            _ => false,
+        }
+    }
+
+    /// What a subquery's one column compares as: a column of its own, as `min` and `max` keep it,
+    /// or a count, a BIGINT.
+    fn output_class(&self, e: &Expr) -> Option<Class> {
+        match e {
+            Expr::Nested(inner) => self.output_class(inner),
+            Expr::Function(f) if builtin(f) == "count" => Some(Class::Wide),
+            Expr::Function(f) if matches!(builtin(f).as_str(), "min" | "max") => match &f.args {
+                ast::FunctionArguments::List(list) if list.clauses.is_empty() => match list.args.as_slice() {
+                    [ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(x))] => self.output_class(x),
+                    _ => None,
+                },
+                _ => None,
+            },
+            _ => match self.place_expr(e)? {
+                Placed::Item(j, c) => self.class(j, &c),
+                _ => None,
+            },
+        }
     }
 
     /// Whether a key column of `class` compared with `value` compares as it is, and the value is
@@ -949,6 +1054,11 @@ fn at_most_one_anew(q: &Query, outer: &[Cte], enclosed: bool, keys: &Keys) -> Re
         return Ok(());
     }
     let s = select_of(q)?;
+    // With no FROM, or FROM DUAL, there is one row for the WHERE, a GROUP BY or a HAVING to keep or
+    // remove; WITH ROLLUP adds a row for each level of the grouping.
+    if (s.from.is_empty() || is_dual(s)) && matches!(&s.group_by, GroupByExpr::Expressions(_, modifiers) if modifiers.is_empty()) {
+        return Ok(());
+    }
     let ctes = ctes_of(q, outer);
     let from = From::read(s, &ctes, enclosed, keys);
     if let Some(why) = from.refused {
@@ -974,9 +1084,6 @@ fn at_most_one_anew(q: &Query, outer: &[Cte], enclosed: bool, keys: &Keys) -> Re
     }
     if s.having.is_some() {
         return Err("HAVING leaves a row per group".into());
-    }
-    if s.from.is_empty() {
-        return Err("a SELECT with no FROM and a WHERE can return no row or one, and the engine proves that only through a LIMIT".into());
     }
     let determined = from.determined(vec![false; n], &all, false);
     if determined.iter().all(|d| *d) {
@@ -1028,6 +1135,18 @@ pub(crate) fn tables_anywhere(q: &Query, schema: Option<&str>) -> Vec<String> {
                     for j in &twj.joins {
                         factor(&j.relation, ctes, schema, out);
                     }
+                }
+                // A subquery in the WHERE, the select list or the HAVING, whose keys and columns
+                // say whether it is one value a key can be pinned to.
+                let mut found = Vec::new();
+                for e in s.selection.iter().chain(s.having.iter()).chain(s.projection.iter().filter_map(|i| match i {
+                    SelectItem::UnnamedExpr(e) | SelectItem::ExprWithAlias { expr: e, .. } => Some(e),
+                    _ => None,
+                })) {
+                    crate::mysql::subqueries(e, &mut found);
+                }
+                for sub in found {
+                    query(sub, ctes, schema, out);
                 }
             }
             SetExpr::SetOperation { left, right, .. } => {

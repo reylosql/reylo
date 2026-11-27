@@ -1,0 +1,12 @@
+dual.sql: one (n: varchar) -> { n: varchar? }
+dual_where.sql: at_most_one (n: varchar, ok: int32) -> { n: varchar? }
+key_correlated.sql: many () -> { id: int }
+key_in.sql: at_most_one (id: int32) -> { id: int }
+key_in_many.sql: many () -> { id: int }
+key_ordered.sql: at_most_one (n: int32) -> { id: int }
+key_ordered_correlated.sql: many () -> { id: int }
+key_subquery.sql: at_most_one (id: int32) -> { id: int }
+key_subquery_max.sql: at_most_one () -> { id: int }
+no_from_rollup.sql: many () -> { one: bigint | int? }
+no_from_where.sql: at_most_one (n: varchar, ok: int32) -> { n: varchar? }
+text_key_subquery.sql: many (id: int32) -> { id: int }

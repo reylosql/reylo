@@ -22,7 +22,7 @@ use crate::host::{as_str, Host, Lazy};
 use crate::lex::{self, Lexed, MysqlText, Style, Target};
 use crate::types::{Cardinality, Field, Kind as TyKind, Slot, StatementKind, Type};
 use serde_json::{json, Value};
-use syntax::mysql::ast::{self, Expr, FunctionArg, FunctionArgExpr, GroupByExpr, LimitClause, Query, Select, SelectItem, SetExpr, Statement, TableFactor};
+use syntax::mysql::ast::{self, Expr, FunctionArg, FunctionArgExpr, GroupByExpr, LimitClause, Query, Select, SelectItem, SetExpr, Statement, TableFactor, TableWithJoins};
 use std::collections::{HashMap, HashSet};
 
 /// The session's `sql_mode`, asked only for a statement whose reading turns on it.
@@ -972,33 +972,36 @@ pub(crate) fn lone_aggregate(s: &Select) -> bool {
         && (s.having.as_ref().is_some_and(calls_aggregate) || s.projection.iter().filter_map(item_expr).any(calls_aggregate))
 }
 
+/// The subqueries an expression holds, outside any subquery of them: scalar ones, EXISTS, IN and a
+/// call's.
+pub(crate) fn subqueries<'e>(e: &'e Expr, out: &mut Vec<&'e Query>) {
+    match e {
+        Expr::Subquery(q) | Expr::Exists { subquery: q, .. } => out.push(&**q),
+        Expr::InSubquery { expr, subquery, .. } => {
+            out.push(&**subquery);
+            subqueries(expr, out);
+        }
+        Expr::Function(f) => match &f.args {
+            ast::FunctionArguments::Subquery(q) => out.push(&**q),
+            _ => call_args(f).0.into_iter().for_each(|a| subqueries(a, out)),
+        },
+        Expr::Nested(inner) | Expr::UnaryOp { expr: inner, .. } | Expr::Cast { expr: inner, .. } | Expr::IsNull(inner) | Expr::IsNotNull(inner) => subqueries(inner, out),
+        Expr::BinaryOp { left, right, .. } => {
+            subqueries(left, out);
+            subqueries(right, out);
+        }
+        Expr::Case { operand, conditions, else_result, .. } => {
+            for part in operand.as_deref().into_iter().chain(conditions.iter().flat_map(|c| [&c.condition, &c.result])).chain(else_result.as_deref()) {
+                subqueries(part, out);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// The tables, each read alone and by its bare name, of the subqueries among the select items of
 /// an aggregate with no GROUP BY.
 fn rowless_tables(q: &Query) -> Vec<String> {
-    fn subqueries<'e>(e: &'e Expr, out: &mut Vec<&'e Query>) {
-        match e {
-            Expr::Subquery(q) | Expr::Exists { subquery: q, .. } => out.push(&**q),
-            Expr::InSubquery { expr, subquery, .. } => {
-                out.push(&**subquery);
-                subqueries(expr, out);
-            }
-            Expr::Function(f) => match &f.args {
-                ast::FunctionArguments::Subquery(q) => out.push(&**q),
-                _ => call_args(f).0.into_iter().for_each(|a| subqueries(a, out)),
-            },
-            Expr::Nested(inner) | Expr::UnaryOp { expr: inner, .. } | Expr::Cast { expr: inner, .. } | Expr::IsNull(inner) | Expr::IsNotNull(inner) => subqueries(inner, out),
-            Expr::BinaryOp { left, right, .. } => {
-                subqueries(left, out);
-                subqueries(right, out);
-            }
-            Expr::Case { operand, conditions, else_result, .. } => {
-                for part in operand.as_deref().into_iter().chain(conditions.iter().flat_map(|c| [&c.condition, &c.result])).chain(else_result.as_deref()) {
-                    subqueries(part, out);
-                }
-            }
-            _ => {}
-        }
-    }
     let SetExpr::Select(s) = q.body.as_ref() else { return Vec::new() };
     if !lone_aggregate(s) {
         return Vec::new();
@@ -3395,10 +3398,16 @@ pub(crate) fn one_before_limit(q: &Query) -> Result<(), String> {
     }) {
         return Ok(());
     }
-    if s.from.is_empty() && s.selection.is_none() {
+    if (s.from.is_empty() || is_dual(s)) && s.selection.is_none() {
         return Ok(());
     }
     Err("a FROM returns a row per row it matches, and only an aggregate with no GROUP BY collapses them to one".into())
+}
+
+/// Whether a SELECT reads `FROM DUAL`, which is no table: the parser writes it as one named `DUAL`,
+/// with no quotes, which no table can be named, since the word is reserved.
+pub(crate) fn is_dual(s: &Select) -> bool {
+    matches!(s.from.as_slice(), [TableWithJoins { relation: TableFactor::Table { name, alias: None, .. }, joins }] if joins.is_empty() && matches!(name.0.as_slice(), [ast::ObjectNamePart::Identifier(i)] if i.quote_style.is_none() && i.value.eq_ignore_ascii_case("dual")))
 }
 
 /// Whether a key column of this class compared with a value of this one compares the column as
