@@ -633,6 +633,9 @@ fn json_image_of(t: &Value, dialect: &str, in_union: bool) -> String {
                     "number".into()
                 } else if name.to_uppercase() == "NUMERIC" {
                     "number | string".into()
+                } else if items(&t["members"]).iter().all(|m| matches!(m["kind"].as_str(), Some("integer" | "float"))) {
+                    // An INTEGER that may be a REAL, which SQLite keeps outside a STRICT table.
+                    "number".into()
                 } else {
                     JSON_TYPE.into()
                 };
