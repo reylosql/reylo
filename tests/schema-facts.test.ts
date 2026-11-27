@@ -82,10 +82,47 @@ test("a number's facts are written where its form here is a JSON number and they
   assert.equal((output(numeric, true) as { minimum?: number }).minimum, 0);
   assert.equal((output(numeric, true) as { exclusiveMaximum?: number }).exclusiveMaximum, undefined);
   // A divisor is written only where a JSON number is that very decimal: one a double rounds would hold a value to another divisor.
-  const divisor = (multiple_of: string) => (output({ kind: "decimal", label: "numeric", multiple_of } as EngineType, true) as { multipleOf?: number }).multipleOf;
+  const divisor = (multiple_of: string) => (output({ kind: "decimal", label: "numeric", precision: 10, multiple_of } as EngineType, true) as { multipleOf?: number }).multipleOf;
   assert.deepEqual([divisor("0.01"), divisor("0.50"), divisor("2.5e-3"), divisor("1E2")], [0.01, 0.5, 0.0025, 100]);
   for (const text of ["1e-400", "9007199254740993", "0.10000000000000000001", "1e400", `1${"0".repeat(131000)}`]) assert.equal(divisor(text), undefined, text.slice(0, 24));
   assert.equal(divisor(`1.${"0".repeat(131000)}`), 1);
+  // A bound is written only where a JSON number is that very decimal too: an exact reader holds 0.29999999999999999 to it.
+  assert.equal((output({ ...numeric, min: "0.29999999999999999" } as EngineType, true) as { minimum?: number }).minimum, undefined);
+  assert.equal((output({ ...numeric, min: "0.3" } as EngineType, true) as { minimum?: number }).minimum, 0.3);
+  // A divisor and an exclusive bound only where a double holds every value exactly, as JSON.parse reads it: an integer within
+  // ±2^53 by its width or its bounds, a decimal of at most 15 digits. Past that a true multiple, 9007199254740993 of 3, reads
+  // as 9007199254740992, and a value just under an exclusive bound reads as the bound. An inclusive bound holds of a rounded value too.
+  const facts = (t: object, inJson = false) => output(t as EngineType, inJson) as Record<string, unknown>;
+  assert.equal(facts({ ...int8, multiple_of: "3" }).multipleOf, undefined);
+  assert.equal(facts({ ...int8, multiple_of: "3", min: "-9007199254740991", max: "9007199254740991" }).multipleOf, 3);
+  assert.equal(facts({ ...int8, multiple_of: "3", min: "0" }).multipleOf, undefined);
+  assert.equal(facts({ kind: "integer", bits: 53, unsigned: true, multiple_of: "3" }).multipleOf, 3);
+  assert.equal(facts({ kind: "decimal", label: "numeric", multiple_of: "0.05" }, true).multipleOf, undefined);
+  assert.deepEqual(facts({ kind: "decimal", label: "numeric", precision: 16, multiple_of: "0.05", min: "0.1", exclusive_max: "100" }, true), { type: "number", format: "decimal", minimum: 0.1 });
+  assert.deepEqual(facts({ kind: "decimal", label: "numeric", precision: 15, multiple_of: "0.05", min: "0.1", exclusive_max: "100" }, true), { type: "number", format: "decimal", minimum: 0.1, exclusiveMaximum: 100, multipleOf: 0.05 });
+  // A float narrower than a double is written as its own shortest text, which reads as another double: no bounds.
+  assert.deepEqual(facts({ kind: "float", exponent_bits: 8, mantissa_bits: 23, label: "float4", min: "0.1" }), { type: "number", format: "float" });
+});
+
+test("a tuple, a union, an intersection and a tagged union of nothing are JSON Schema 2020-12 schemas still, which refuses an empty prefixItems, anyOf and allOf", () => {
+  const ajv = new Ajv2020({ strict: false });
+  const empty: [EngineType, object][] = [
+    [{ kind: "tuple", elements: [] } as EngineType, { type: "array", items: false, minItems: 0, maxItems: 0 }],
+    [{ kind: "union", members: [] } as EngineType, { not: {} }],
+    [{ kind: "intersection", members: [] } as EngineType, {}],
+    [{ kind: "tagged_union", alternatives: [] } as EngineType, { not: {} }],
+  ];
+  for (const [t, schema] of empty) {
+    assert.deepEqual(output(t), schema, t.kind);
+    assert.ok(ajv.validateSchema(output(t) as object), t.kind);
+  }
+});
+
+test("a field named __proto__ is a key of the schema like any other, required where the others are", () => {
+  const schema = querySchemas({ params: [], columns: [{ name: "__proto__", type: int4({}) }, { name: "b", type: varchar({}) }], cardinality: "one" }, "postgres").output as { properties: object; required: string[] };
+  assert.ok(Object.hasOwn(schema.properties, "__proto__"));
+  assert.deepEqual(schema.required, ["__proto__", "b"]);
+  assert.equal(JSON.stringify(schema.properties), '{"__proto__":{"type":"integer","format":"int32"},"b":{"type":"string"}}');
 });
 
 test("an array's size is written on an array", () => {

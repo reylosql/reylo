@@ -537,13 +537,15 @@ const JSON_TYPE: &str = "Json";
 const JSON_INPUT_TYPE: &str = "JsonInput";
 const NO_CODECS: &Value = &Value::Null;
 
-/// What Postgres writes inside a JSON document for a type whose form there its kind does not say.
+/// What Postgres writes inside a JSON document for a type whose form there its kind does not say:
+/// the text of each type core's schema writer names, and an hstore's, a geometry's and an unread
+/// row's own forms.
 fn json_image(name: &str) -> Option<&'static str> {
     Some(match name {
-        "bit" | "varbit" | "vector" | "halfvec" | "sparsevec" | "point" | "line" | "lseg" | "box" | "path" | "polygon" | "circle" | "inet" | "cidr" | "money" | "tsvector" | "tsquery" | "regclass" | "regtype" | "ltree" | "lquery" | "ltxtquery" | "pg_lsn" | "jsonpath" | "xid" | "xid8" | "oid8" | "regdatabase" | "regproc" | "regprocedure" | "regoper" | "regoperator" | "regnamespace" | "regrole" | "regcollation" | "regconfig" | "regdictionary" | "geography" | "box2d" | "box3d" | "spheroid" | "raster" | "cube" | "seg" | "ean13" | "isbn" | "isbn13" | "ismn" | "ismn13" | "issn" | "issn13" | "upc" | "query_int" | "h3index" | "hll" | "hll_hashval" | "ip4" | "ip4r" | "ip6" | "ip6r" | "ipaddress" | "iprange" | "ulid" | "prefix_range" | "mol" | "qmol" | "xqmol" | "reaction" | "bfp" | "sfp" | "roaringbitmap" | "s3vec" | "semver" | "semverrange" | "semvermultirange" | "unit" | "unitrange" | "unitmultirange" | "rabitq8" | "rabitq4" => "string",
         "hstore" => "Record<string, string | null>",
         "geometry" => "{ type: string; [key: string]: Json | undefined }",
         "record" => "Record<string, Json>",
+        _ if reylo_engine_core::schema::POSTGRES_TEXT_IN_JSON.contains(&name) => "string",
         _ => return None,
     })
 }
@@ -613,9 +615,10 @@ fn json_image_of(t: &Value, dialect: &str, in_union: bool) -> String {
         }
         "text" => "string".into(),
         "union" => {
+            // A SQLite column declared BOOLEAN holds 0 and 1, which SQLite writes as numbers.
             if dialect == "sqlite" {
                 return if BOOLEAN.is_match(&name) {
-                    "boolean".into()
+                    "number".into()
                 } else if name.to_uppercase() == "NUMERIC" {
                     "number | string".into()
                 } else {

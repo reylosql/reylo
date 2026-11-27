@@ -75,19 +75,26 @@ export type NestedArray<T> = (T | NestedArray<T>)[];
 export type JsonInput = string | number | boolean | null | { toJSON(key: string): unknown } | { readonly [key: string]: JsonInput | undefined } | readonly JsonInput[];
 
 /**
- * The shape of a row value as JSON: a BigInt is the integer it is (JSON.stringify refuses one, so a
- * serializer writes it, as `JSON.rawJSON(String(v))` does), and a Temporal value or a byte array
- * becomes text.
+ * The shape of a row value as JSON, which `outputSchema` describes: what `JSON.stringify` writes,
+ * except where it writes no JSON or loses the value. A BigInt is the integer it is (JSON.stringify
+ * refuses one, so a serializer writes it, as `JSON.rawJSON(String(v))` does), bytes are their
+ * base64, and a Set or a typed array of numbers is an array of its members, where JSON.stringify
+ * writes `{}` or an object of its elements by index. A Temporal value and a decimal library's
+ * value are the text their `toJSON()` writes.
  */
 export type AsJson<T> = T extends bigint
   ? number
   : T extends Date | Uint8Array | { toJSON(): string }
   ? string
-  : T extends readonly (infer U)[]
+  : T extends ReadonlySet<infer U>
     ? AsJson<U>[]
-    : T extends object
-      ? { [K in keyof T]: AsJson<T[K]> }
-      : T;
+    : T extends ArrayLike<number> & ArrayBufferView
+      ? number[]
+      : T extends readonly (infer U)[]
+        ? AsJson<U>[]
+        : T extends object
+          ? { [K in keyof T]: AsJson<T[K]> }
+          : T;
 
 export type ReyloTypes<Params, Row, C extends Cardinality> = {
   readonly element: Row;
@@ -128,7 +135,7 @@ export interface Query<Params, Row, C extends Cardinality, D extends Dialect, E 
   readonly readOnly: boolean;
   /** The JSON Schema (2020-12) of the parameters, as the object `run` takes. */
   readonly inputSchema: Record<string, unknown>;
-  /** The JSON Schema (2020-12) of the result as JSON: what `run` returns, written as JSON, a BigInt as the integer it is. */
+  /** The JSON Schema (2020-12) of the result as JSON (`AsJson`): what `run` returns, as `JSON.stringify` writes it, but a BigInt as the integer it is, bytes as their base64, and a Set or a typed array of numbers as an array of its members. */
   readonly outputSchema: Record<string, unknown>;
   /** Standard JSON Schema's `jsonSchema` and Standard Query's `query`: a driver that supports Standard Query runs the import with the same input and output as `.run()`. A ClickHouse query maps no values, and runs through `.run()` alone (src/standard-query.ts). */
   readonly "~standard": StandardJSONSchemaV1.Props<Params, Materialize<Row, C>> & StandardQueryV1.Props<Params, Materialize<Row, C>, D> & { readonly query: { readonly cardinality: C; output(rows: readonly Record<string, unknown>[]): Materialize<Row, C> } };

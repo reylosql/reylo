@@ -1092,7 +1092,12 @@ fn record(values: Vec<serde_json::Value>) -> Ty {
             distinct.push(v);
         }
     }
-    let rest = if distinct.len() == 1 { distinct.pop().unwrap_or_default() } else { serde_json::json!({"anyOf": distinct}) };
+    // Of no values, no other key: JSON Schema 2020-12 refuses an empty `anyOf`.
+    let rest = match distinct.len() {
+        0 => serde_json::Value::Bool(false),
+        1 => distinct.pop().unwrap_or_default(),
+        _ => serde_json::json!({"anyOf": distinct}),
+    };
     Ty::Json { schema: Some(serde_json::json!({"type": "object", "additionalProperties": rest})) }
 }
 
