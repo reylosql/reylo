@@ -1247,7 +1247,7 @@ mod tests {
         use reylo_engine_core::types::{Field, Slot};
         let point = || Type::structure(vec![Field::new("x", Type::double(), false), Field::new("y", Type::double(), false)]);
         let in_json = |t: Type| Type::json_of(Slot::non_null(t));
-        let string = Ok(("::std::string::String".to_string(), true));
+        let string = Ok(("::reylo::sqlx::types::Json<::std::string::String>".to_string(), true));
         assert_eq!(column(Dialect::Postgres, in_json(point().named("point"))), string);
         assert_eq!(column(Dialect::Postgres, in_json(Type::unsigned(32).named("oid"))), string);
         assert_eq!(column(Dialect::Postgres, in_json(Type::opaque("ltree"))), string);

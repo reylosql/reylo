@@ -84,7 +84,7 @@ test("a number's facts are written where its form here is a JSON number and they
   assert.equal((output(numeric, true) as { exclusiveMaximum?: number }).exclusiveMaximum, undefined);
   // A divisor is written only where a JSON number is that very decimal: one a double rounds would hold a value to another divisor.
   // And only a whole one: a validator that divides as a double, ajv's or Python's, finds 0.15 no multiple of 0.05.
-  const divisor = (multiple_of: string) => (output({ kind: "decimal", label: "numeric", precision: 10, multiple_of } as EngineType, true) as { multipleOf?: number }).multipleOf;
+  const divisor = (multiple_of: string) => (output({ kind: "decimal", label: "numeric", precision: 10, min_scale: 2, max_scale: 2, multiple_of } as EngineType, true) as { multipleOf?: number }).multipleOf;
   assert.deepEqual([divisor("3"), divisor("1E2"), divisor("100.0")], [3, 100, 100]);
   for (const text of ["0.01", "0.50", "2.5e-3"]) assert.equal(divisor(text), undefined, text);
   for (const text of ["1e-400", "9007199254740993", "0.10000000000000000001", "1e400", `1${"0".repeat(131000)}`]) assert.equal(divisor(text), undefined, text.slice(0, 24));
@@ -101,8 +101,12 @@ test("a number's facts are written where its form here is a JSON number and they
   assert.equal(facts({ ...int8, multiple_of: "3", min: "0" }).multipleOf, undefined);
   assert.equal(facts({ kind: "integer", bits: 53, unsigned: true, multiple_of: "3" }).multipleOf, 3);
   assert.equal(facts({ kind: "decimal", label: "numeric", multiple_of: "0.05" }, true).multipleOf, undefined);
+  // A decimal's digits before its point bound it, which a negative scale moves: numeric(15,-2) reaches 10^17, whose multiples of 24 read rounded.
+  assert.equal(facts({ kind: "decimal", label: "numeric", precision: 15, min_scale: -2, max_scale: -2, multiple_of: "24" }, true).multipleOf, undefined);
+  assert.equal(facts({ kind: "decimal", label: "numeric", precision: 15, min_scale: 0, max_scale: 0, multiple_of: "24" }, true).multipleOf, 24);
+  assert.equal(facts({ kind: "decimal", label: "numeric", multiple_of: "24", min: "0", max: "1000" }, true).multipleOf, 24);
   assert.deepEqual(facts({ kind: "decimal", label: "numeric", precision: 16, multiple_of: "0.05", min: "0.1", exclusive_max: "100" }, true), { type: "number", format: "decimal", minimum: 0.1 });
-  assert.deepEqual(facts({ kind: "decimal", label: "numeric", precision: 15, multiple_of: "5", min: "0.1", exclusive_max: "100" }, true), { type: "number", format: "decimal", minimum: 0.1, exclusiveMaximum: 100, multipleOf: 5 });
+  assert.deepEqual(facts({ kind: "decimal", label: "numeric", precision: 15, min_scale: 2, max_scale: 2, multiple_of: "5", min: "0.1", exclusive_max: "100" }, true), { type: "number", format: "decimal", minimum: 0.1, exclusiveMaximum: 100, multipleOf: 5 });
   // A float narrower than a double is written as its own shortest text, which reads as another double: no bounds.
   assert.deepEqual(facts({ kind: "float", exponent_bits: 8, mantissa_bits: 23, label: "float4", min: "0.1" }), { type: "number", format: "float" });
 });

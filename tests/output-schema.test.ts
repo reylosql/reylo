@@ -152,6 +152,8 @@ const POSTGRES: readonly Case[] = [
   // A bound a double rounds, and one it holds.
   ["numeric at least 0.29999999999999999", "numeric check (c >= 0.29999999999999999)", ["0.29999999999999999", "1"]],
   ["numeric(4,2) multiple of 0.05", "numeric(4,2) check (c % 0.05 = 0) check (c > 0.1)", ["0.15", "99.95"]],
+  // A negative scale, whose values reach past what a double holds exactly.
+  ["numeric(15,-2) multiple of 24", "numeric(15,-2) check (c % 24 = 0)", ["90071992547409000", "2400"]],
   ["money", "money", ["-92233720368547758.08", "92233720368547758.07"]],
   ["text", "text", ["''", "'hi'"]],
   ["varchar(3)", "varchar(3)", ["'abc'"]],

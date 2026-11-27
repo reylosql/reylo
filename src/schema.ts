@@ -410,18 +410,24 @@ function exactDivisor(text: string, whole: boolean): number | undefined {
 }
 
 /**
- * Whether a double holds every value of `t` exactly, as a reader of JSON in JavaScript parses one:
- * an integer within ±2^53 by its width or its bounds, a decimal of at most 15 digits, and a float of
- * a double's precision, which the database writes at the shortest text that reads back as it.
- * Elsewhere a value rounds, so that a true multiple of a divisor, or a value just past an exclusive
- * bound, reads as none.
+ * Whether a double tells every two values of `t` apart, as a reader of JSON in JavaScript parses
+ * them, so that a value just inside an exclusive bound never reads as the bound: a decimal of at
+ * most 15 digits, and a float of a double's precision, which the database writes at the shortest
+ * text that reads back as it.
  */
-function exactInDouble(t: Extract<EngineType, { kind: "integer" | "float" | "decimal" }>): boolean {
-  switch (t.kind) {
-    case "integer": return t.bits + (t.unsigned ? 1 : 0) <= 54 || [t.min, t.max].every((b) => b !== undefined && Number.isSafeInteger(Number(b)));
-    case "decimal": return t.precision !== undefined && t.precision <= 15;
-    case "float": return t.mantissa_bits >= 52;
-  }
+function distinctInDouble(t: Extract<EngineType, { kind: "float" | "decimal" }>): boolean {
+  return t.kind === "float" ? t.mantissa_bits >= 52 : t.precision !== undefined && t.precision <= 15;
+}
+
+/**
+ * Whether every value of `t` a whole divisor can divide is an integer a double holds exactly, within
+ * ±2^53, as a validator that divides as doubles needs: by an integer's width, a decimal's digits
+ * before its point (`numeric(15,-2)` reaches 10^17), or the bounds of either. Past that a true
+ * multiple, 9007199254740993 of 3, reads as 9007199254740992, which is none.
+ */
+function wholeInDouble(t: Extract<EngineType, { kind: "integer" | "decimal" }>): boolean {
+  if ([t.min, t.max].every((b) => b !== undefined && Math.abs(Number(b)) <= Number.MAX_SAFE_INTEGER)) return true;
+  return t.kind === "integer" ? t.bits + (t.unsigned ? 1 : 0) <= 54 : t.precision !== undefined && t.min_scale !== undefined && t.precision - t.min_scale <= 15;
 }
 
 /** A decimal's text as its digits and power of ten, with no zero to spare, as `1.50` and `15e-1` both read `15e-1`. */
@@ -491,24 +497,24 @@ function withFacts(schema: Schema | JsonSchema, t: EngineType, input: boolean): 
   }
   // A number's bounds and divisor where a double reading the value agrees with the value: an
   // inclusive bound a JSON number writes exactly holds of a value rounded towards it too, but an
-  // exclusive bound or a divisor only of a value held exactly (`exactInDouble`). A float narrower
-  // than a double takes none: the database writes its shortest text, which reads as another double.
-  if ((t.kind === "integer" || t.kind === "float" || t.kind === "decimal") && (schema.type === "integer" || schema.type === "number") && (t.kind !== "float" || exactInDouble(t))) {
+  // exclusive bound only where a double tells the values apart (`distinctInDouble`), and a divisor
+  // only where it divides doubles exactly (`wholeInDouble`). A float narrower than a double takes
+  // none: the database writes its shortest text, which reads as another double.
+  if ((t.kind === "integer" || t.kind === "float" || t.kind === "decimal") && (schema.type === "integer" || schema.type === "number") && (t.kind !== "float" || distinctInDouble(t))) {
     const whole = t.kind === "integer";
-    const exact = exactInDouble(t);
     const bound = (text: string | undefined, keyword: string) => {
       const value = text === undefined ? undefined : exactNumber(text, whole);
       if (value !== undefined) facts[keyword] = value;
     };
     bound(t.min, "minimum");
     bound(t.max, "maximum");
-    if (!whole && exact) {
+    if (t.kind !== "integer" && distinctInDouble(t)) {
       bound(t.exclusive_min, "exclusiveMinimum");
       bound(t.exclusive_max, "exclusiveMaximum");
     }
     // A divisor that is a whole number: a validator that divides as a double, ajv's or Python's,
     // finds 0.15 no multiple of 0.05, whose quotient is 2.9999999999999996.
-    const divisor = t.kind === "float" || t.multiple_of === undefined || !exact ? undefined : exactDivisor(t.multiple_of, whole);
+    const divisor = t.kind === "float" || t.multiple_of === undefined || !wholeInDouble(t) ? undefined : exactDivisor(t.multiple_of, whole);
     if (divisor !== undefined && Number.isInteger(divisor)) facts.multipleOf = divisor;
   }
   if (t.kind === "array" && schema.type === "array" && t.size !== undefined) sized(t.size, "minItems", "maxItems", false);
