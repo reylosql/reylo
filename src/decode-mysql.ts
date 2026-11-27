@@ -776,14 +776,18 @@ function noLists(driver: string, { values, names }: Bound) {
 const GEO_TYPES = new Set(["Point", "LineString", "Polygon", "MultiPoint", "MultiLineString", "MultiPolygon", "GeometryCollection"]);
 
 /**
- * A value as mariadb writes it with none of the app's options: a plain object, which it writes as
- * its JSON text (but a GeoJSON geometry, and one with toSqlString()), as that text, since the app's permitSetMultiParamEntries would write it as `key` =
- * value pairs, which a per-query option does not turn off on mariadb 3.
+ * A value as mariadb writes it with none of the app's options: an object, which it writes as its
+ * JSON text, as that text, since the app's permitSetMultiParamEntries would write it as `key` =
+ * value pairs, which a per-query option does not turn off on mariadb 3. An object the driver
+ * writes otherwise stays the driver's to write: bytes, a Date, a stream (an object with pipe() and
+ * read(), as it tells one), a boxed string, a GeoJSON geometry and one with toSqlString().
  */
-const asMariadbValue = (v: unknown) => (isPlainObject(v) && typeof v.toSqlString !== "function" && !GEO_TYPES.has(v.type as string) ? JSON.stringify(v) : v);
-
-/** An object made as a literal or by JSON.parse, as a request's body is; a stream, a boxed string and a class's instance are the driver's to write. */
-const isPlainObject = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === "object" && [Object.prototype, null].includes(Object.getPrototypeOf(v));
+function asMariadbValue(v: unknown): unknown {
+  if (v === null || typeof v !== "object" || v instanceof Uint8Array || v instanceof Date || v instanceof String) return v;
+  const own = v as { pipe?: unknown; read?: unknown; toSqlString?: unknown; type?: unknown };
+  if ((typeof own.pipe === "function" && typeof own.read === "function") || typeof own.toSqlString === "function" || GEO_TYPES.has(own.type as string)) return v;
+  return JSON.stringify(v);
+}
 
 /** A MySQL statement's rows on each MySQL driver's client, or undefined on any other client. */
 async function runMysql(c: Client, query: QueryModule<"mysql">, bound: Bound): Promise<unknown[] | undefined> {

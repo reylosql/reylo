@@ -933,7 +933,12 @@ test("mysql: mariadb and PlanetScale, which write an array as a list of values, 
   const boxed = new String("hello");
   await execute(recording as never, update, { name: stream });
   await execute(recording as never, update, { name: boxed });
-  assert.deepEqual(given, [['{"role":"admin"}'], [point], [stream], [boxed]]);
+  // A class's instance has no writing of its own in the driver, so it goes as its JSON text too.
+  class Role {
+    role = "admin";
+  }
+  await execute(recording as never, update, { name: new Role() });
+  assert.deepEqual(given, [['{"role":"admin"}'], [point], [stream], [boxed], ['{"role":"admin"}']]);
   assert.equal(given[2]![0], stream);
 });
 
