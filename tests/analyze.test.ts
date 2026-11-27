@@ -875,6 +875,7 @@ test("the Postgres fingerprint runs on the server, holds while nothing changes, 
       create function done(int) returns int language sql as 'select $1';
       create function other_done(int) returns int language sql as 'select $1';
       ${total()}`);
+    const standardStringsOnly = Number((await db.unsafe("show server_version_num"))[0]!.server_version_num) >= 190000;
     // A query the server refuses gives "unverified <pid> <time>", a value no entry ever matches.
     const first = await fingerprint();
     assert.match(first ?? "", /^[0-9a-f]{16}$/);
@@ -946,10 +947,10 @@ test("the Postgres fingerprint runs on the server, holds while nothing changes, 
       // A function of an extension's in pg_catalog, read wherever it was made.
       "alter function pg_catalog.citext_eq(citext, citext) volatile",
       "alter function pg_catalog.citext_eq(citext, citext) called on null input",
-      // Whether a backslash in a string is an escape, which the CHECKs are read under, and whether
-      // one may escape a quote: a new session takes the database's setting.
-      `alter database ${url.pathname.slice(1)} set standard_conforming_strings = off`,
-      `alter database ${url.pathname.slice(1)} reset standard_conforming_strings`,
+      // Whether a backslash in a string is an escape, which the CHECKs are read under (Postgres 19
+      // has no other way), and whether one may escape a quote: a new session takes the database's
+      // setting.
+      ...(standardStringsOnly ? [] : [`alter database ${url.pathname.slice(1)} set standard_conforming_strings = off`, `alter database ${url.pathname.slice(1)} reset standard_conforming_strings`]),
       `alter database ${url.pathname.slice(1)} set backslash_quote = off`,
       // An operator family's equality, which decides whether a unique key pins one row.
       "create operator family fam using btree; alter operator family fam using btree add operator 3 = (int4, int4)",
