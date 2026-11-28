@@ -1875,7 +1875,7 @@ async fn leftovers(db: &mut Db, history: &[HistoryRow]) -> Result<Vec<Leftover>,
         let Some(statement) = split_statements(&m.sql, Dialect::Postgres).into_iter().next() else { continue };
         let Some(found) = leftover_filter(&statement.text) else { continue };
         for r in db
-            .rows(&format!("select format('%I.%I', n.nspname, c.relname) as qualified, pg_get_indexdef(c.oid) as def from pg_index i join pg_class c on c.oid = i.indexrelid join pg_namespace n on n.oid = c.relnamespace where not i.indisvalid and not exists (select 1 from pg_locks l join pg_stat_activity a on a.pid = l.pid where l.locktype = 'relation' and l.database = (select d.oid from pg_database d where d.datname = current_database()) and l.relation = i.indrelid and l.mode = 'ShareUpdateExclusiveLock' and l.granted and a.backend_type = 'client backend' and l.pid <> pg_backend_pid()) and {found}"))
+            .rows(&format!("select format('%I.%I', n.nspname, c.relname) as qualified, pg_get_indexdef(c.oid) as def from pg_index i join pg_class c on c.oid = i.indexrelid join pg_namespace n on n.oid = c.relnamespace where not i.indisvalid and not exists (select 1 from pg_locks l join pg_stat_activity a on a.pid = l.pid where l.locktype = 'relation' and l.database = (select d.oid from pg_database d where d.datname = current_database()) and l.relation = i.indrelid and l.mode = 'ShareUpdateExclusiveLock' and l.granted and a.usesysid is not null and l.pid <> pg_backend_pid()) and {found}"))
             .await?
         {
             out.push(Leftover { migration: m.name.clone(), index: r.text("qualified").to_string(), line: format!("index {} (invalid)", r.text("def")) });
@@ -1950,7 +1950,10 @@ fn leftover_filter(statement: &str) -> Option<String> {
                 };
                 let picked = keys.iter().chain(&included).map(|item| Some(format!("(select a.attnum from pg_attribute a where a.attrelid = i.indrelid and a.attname = ((parse_ident({}, false))[1])::name)", literal(index_column(item)?)))).collect::<Option<Vec<_>>>()?;
                 let unique = sql.get(..13).is_some_and(|w| w.eq_ignore_ascii_case("create unique"));
-                Some(format!(r"{on} and c.relname ~ '_idx[0-9]*$' and (starts_with(c.relname, (select t.relname from pg_class t where t.oid = i.indrelid) || '_') or octet_length(c.relname) >= 56) and i.indisunique = {unique} and i.indexprs is null and string_to_array(i.indkey::text, ' ')::int2[] = array[{}]::int2[]", picked.join(", ")))
+                // A partial index only for a statement with a WHERE, and the other way round.
+                static WHERE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)(?:^|[ \t\n\r\x0B\x0C)])where[ \t\n\r\x0B\x0C(]").expect("a valid pattern"));
+                let partial = WHERE.is_match(rest);
+                Some(format!(r"{on} and c.relname ~ '_idx[0-9]*$' and (starts_with(c.relname, (select t.relname from pg_class t where t.oid = i.indrelid) || '_') or octet_length(c.relname) >= 56) and i.indisunique = {unique} and (i.indpred is not null) = {partial} and i.indexprs is null and string_to_array(i.indkey::text, ' ')::int2[] = array[{}]::int2[]", picked.join(", ")))
             }
         };
     }
@@ -2041,18 +2044,25 @@ fn index_column(item: &str) -> Option<&str> {
         None if item.starts_with('(') => return None,
         None => item.find(|c: char| c.is_ascii_whitespace() || c == '(').unwrap_or(item.len()),
     };
+    // An unquoted name holds identifier characters alone: `U&"col"` is read as no name at all.
+    if !item.starts_with('"') && !item[..end].chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$' || !c.is_ascii()) {
+        return None;
+    }
     // A name followed by a parenthesis is a function's call.
     (!item[..end].is_empty() && !item[end..].trim_start().starts_with('(')).then(|| &item[..end])
 }
 
 async fn drop_leftovers(db: &mut Db, leftovers: &[Leftover], log: Log<'_>) -> Result<(), Error> {
     for x in leftovers {
-        // Still invalid, and no build of another session's on its table since the plan read it: a
-        // concurrent build holds a share update exclusive lock on its table, which every role can see.
+        // Still invalid, and no session's build on its table since the plan read it: a concurrent
+        // build holds a share update exclusive lock on its table, which every role sees, with the
+        // role that holds it (an autovacuum worker has none). Where either has changed, the plan no
+        // longer holds, so the run stops and its migration stays to run again.
         let index = format!("'{}'", x.index.replace('\'', "''"));
-        let still = db.rows(&format!("select 1 as one from pg_index i where i.indexrelid = to_regclass({index}) and not i.indisvalid and not exists (select 1 from pg_locks l join pg_stat_activity a on a.pid = l.pid where l.locktype = 'relation' and l.database = (select d.oid from pg_database d where d.datname = current_database()) and l.relation = i.indrelid and l.mode = 'ShareUpdateExclusiveLock' and l.granted and a.backend_type = 'client backend' and l.pid <> pg_backend_pid())")).await?;
-        if still.is_empty() {
-            continue;
+        let now = db.rows(&format!("select i.indisvalid::text as valid, (not exists (select 1 from pg_locks l join pg_stat_activity a on a.pid = l.pid where l.locktype = 'relation' and l.database = (select d.oid from pg_database d where d.datname = current_database()) and l.relation = i.indrelid and l.mode = 'ShareUpdateExclusiveLock' and l.granted and a.usesysid is not null and l.pid <> pg_backend_pid()))::text as free from pg_index i where i.indexrelid = to_regclass({index})")).await?;
+        let Some(row) = now.first() else { continue };
+        if row.text("valid") == "true" || row.text("free") != "true" {
+            return Err(Error(format!("{}, which {} left invalid when it was cut off, changed after this deploy read it: another session is working on its table. Deploy again once it has finished.", x.index, x.migration)));
         }
         db.exec(&format!("drop index concurrently if exists {}", x.index)).await?;
         log(&note(format!("Dropped {}, which {} left invalid when it was cut off", x.index, x.migration)));
@@ -12146,6 +12156,9 @@ mod tests {
         assert!(f("create index concurrently on t(a)").contains("i.indisunique = false"));
         assert_eq!(super::leftover_filter("create index concurrently on t (lower(email))"), None);
         assert_eq!(super::leftover_filter("create index concurrently on t ((a + 1))"), None);
+        assert_eq!(super::leftover_filter("create index concurrently on t (U&\"col\")"), None);
+        assert!(f("create index concurrently on t (a) where a > 0").contains("(i.indpred is not null) = true"));
+        assert!(f("create index concurrently on t (a)").contains("(i.indpred is not null) = false"));
         // The table as `only (t)` and `t*` write it.
         assert!(f("create index concurrently i on only (orders) (x)").starts_with("i.indrelid = to_regclass('orders') and"));
         assert!(f("create index concurrently i on orders* (x)").starts_with("i.indrelid = to_regclass('orders') and"));
