@@ -291,8 +291,10 @@ test("migrate(db) refuses, on Turso's engine, a migration that may turn foreign 
   assert.deepEqual(await runMigrationsOn(turso, [USERS, PARENT]), [USERS.name, PARENT.name]);
   await assert.rejects(runMigrationsOn(turso, [USERS, PARENT, REBUILD]), /^Error: reylo: the migration 20261108120000_rebuild\.sql sets foreign_keys to something other than off, which Turso's engine takes inside the migration's transaction/);
   // On, then off again before the check: refused before it runs, so nothing cascades.
-  const ON_OFF = { ...REBUILD, sql: REBUILD.sql.replace("pragma foreign_keys = on; ", "pragma foreign_keys = 0x1; ") + " pragma foreign_keys = off;" };
-  await assert.rejects(runMigrationsOn(turso, [USERS, PARENT, ON_OFF]), /^Error: reylo: the migration 20261108120000_rebuild\.sql sets foreign_keys to something other than off/);
+  for (const on of ["pragma foreign_keys = 0x1; ", "explain pragma foreign_keys = on; ", "explain query plan pragma foreign_keys = on; "]) {
+    const ON_OFF = { ...REBUILD, sql: REBUILD.sql.replace("pragma foreign_keys = on; ", on) + " pragma foreign_keys = off;" };
+    await assert.rejects(runMigrationsOn(turso, [USERS, PARENT, ON_OFF]), /^Error: reylo: the migration 20261108120000_rebuild\.sql sets foreign_keys to something other than off/, on);
+  }
   // A way of turning them on the preflight doesn't read, as this connection does with the migration's
   // own text, is caught once the migration ran, inside its transaction, whose rollback undoes the cascade.
   const SILENT = { ...REBUILD, sql: REBUILD.sql.replace("pragma foreign_keys = on; ", "") };

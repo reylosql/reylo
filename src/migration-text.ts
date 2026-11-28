@@ -266,15 +266,19 @@ export function transactionControl(sql: string): string | undefined {
 
 /**
  * Whether a SQLite migration may turn foreign keys on: any `pragma foreign_keys` assignment (its
- * name quoted or not, as itself or `main.foreign_keys`) but a plain off, `0`, `off`, `no` or
+ * name quoted or not, as itself or `main.foreign_keys`, explained or not) but a plain off, `0`, `off`, `no` or
  * `false`, quoted or not. The engines read more spellings as on than any list keeps up with (`2`,
  * `0x1`, `1.0`, `full`), so every other value counts.
  */
 export function turnsForeignKeysOn(sql: string): boolean {
   const bare = (token: string | undefined) => token?.replace(/^'/, "").toUpperCase();
-  return statementTokens(sql).some((t) => {
-    const at = t[0] === "PRAGMA" ? t.findIndex((token, i) => i > 0 && i < 3 && bare(token) === "FOREIGN_KEYS") : -1;
-    const value = at > 0 ? bare(t[at + 1]) : undefined;
-    return value !== undefined && !["0", "OFF", "NO", "FALSE"].includes(value);
-  });
+  // Anywhere in a statement, since Turso's engine takes the assignment in `explain pragma …` too.
+  return statementTokens(sql).some((t) =>
+    t.some((token, i) => {
+      if (token !== "PRAGMA") return false;
+      const at = [i + 1, i + 2].find((j) => bare(t[j]) === "FOREIGN_KEYS");
+      const value = at === undefined ? undefined : bare(t[at + 1]);
+      return value !== undefined && !["0", "OFF", "NO", "FALSE"].includes(value);
+    }),
+  );
 }
