@@ -1386,7 +1386,7 @@ fn cte_columns(cte: &ast::Cte) -> (String, HashSet<String>) {
 }
 
 /// The ON condition of a join, where it has one.
-fn join_on(op: &ast::JoinOperator) -> Option<&Expr> {
+pub(crate) fn join_on(op: &ast::JoinOperator) -> Option<&Expr> {
     use ast::JoinOperator::*;
     match op {
         Join(ast::JoinConstraint::On(e)) | Inner(ast::JoinConstraint::On(e)) | Left(ast::JoinConstraint::On(e)) | LeftOuter(ast::JoinConstraint::On(e)) | Right(ast::JoinConstraint::On(e)) | RightOuter(ast::JoinConstraint::On(e)) | FullOuter(ast::JoinConstraint::On(e)) | CrossJoin(ast::JoinConstraint::On(e)) | StraightJoin(ast::JoinConstraint::On(e)) => Some(e),
@@ -3866,6 +3866,7 @@ mod tests {
             "select distinct x.v from users u, (select exists(select pick() as r from posts having r = 1) as v from posts p where p.id = 1) x",
             "select distinct x.v from users u, (select exists(select 1 from posts where id = 1 having pick() = p.id) as v from posts p where p.id = 1) x",
             "select distinct x.v from users u, (select exists(select 1 from posts where id = 1 and pick() = p.id having 1 = 1) as v from posts p where p.id = 1) x",
+            "select distinct x.v from users u, (select exists(select 1 from posts a join posts b on b.id = a.id and pick() = p.id where a.id = 1) as v from posts p where p.id = 1) x",
         ] {
             assert_eq!(rows(sql), "many", "{sql}");
         }

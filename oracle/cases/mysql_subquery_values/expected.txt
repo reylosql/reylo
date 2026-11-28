@@ -10,6 +10,7 @@ distinct_random_with_shadowed.sql: many () -> { id: bigint }
 distinct_stored_function_exists.sql: at_most_one () -> { v: bigint | int? }
 distinct_stored_function_exists_having.sql: many () -> { v: int? }
 distinct_stored_function_exists_having_call.sql: many () -> { v: int }
+distinct_stored_function_exists_on.sql: many () -> { v: int }
 distinct_stored_function_folded.sql: many () -> { v: int | bigint? }
 distinct_stored_function_in.sql: many () -> { v: bigint | int? }
 distinct_stored_function_limit.sql: at_most_one () -> { v: int | bigint? }

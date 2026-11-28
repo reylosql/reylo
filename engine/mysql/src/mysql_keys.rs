@@ -817,17 +817,21 @@ fn reads_unvouched(q: &Query, listed: bool) -> bool {
     if let SetExpr::Query(inner) = q.body.as_ref() {
         return reads_unvouched(inner, listed);
     }
+    // A FROM item's: a derived table's own, and each join's ON, which decides which rows meet.
+    fn joined(twj: &TableWithJoins) -> bool {
+        factor(&twj.relation) || twj.joins.iter().any(|j| factor(&j.relation) || crate::mysql::join_on(&j.join_operator).is_some_and(calls_unvouched))
+    }
     fn factor(f: &TableFactor) -> bool {
         match f {
             TableFactor::Derived { subquery, .. } => lists_unvouched(subquery),
-            TableFactor::NestedJoin { table_with_joins, .. } => factor(&table_with_joins.relation) || table_with_joins.joins.iter().any(|j| factor(&j.relation)),
+            TableFactor::NestedJoin { table_with_joins, .. } => joined(table_with_joins),
             _ => false,
         }
     }
     plain(q).is_some_and(|s| {
         (listed && s.projection.iter().any(|item| matches!(item, SelectItem::UnnamedExpr(e) | SelectItem::ExprWithAlias { expr: e, .. } if calls_unvouched(e))))
             || s.selection.iter().chain(s.having.iter()).any(calls_unvouched)
-            || s.from.iter().any(|twj| factor(&twj.relation) || twj.joins.iter().any(|j| factor(&j.relation)))
+            || s.from.iter().any(joined)
     })
 }
 
