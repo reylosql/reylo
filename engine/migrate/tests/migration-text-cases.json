@@ -1,0 +1,171 @@
+{
+  "about": "How the lock and a Durable Object compare a migration's text: canonical in engine/migrate/src/lock.rs and its port in src/migration-text.ts, and normalized beside each. Both test suites read every case here, so the two can't drift apart.",
+  "canonical": [
+    {
+      "why": "Quoted text is kept as written.",
+      "sql": "select $$ two  spaces $$",
+      "canonical": "select $$ two  spaces $$"
+    },
+    {
+      "sql": "do $f$ begin -- x\n end $f$;",
+      "canonical": "do $f$ begin -- x\n end $f$;"
+    },
+    {
+      "why": "A `--` before a tab, or at the end, is a comment everywhere.",
+      "sql": "select 1 --\tx\n, 2 --\n",
+      "canonical": "select 1 , 2"
+    },
+    {
+      "why": "A comment Postgres nests and MySQL ends at its first `*/` is kept as written.",
+      "sql": "select /* a /* b */ c */  1",
+      "canonical": "select /* a /* b */ c */  1"
+    },
+    {
+      "sql": "select /* a */  1",
+      "canonical": "select 1"
+    },
+    {
+      "sql": "select 1 /* a */",
+      "canonical": "select 1"
+    },
+    {
+      "why": "A backslash both readings agree on changes nothing.",
+      "sql": "select 'a\\n' -- x\n,  'b\\\\'",
+      "canonical": "select 'a\\n' , 'b\\\\'"
+    },
+    {
+      "why": "A space beyond ASCII inside quotes is kept, and spacing outside them is ASCII's alone.",
+      "sql": "select  'a\u3000b' -- x\n",
+      "canonical": "select 'a\u3000b'"
+    },
+    {
+      "why": "A carriage return before a line feed ends a comment everywhere.",
+      "sql": "select 1 -- a\r\n,\r2",
+      "canonical": "select 1 , 2"
+    },
+    {
+      "why": "A `[...]` whose quotes close inside it reads as a subscript does.",
+      "sql": "select data['key'],  arr[1] -- c\nfrom t",
+      "canonical": "select data['key'], arr[1] from t"
+    }
+  ],
+  "same": [
+    {
+      "why": "Comments and spacing are no edit.",
+      "a": "create table a (\n  id int -- the key\n);\n/* made by hand */",
+      "b": "create table a ( id int );"
+    }
+  ],
+  "differ": [
+    {
+      "why": "A `--` inside a string is no comment.",
+      "a": "insert into a values ('-- not a comment')",
+      "b": "insert into a values ('')"
+    },
+    {
+      "why": "MySQL's `\\'` is a quote inside the string, so `-- b` is string text there.",
+      "a": "insert into t values ('a\\' -- b')",
+      "b": "insert into t values ('a\\' -- c')"
+    },
+    {
+      "a": "select E'a\\', '-- b'",
+      "b": "select E'a\\', '-- c'"
+    },
+    {
+      "a": "insert into t values (\"a\\\" -- b\")",
+      "b": "insert into t values (\"a\\\" -- c\")"
+    },
+    {
+      "why": "MySQL runs `/*! ... */`.",
+      "a": "create table t (a int) /*!50100 PARTITION BY HASH (a) */",
+      "b": "create table t (a int) /*!50100 PARTITION BY KEY (a) */"
+    },
+    {
+      "why": "MySQL reads `n--1` as `n - -1`.",
+      "a": "select 1--1",
+      "b": "select 1--2"
+    },
+    {
+      "why": "A comment Postgres nests and MySQL ends at its first `*/`.",
+      "a": "/* a /* b */ create table t (a int); /* */",
+      "b": "/* a /* b */ create table t (a bigint); /* */"
+    },
+    {
+      "why": "MySQL's `#` comment is an operator to Postgres.",
+      "a": "# see reylo/*.sql\ncreate table t (a int);",
+      "b": "# see reylo/*.sql\ncreate table t (a bigint);"
+    },
+    {
+      "why": "A comment that never ends.",
+      "a": "select 1; /* create table t (a int);",
+      "b": "select 1; /* create table t (a bigint);"
+    },
+    {
+      "why": "The databases read U+3000 and U+00A0 outside quotes and comments as part of a name.",
+      "a": "create view v as select 1 as x\u3000, 2 as y;",
+      "b": "create view v as select 1 as x , 2 as y;"
+    },
+    {
+      "a": "create table t (a\u00a0int)",
+      "b": "create table t (a int)"
+    },
+    {
+      "why": "MySQL reads `--` before one, or before DEL as the statements are split for it, as `- -` and runs the rest of the line.",
+      "a": "select 1 --\u3000x",
+      "b": "select 1 --\u3000; drop table users;"
+    },
+    {
+      "a": "select 1 --\u00a0x",
+      "b": "select 1 --\u00a0; drop table users;"
+    },
+    {
+      "a": "select 1 --\u007fx",
+      "b": "select 1 --\u007f; drop table users;"
+    },
+    {
+      "why": "A lone carriage return ends a `--` comment on Postgres alone.",
+      "a": "-- note\rdrop table users;",
+      "b": "-- note\ndrop table users;"
+    },
+    {
+      "why": "A lone carriage return in a string is another value than a line feed.",
+      "a": "insert into t values ('a\rb');",
+      "b": "insert into t values ('a\nb');"
+    },
+    {
+      "why": "Postgres takes any character past ASCII in a dollar quote's tag.",
+      "a": "select $\u3000$--\nx$\u3000$",
+      "b": "select $\u3000$ x$\u3000$"
+    },
+    {
+      "why": "A `$` inside a name opens no dollar quote.",
+      "a": "select x$$a$, '$a$ -- b'",
+      "b": "select x$$a$, '$a$ -- c'"
+    },
+    {
+      "why": "SQLite's `[...]` is a name: a quote or a dollar sign inside one opens nothing there.",
+      "a": "create table t ([$\u3000$] text default 'a $\u3000$ -- one');",
+      "b": "create table t ([$\u3000$] text default 'a $\u3000$ -- two');"
+    },
+    {
+      "a": "create table t ([a'b] text default 'x -- y')",
+      "b": "create table t ([a'b] text default 'x -- z')"
+    }
+  ],
+  "normalized": [
+    {
+      "why": "Line endings as line feeds, a lone carriage return kept, and no trailing ASCII spacing.",
+      "sql": "a\r\nb\rc  \n\n",
+      "normalized": "a\nb\rc"
+    },
+    {
+      "why": "A space beyond ASCII that ends a file is part of a name.",
+      "sql": "select 1 as x\u3000\r\n \n",
+      "normalized": "select 1 as x\u3000"
+    },
+    {
+      "sql": "select 1 as x\u00a0",
+      "normalized": "select 1 as x\u00a0"
+    }
+  ]
+}
