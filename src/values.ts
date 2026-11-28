@@ -1360,11 +1360,6 @@ export function holdsArray(kind: Kind): boolean {
 /** A name as SQL reads it whatever it is, a keyword (`current_date`) or mixed case included: quoted. */
 const ident = (name: string) => `"${name.replace(/"/g, '""')}"`;
 
-/** Whether every element of a driver's array, at each level, is still its text or NULL. */
-export function textLeaves(v: readonly unknown[]): boolean {
-  return v.every((e) => e === null || e === undefined || typeof e === "string" || (Array.isArray(e) && textLeaves(e)));
-}
-
 /** Why a Postgres array is refused: it holds `depth` dimensions, and its type `declared`; `path` names the row value's field that holds it. */
 function tooDeep(column: string, depth: number, declared: number, path?: FieldPath, json = false): DecodeError {
   // allow_nested_arrays types no array of JSON at any depth, so for one it is no way out.
@@ -1610,7 +1605,15 @@ export function float32s(bytes: Uint8Array, column: string): number[] {
  * `delim` is an array's, where its text is what the driver gave; `postgres` says the value is a
  * Postgres one, whose `timestamp` takes six fraction digits.
  */
-export function coerce(kind: Kind, v: unknown, column: string, delim = ",", postgres = false, textElements = false): unknown {
+/**
+ * How a driver's own array of JSON holds each value: `text`, its text, so that the array's levels
+ * are its dimensions (Slonik's tag); `decoded`, a value the driver read, which may be an array
+ * itself (Bun.sql's own decoder); unknown otherwise, where each string is read as JSON text and the
+ * levels are taken as they are.
+ */
+export type JsonElements = "text" | "decoded" | undefined;
+
+export function coerce(kind: Kind, v: unknown, column: string, delim = ",", postgres = false, jsonElements?: JsonElements): unknown {
   if (v === null || v === undefined) return null;
   const whole = wholeArrayKind(kind);
   // A whole array still in its text is the server's text, which a driver that parsed the array
@@ -1625,11 +1628,11 @@ export function coerce(kind: Kind, v: unknown, column: string, delim = ",", post
     if (Array.isArray(v)) {
       // A driver's own array, as PGlite's parser gives one, whose arrays are its levels: each whole
       // array in it is still its text.
-      // A driver that decoded each JSON value itself, as Bun.sql's own decoder and PGlite's parsers do, gives them as values, a string among them a JSON string, never text to read again.
-      if (element === "json" && !textElements) return v;
-      const out = v.map((e) => (Array.isArray(e) ? coerce(kind, e, column, delim, postgres, textElements) : coerce(element, e, column, ",", postgres)));
-      // Its levels are the array's where each whole array, or each JSON value, is still its text, as the caller that passes `textElements` knows; a JSON value the driver parsed may be an array itself, and leaves the levels unknown.
-      if (wholeArrayKind(element) !== undefined || (element === "json" && textElements)) {
+      // A driver that decoded each JSON value itself gives them as values, a string among them a JSON string, never text to read again.
+      if (element === "json" && jsonElements === "decoded") return v;
+      const out = v.map((e) => (Array.isArray(e) ? coerce(kind, e, column, delim, postgres, jsonElements) : coerce(element, e, column, ",", postgres)));
+      // Its levels are the array's where each whole array, or each JSON value, is still its text, as the caller that passes `text` knows.
+      if (wholeArrayKind(element) !== undefined || (element === "json" && jsonElements === "text")) {
         let depth = 0;
         for (let level: unknown = v; Array.isArray(level); level = level.find((e) => e !== null)) depth++;
         wholeDepths.set(out, depth);

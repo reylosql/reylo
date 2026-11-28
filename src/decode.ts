@@ -26,7 +26,7 @@
 // those oids are arrays, cached in a WeakMap keyed by the app's object. A row value the module knows
 // the fields of has the kind of its column whatever its oid: `record` is one oid for every shape of
 // row, and a built-in catalog table's row type is below 10000 too.
-import { civilFromDays, coerce, DecodeError, elementKind, holdsArray, holdsJsonArray, isRowKind, numbersInJson, scalarKind, textDecoder, utf8, wholeArrayKind, withFraction, withinDimensions, type Columns, type Decoder, type JsonNumbers, type Kind, textLeaves } from "./values.ts";
+import { civilFromDays, coerce, DecodeError, elementKind, holdsArray, holdsJsonArray, isRowKind, numbersInJson, scalarKind, textDecoder, utf8, wholeArrayKind, withFraction, withinDimensions, type Columns, type Decoder, type JsonNumbers, type Kind } from "./values.ts";
 import { lastOfEach, namesInResult, rowOf, type RowBuilder } from "./row.ts";
 import { arrayLiteral, asByteaHex, EFFECT_SQL, isJsonValue, jsonElements, jsonText, postgresText, type AnyClient as Client, type Bound, type EffectSql, type Marks, type QueryModule, type Runtime } from "./execute.ts";
 import { readPostgresError } from "./query-error.ts";
@@ -433,8 +433,7 @@ async function pglite(db: AnyClient, text: string, values: unknown[], columns: C
       const decode = decoders[i]!;
       for (const row of rows) {
         const v = row[f.name];
-        // An array PGlite parsed by an oid it learned holds each element's text, unless the app gave it a parser for the element's type.
-        if (v !== null && v !== undefined) row[f.name] = typeof v === "string" ? decode(v) : coerce(kinds[i]!, v, f.name, ",", true, Array.isArray(v) && textLeaves(v));
+        if (v !== null && v !== undefined) row[f.name] = typeof v === "string" ? decode(v) : coerce(kinds[i]!, v, f.name, ",", true);
       }
     }
   }
@@ -813,7 +812,8 @@ function fractionDigits(c: BunColumn): number | undefined {
  */
 function bunValue(kind: Kind, v: unknown, name: string, delim: string | undefined, postgres: boolean, type?: number, digits?: number): unknown {
   if (typeof v === "string" && kind.includes("|") && kind.split("|").includes("int8") && (type === undefined ? /^[+-]?\d+$/.test(v) : type === MYSQL_LONGLONG)) return BigInt(v);
-  const out = coerce(kind, v, name, delim, postgres);
+  // Bun.sql's own decoder reads each JSON value of an array itself.
+  const out = coerce(kind, v, name, delim, postgres, "decoded");
   return digits !== undefined && v instanceof Date && typeof out === "string" ? withFraction(out, digits) : out;
 }
 
@@ -959,7 +959,7 @@ function slonikValue(kind: Kind, v: unknown, name: string, delim?: string): unkn
   // pg parses an array's text into an array, each element by the element type's parser, which
   // Reylo's tag passes through for the types it names.
   // An array of whole arrays, or of JSON, whose elements Reylo's tag leaves as their text, so that its levels are the array's.
-  if (Array.isArray(v) && (wholeArrayKind(elementKind(kind)) !== undefined || elementKind(kind) === "json")) return coerce(kind, v, name, delim, true, true);
+  if (Array.isArray(v) && (wholeArrayKind(elementKind(kind)) !== undefined || elementKind(kind) === "json")) return coerce(kind, v, name, delim, true, "text");
   if (Array.isArray(v) && kind.endsWith("[]")) return v.map((e) => (Array.isArray(e) ? slonikValue(kind, e, name, delim) : slonikValue(elementKind(kind), e, name, delim)));
   if (SLONIK_STRICT.test(kind)) {
     throw new DecodeError(`Column "${name}" reached Reylo already converted by Slonik's driver (${v instanceof Date ? "a Date" : typeof v}), which ignored the query's type parsers, as a custom driverFactory may: Reylo refuses it rather than return a value that may have been rounded.`);
