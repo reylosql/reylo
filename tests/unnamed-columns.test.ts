@@ -145,21 +145,6 @@ test("a query's type carries its cardinality in its Standard Query, which an out
   assert.equal(cardinality, "one");
 });
 
-test("the output's JSON Schema is the value's", async () => {
-  const { root } = sqlite();
-  const count = await built(root, "count", "select count(*) from users");
-  assert.equal(count.outputSchema.type, "integer");
-  const names = await built(root, "names", "select lower(name) from users");
-  assert.equal(names.outputSchema.type, "array");
-  assert.equal(names.outputSchema.items.type, "string");
-  // One null stands for NULL and for no row.
-  const email = await built(root, "email", "select lower(email) from users where id = 1");
-  assert.deepEqual(email.outputSchema.type, ["string", "null"]);
-  const bare = await built(root, "bare", "select name from users where id = 1");
-  assert.deepEqual(bare.outputSchema.anyOf[1], { type: "null" });
-  await closeSessions();
-});
-
 test("Postgres: the values on each driver, and the names only identifiers pass", { skip: pgLive }, async () => {
   const database = await postgresDatabase("reylo_unnamed", "create table users (id serial primary key, name text not null, email text unique); insert into users (name, email) values ('A', 'a@x'), ('B', null)");
   try {

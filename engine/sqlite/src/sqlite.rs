@@ -1142,8 +1142,8 @@ fn nullable_in_json(f: &JsonFact) -> bool {
     }
 }
 
-/// The JSON Schema of a value inside a document SQLite built, as src/schema.ts spells SQLite's
-/// values there, for a tuple's items and an object's values of any key.
+/// The JSON Schema of a value inside a document SQLite built, for a tuple's items and an object's
+/// values of any key.
 fn value_schema(t: &Ty, nullable: bool) -> serde_json::Value {
     use serde_json::json;
     let schema = match t {
@@ -3158,19 +3158,46 @@ impl Analyzer<'_> {
             }
             return match dml.kind.as_str() {
                 "insert" => {
-                    if dml.rows == 1 {
-                        let triggered = |events: i32| self.skipping.get(&dml.table.to_ascii_lowercase()).is_some_and(|mask| mask & events != 0);
-                        // With no OR clause of its own, a constraint's own conflict clause applies.
-                        let declared_ignore = dml.on_error == "default" && self.tree.tables.get(&dml.table).is_some_and(|t| t.ignores);
-                        let can_skip = dml.on_error == "ignore"
-                            || declared_ignore
-                            || dml.upserts.iter().any(|u| !u.do_update || u.where_.is_some() || triggered(TRIGGER_ROW_UPDATE))
-                            || triggered(TRIGGER_ROW_INSERT);
-                        if can_skip { (Cardinality::AtMostOne, Some("ON CONFLICT DO NOTHING, OR IGNORE, a constraint declared ON CONFLICT IGNORE, a DO UPDATE with a WHERE, or a BEFORE trigger's RAISE(IGNORE) can insert no row".into())) } else { (Cardinality::One, None) }
+                    // A row per row of its source: one VALUES row (or DEFAULT VALUES), a VALUES
+                    // list's rows, or the rows its SELECT returns.
+                    let (rows, why) = if dml.rows == 1 {
+                        (Cardinality::One, None)
                     } else if dml.rows > 1 {
-                        (Cardinality::Many, Some(format!("a VALUES list of {} rows returns {} rows", dml.rows, dml.rows)))
+                        return (Cardinality::Many, Some(format!("a VALUES list of {} rows returns {} rows", dml.rows, dml.rows)));
                     } else {
-                        (Cardinality::Many, Some("an INSERT ... SELECT returns a row per row it reads".into()))
+                        match &t.statement {
+                            Some(sel) => match self.exactly_one(sel) {
+                                Ok(()) => (Cardinality::One, None),
+                                Err(one_why) => match self.at_most_one(sel) {
+                                    Ok(()) => (Cardinality::AtMostOne, Some(one_why)),
+                                    Err(why) => return (Cardinality::Many, Some(format!("an INSERT ... SELECT returns a row per row its SELECT returns, and {why}"))),
+                                },
+                            },
+                            None => return (Cardinality::Many, Some("an INSERT ... SELECT returns a row per row its SELECT returns".into())),
+                        }
+                    };
+                    let triggered = |events: i32| self.skipping.get(&dml.table.to_ascii_lowercase()).is_some_and(|mask| mask & events != 0);
+                    // With no OR clause of its own, a constraint's own conflict clause applies.
+                    let declared_ignore = dml.on_error == "default" && self.tree.tables.get(&dml.table).is_some_and(|t| t.ignores);
+                    let can_skip = dml.on_error == "ignore"
+                        || declared_ignore
+                        || dml.upserts.iter().any(|u| !u.do_update || u.where_.is_some() || triggered(TRIGGER_ROW_UPDATE))
+                        || triggered(TRIGGER_ROW_INSERT);
+                    if rows == Cardinality::One && can_skip {
+                        (Cardinality::AtMostOne, Some("ON CONFLICT DO NOTHING, OR IGNORE, a constraint declared ON CONFLICT IGNORE, a DO UPDATE with a WHERE, or a BEFORE trigger's RAISE(IGNORE) can insert no row".into()))
+                    } else {
+                        (rows, why)
+                    }
+                }
+                "update" if t.update_from.is_some() => {
+                    // UPDATE ... FROM writes each row of its target once, whatever the FROM's
+                    // items join to it: at most one where the join pins the target to one row, as
+                    // a key of it equated to a value, or to a column of an item pinned to one row.
+                    let sel = t.update_from.as_ref().expect("checked by the guard");
+                    let target = sel.from.first().filter(|f| f.table.as_deref().is_some_and(|name| name.eq_ignore_ascii_case(&dml.table)) && f.subquery.is_none() && !f.tab_func && !f.virtual_);
+                    match target {
+                        Some(_) if !sel.from.iter().any(|f| f.right) && self.determined(sel, false)[0] => (Cardinality::AtMostOne, None),
+                        _ => (Cardinality::Many, Some(format!("an UPDATE ... FROM writes each row of `{}` its join matches, and the WHERE does not equate every column of a unique key of `{}` to a value or to a column of a relation pinned to one row", dml.table, dml.table))),
                     }
                 }
                 _ => {
@@ -3316,8 +3343,10 @@ impl Analyzer<'_> {
         if sel.having.is_some() {
             return Err("HAVING leaves a row per group".into());
         }
+        // With no FROM there is one row for the WHERE to keep or remove: SQLite has no
+        // set-returning call a select list may make.
         if sel.from.is_empty() {
-            return Err("a SELECT with no FROM and a WHERE can return no row or one, and the engine proves that only through a LIMIT".into());
+            return Ok(());
         }
         // A RIGHT or FULL JOIN keeps the rows of each side that match nothing: two rows where
         // each side has one.
@@ -3375,8 +3404,12 @@ impl Analyzer<'_> {
         let n = sel.from.len();
         let index: HashMap<i64, usize> = sel.from.iter().enumerate().map(|(i, f)| (f.cursor, i)).collect();
         let terms = conjuncts(sel.where_.as_ref());
+        let varies = self.varying_items(sel);
         loop {
             let mut changed = false;
+            // A determined item's columns are one value each for pinning another item, but for one
+            // whose statement SQLite may run again for each row it meets ([`Self::varying_items`]).
+            let steady: Vec<bool> = done.iter().zip(&varies).map(|(d, v)| *d && !v).collect();
             for i in 0..n {
                 if done[i] {
                     continue;
@@ -3384,12 +3417,12 @@ impl Analyzer<'_> {
                 let f = &sel.from[i];
                 let pinned = if let Some(sub) = &f.subquery {
                     let usable: Vec<&Node> = terms.iter().copied().filter(|t| !t.outer_on || (!constant && t.join == f.cursor)).collect();
-                    !(constant && f.outer) && (self.at_most_one(sub).is_ok() || self.derived_pinned(&derived[i], f.cursor, &usable, &done, &index))
+                    !(constant && f.outer) && (self.at_most_one(sub).is_ok() || self.derived_pinned(&derived[i], f.cursor, &usable, &steady, &index))
                 } else if let (Some(table), false, false) = (f.table.as_deref(), f.tab_func, f.virtual_) {
                     // A WHERE term's `=` rejects the null extension, so it pins even an outer
                     // join's right side for every row.
                     let usable: Vec<&Node> = terms.iter().copied().filter(|t| !t.outer_on || (!constant && t.join == f.cursor)).collect();
-                    self.key_pinned(table, f.cursor, &usable, &done, &index)
+                    self.key_pinned(table, f.cursor, &usable, &steady, &index)
                 } else {
                     false
                 };
@@ -3549,6 +3582,9 @@ impl Analyzer<'_> {
 
     /// [`Self::pins`]'s column itself.
     fn pinned_column<'n>(&self, t: &'n Node, cursor: i64, done: &[bool], index: &HashMap<i64, usize>) -> Option<&'n Node> {
+        if t.op == "in" {
+            return t.left.as_deref().filter(|col| col.op == "column" && col.cursor == cursor && t.select.as_deref().is_some_and(|sub| self.one_row_in(col, sub)));
+        }
         if t.op != "=" {
             return None;
         }
@@ -3561,17 +3597,32 @@ impl Analyzer<'_> {
                 && keeps_column(col, other)
                 && (collation.eq_ignore_ascii_case("BINARY") || col.coll.as_deref().is_some_and(|c| c.eq_ignore_ascii_case(collation)))
                 && !self.calls_volatile(other)
-                && other.select.is_none()
-                && cursors(other).is_some_and(|read| read.iter().all(|c| *c != cursor && index.get(c).is_none_or(|i| done[*i])));
+                && (scalar_subquery_value(other) || (other.select.is_none() && cursors(other).is_some_and(|read| read.iter().all(|c| *c != cursor && index.get(c).is_none_or(|i| done[*i])))));
             value.then_some(col)
         })
+    }
+
+    /// Whether `col IN (sub)` holds `col` to one value: `sub` reads nothing of the statement around
+    /// it, so SQLite runs it once, it returns one row at most, and its column is compared as `col`
+    /// holds its values ([`keeps_column`]), under `col`'s collation, which a COLLATE in it would
+    /// replace.
+    fn one_row_in(&self, col: &Node, sub: &Sel) -> bool {
+        self_contained(sub) && sub.columns.len() == 1 && !has_op(&sub.columns[0].expr, "collate") && keeps_column(col, &sub.columns[0].expr) && self.at_most_one(sub).is_ok()
     }
 
     /// Whether every row carries the same value of `e`: a column of a constant item, a column the
     /// WHERE (not an outer join's ON) equates to a value, or a value itself.
     fn pinned(&self, sel: &Sel, e: &Node, constant: &[bool]) -> bool {
         let index: HashMap<i64, usize> = sel.from.iter().enumerate().map(|(i, f)| (f.cursor, i)).collect();
+        let varies = self.varying_items(sel);
+        let constant: Vec<bool> = constant.iter().zip(&varies).map(|(c, v)| *c && !v).collect();
+        let constant = constant.as_slice();
         if e.op == "column" {
+            // A varying item's column is no one value, a WHERE's equality with it included: a
+            // flattened subquery computes it again in the WHERE and in the select list.
+            if index.get(&e.cursor).is_some_and(|i| varies[*i]) {
+                return false;
+            }
             if index.get(&e.cursor).is_some_and(|i| constant[*i]) {
                 return true;
             }
@@ -3579,6 +3630,28 @@ impl Analyzer<'_> {
             return terms.iter().filter(|t| !t.outer_on).filter_map(|t| self.pins(t, e.cursor, constant, &index)).any(|c| e.column.as_deref().is_some_and(|name| name.eq_ignore_ascii_case(c)));
         }
         e.select.is_none() && !self.calls_volatile(e) && cursors(e).is_some_and(|read| read.iter().all(|c| !index.contains_key(c)))
+    }
+
+    /// Which FROM items are subqueries, WITH queries or views whose statement calls a function that
+    /// may give each call another value: `random()`, `randomblob()`, the counts of rows written so
+    /// far, or one the engine does not know. SQLite may flatten such an item into the query that
+    /// reads it and call the function again for each row it meets, so a determined one is still no
+    /// one value: `t.id = x.id`, with `x.id` a `random()`, may match a row of `t` for each.
+    fn varying_items(&self, sel: &Sel) -> Vec<bool> {
+        sel.from.iter().map(|f| f.subquery.as_deref().is_some_and(|sub| select_calls(sub, &|n| self.varies(n)))).collect()
+    }
+
+    /// Whether a call may give each call another value ([`Self::varying_items`]). A date or time
+    /// function reads `'now'` once per statement, and an aggregate's or a window's value is its
+    /// rows', which SQLite computes before any query reads them.
+    fn varies(&self, n: &Node) -> bool {
+        const VARYING: &[&str] = &["random", "randomblob", "changes", "total_changes", "last_insert_rowid"];
+        const DATES: &[&str] = &["date", "time", "datetime", "julianday", "unixepoch", "strftime", "timediff"];
+        if n.op != "function" || n.agg || n.window {
+            return false;
+        }
+        let name = n.name.as_deref().unwrap_or("").to_ascii_lowercase();
+        VARYING.contains(&name.as_str()) || self.extras.function(&name, n.args.len()).is_some() || !(KNOWN_FUNCTIONS.contains(&name.as_str()) || DATES.contains(&name.as_str()))
     }
 
     /// The DML form: the target table's columns have no stable cursor, so they match by name.
@@ -3597,18 +3670,30 @@ impl Analyzer<'_> {
     }
 
     /// The columns the WHERE equates to a value: `col = <no column anywhere>` under ANDs, where
-    /// the value calls nothing that changes from row to row.
+    /// the value calls nothing that changes from row to row, or is a subquery that reads nothing
+    /// around it; and `col IN (<such a subquery of one row at most>)`.
     fn equated(&self, where_: Option<&Node>) -> HashSet<(i64, String)> {
         let mut out = HashSet::new();
         for n in conjuncts(where_) {
-            if n.op != "=" || n.outer_on {
+            if n.outer_on {
+                continue;
+            }
+            if n.op == "in" {
+                if let (Some(col), Some(sub)) = (n.left.as_deref(), n.select.as_deref()) {
+                    if let (true, Some(name)) = (col.op == "column" && self.one_row_in(col, sub), &col.column) {
+                        out.insert((col.cursor, name.clone()));
+                    }
+                }
+                continue;
+            }
+            if n.op != "=" {
                 continue;
             }
             if let (Some(l), Some(r)) = (n.left.as_deref(), n.right.as_deref()) {
                 for (col, other) in [(l, r), (r, l)] {
                     // An explicit COLLATE (NOCASE) may compare more loosely than the
                     // unique index distinguishes.
-                    if col.op == "column" && !reads_column(other) && !has_op(other, "collate") && keeps_column(col, other) && !self.calls_volatile(other) {
+                    if col.op == "column" && (!reads_column(other) || scalar_subquery_value(other)) && !has_op(other, "collate") && keeps_column(col, other) && !self.calls_volatile(other) {
                         if let Some(name) = &col.column {
                             out.insert((col.cursor, name.clone()));
                         }
@@ -3984,6 +4069,58 @@ fn has_aggregate(n: &Node) -> bool {
         return true;
     }
     n.left.as_deref().is_some_and(has_aggregate) || n.right.as_deref().is_some_and(has_aggregate) || n.list.iter().any(has_aggregate) || n.args.iter().any(has_aggregate)
+}
+
+/// Whether `n` is a scalar subquery that reads nothing of the statement around it: one value for
+/// every row, since SQLite runs such a subquery once per statement (`OP_Once`) and takes its first
+/// row, or NULL for none. A COLLATE inside it leaves a comparison with it alone: SQLite reads no
+/// collation off a subquery.
+fn scalar_subquery_value(n: &Node) -> bool {
+    n.op == "select" && n.select.as_deref().is_some_and(self_contained)
+}
+
+/// Whether `found` holds of any expression of a SELECT, at any depth: its subqueries', its FROM
+/// items' and its set operation's arms' included.
+fn select_calls(sel: &Sel, found: &dyn Fn(&Node) -> bool) -> bool {
+    fn node(n: &Node, found: &dyn Fn(&Node) -> bool) -> bool {
+        found(n)
+            || n.left.iter().chain(n.right.iter()).chain(n.filter_where.iter()).any(|b| node(b, found))
+            || n.list.iter().chain(&n.args).chain(&n.order_by).chain(&n.partition_by).any(|c| node(c, found))
+            || n.select.as_deref().is_some_and(|s| select_calls(s, found))
+    }
+    sel.from.iter().any(|f| f.args.iter().chain(f.on.iter()).any(|n| node(n, found)) || f.subquery.as_deref().is_some_and(|s| select_calls(s, found)))
+        || sel.columns.iter().map(|c| &c.expr).chain(sel.rows.iter().flatten()).chain(sel.where_.iter()).chain(&sel.group_by).chain(sel.having.iter()).chain(&sel.order_by).chain(sel.limit.iter()).chain(sel.offset.iter()).any(|n| node(n, found))
+        || sel.prior.as_deref().is_some_and(|p| select_calls(p, found))
+}
+
+/// Whether a SELECT reads only columns of its own FROM items, at any depth: none of a query around
+/// it, which would make it correlated.
+fn self_contained(sel: &Sel) -> bool {
+    fn select(sel: &Sel, own: &mut HashSet<i64>, read: &mut Vec<i64>) {
+        for f in &sel.from {
+            own.insert(f.cursor);
+            f.args.iter().chain(f.on.iter()).for_each(|n| node(n, own, read));
+            if let Some(sub) = &f.subquery {
+                select(sub, own, read);
+            }
+        }
+        sel.columns.iter().map(|c| &c.expr).chain(sel.rows.iter().flatten()).chain(sel.where_.iter()).chain(&sel.group_by).chain(sel.having.iter()).chain(&sel.order_by).chain(sel.limit.iter()).chain(sel.offset.iter()).for_each(|n| node(n, own, read));
+        if let Some(prior) = &sel.prior {
+            select(prior, own, read);
+        }
+    }
+    fn node(n: &Node, own: &mut HashSet<i64>, read: &mut Vec<i64>) {
+        if n.op == "column" {
+            read.push(n.cursor);
+        }
+        n.left.iter().chain(n.right.iter()).chain(n.filter_where.iter()).map(|b| b.as_ref()).chain(&n.list).chain(&n.args).chain(&n.order_by).chain(&n.partition_by).for_each(|c| node(c, own, read));
+        if let Some(sub) = &n.select {
+            select(sub, own, read);
+        }
+    }
+    let (mut own, mut read) = (HashSet::new(), Vec::new());
+    select(sel, &mut own, &mut read);
+    read.iter().all(|c| own.contains(c))
 }
 
 /// Whether an expression reads any column, at any depth (a subquery's columns included).
@@ -4978,6 +5115,96 @@ mod tests {
         assert_eq!(analysis("insert into users (email, name) values (:e, :n)").cardinality, "none");
         assert_eq!(analysis("delete from users where id = :id returning id").cardinality, "at_most_one");
         assert_eq!(analysis("select id from users union all select user_id from posts").cardinality, "many");
+    }
+
+    #[test]
+    fn an_insert_select_returns_a_row_per_row_of_its_select() {
+        for (sql, cardinality) in [
+            ("insert into users (name) select :n returning id", "one"),
+            ("with input as (select :n as n) insert into users (name) select n from input returning id", "one"),
+            ("insert into users (name) select max(name) from users returning id", "one"),
+            ("insert into users (name) select :n where :ok returning id", "at_most_one"),
+            ("insert into users (name) select name from users where id = :id returning id", "at_most_one"),
+            ("insert into users (name) select name from users limit 1 returning id", "at_most_one"),
+            ("insert into posts (user_id, title) select u.id, :t from users u where u.email = :e returning id", "at_most_one"),
+            ("insert into users (name) select :n on conflict (email) do nothing returning id", "at_most_one"),
+            ("insert or ignore into users (name) select :n returning id", "at_most_one"),
+            ("insert into users (id, name) select :id, :n on conflict (id) do update set name = excluded.name returning id", "one"),
+            ("insert into users (name) select name from users returning id", "many"),
+            ("insert into users (name) select :a union all select :b returning id", "many"),
+            ("insert into users (name) select :n", "none"),
+        ] {
+            assert_eq!(analysis(sql).cardinality, cardinality, "{sql}");
+        }
+    }
+
+    #[test]
+    fn a_select_with_no_from_returns_one_row_at_most() {
+        assert_eq!(analysis("select :n as n where :ok").cardinality, "at_most_one");
+        assert_eq!(analysis("select 1 as one where exists (select 1 from users)").cardinality, "at_most_one");
+        assert_eq!(analysis("select :n as n").cardinality, "one");
+    }
+
+    #[test]
+    fn a_key_equated_to_a_subquery_that_reads_nothing_around_it_is_one_value() {
+        for (sql, cardinality) in [
+            ("select id from users where id = (select user_id from posts where id = :id)", "at_most_one"),
+            ("select id from users where id = (select user_id from posts)", "at_most_one"),
+            ("select id from users where (select max(user_id) from posts) = id", "at_most_one"),
+            ("with input as (select :id as id) select name from users where id = (select id from input)", "at_most_one"),
+            ("select id from users where id in (select user_id from posts where id = :id)", "at_most_one"),
+            ("select id from users where id in (select user_id from posts limit 1)", "at_most_one"),
+            // Correlated: a value per row of `users`.
+            ("select id from users u where id = (select user_id from posts p where p.title = u.name)", "many"),
+            // Several rows: IN matches each.
+            ("select id from users where id in (select user_id from posts)", "many"),
+            // A TEXT value compared with a TEXT key of no affinity on its side converts nothing,
+            // but a collation of its own would compare more loosely than the key's index.
+            ("select id from users where email in (select title collate nocase from posts where id = :id)", "many"),
+            ("update users set name = :n where id = (select user_id from posts where id = :id) returning id", "at_most_one"),
+            ("update users set name = :n where id in (select user_id from posts where id = :id) returning id", "at_most_one"),
+            ("delete from posts where id = (select max(id) from posts) returning id", "at_most_one"),
+            ("delete from posts where id in (select id from posts where user_id = :u limit 1) returning id", "at_most_one"),
+            ("delete from posts where id = (select max(p.id) from posts p where p.user_id = posts.user_id) returning id", "many"),
+            // Correlated through a FILTER, an aggregate's or a window call's.
+            ("select id from users u where id = (select max(p.user_id) filter (where p.title = u.name) from posts p)", "many"),
+            ("delete from users where id = (select max(p.user_id) filter (where p.title = users.name) from posts p) returning id", "many"),
+            ("update users set name = 'x' where id = (select max(p.user_id) filter (where p.title = users.name) from posts p) returning id", "many"),
+            ("select id from users u where id in (select max(p.user_id) filter (where p.title = u.name) over () from posts p limit 1)", "many"),
+            // A FILTER over the subquery's own columns reads nothing around it.
+            ("select id from users where id = (select max(p.user_id) filter (where p.title = 'x') from posts p)", "at_most_one"),
+        ] {
+            assert_eq!(analysis(sql).cardinality, cardinality, "{sql}");
+        }
+    }
+
+    #[test]
+    fn a_column_sqlite_may_compute_again_for_each_row_pins_no_key() {
+        for (sql, cardinality) in [
+            ("update users set name = 'x' from (select (random() & 1) + 1 as id from posts where posts.id = 1) x where users.id = x.id returning users.id", "many"),
+            ("insert into posts (user_id, title) select u.id, 'x' from users u cross join (select (random() & 1) + 1 as id from posts where posts.id = 1) x where u.id = x.id returning id", "many"),
+            ("select u.id from users u, (select abs(random()) % 3 as id) x where u.id = x.id", "many"),
+            // An aggregate's value, and `'now'`, are one value for the statement.
+            ("select u.id from users u, (select max(user_id) as id from posts) x where u.id = x.id", "at_most_one"),
+            ("with input as (select :id as id, datetime('now') as at) update users set name = input.at from input where users.id = input.id returning users.id", "at_most_one"),
+        ] {
+            assert_eq!(analysis(sql).cardinality, cardinality, "{sql}");
+        }
+    }
+
+    #[test]
+    fn an_update_from_writes_a_target_row_once_whatever_it_joins() {
+        for (sql, cardinality) in [
+            ("update users set name = 'x' from posts p where p.id = :id and users.id = p.user_id returning users.id", "at_most_one"),
+            ("update users set name = 'x' from posts p where users.id = :id and p.user_id = users.id returning users.id", "at_most_one"),
+            ("with input as (select :id as id) update users set name = 'x' from input where users.id = input.id returning users.id", "at_most_one"),
+            ("update users set name = 'x' from posts p where users.id = p.user_id returning users.id", "many"),
+            ("with input as (select :id as id) update users set name = 'x' from input where users.name = input.id returning users.id", "many"),
+            ("update users set name = 'x' from (select user_id from posts) p where users.id = p.user_id returning users.id", "many"),
+            ("update users set name = 'x' from posts p where users.id = p.user_id", "none"),
+        ] {
+            assert_eq!(analysis(sql).cardinality, cardinality, "{sql}");
+        }
     }
 
     /// The whole path, schema query included, as the host drives it.

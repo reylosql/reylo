@@ -485,7 +485,7 @@ $ reylo migrate new invoices --drop invoices.note --rename orders=invoices
 
 ### Table rewrites
 
-On Postgres, a change that copies a table while it blocks writes is refused until you accept it with `--blocking`:
+On Postgres and MySQL, a change that copies a table while it blocks writes is refused until you accept it with `--blocking`:
 
 ```sql title="schema.sql"
 create table payments (
@@ -515,7 +515,7 @@ $ reylo migrate new widen_amount --blocking
   ! It rewrites payments, copying every row while it blocks reads and writes to it
 ```
 
-New constraints and indexes never prompt for `--blocking`. Reylo splits them across migrations so none blocks writes.
+On Postgres, new constraints and indexes never prompt for `--blocking`. Reylo splits them across migrations so none blocks writes. On MySQL, a foreign key added to an existing table does, since MySQL blocks writes to the table while it reads every row.
 
 ### Type changes
 

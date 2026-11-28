@@ -300,11 +300,11 @@ test("on SQLite, a schema changed and changed back while a statement is analyzed
       ...c,
       // The first analysis runs on a migration, which is reverted before it ends: the fingerprint
       // after it is the one before it, and only the schema's stamp says it moved.
-      analyze: async (sql) => {
-        if (analyses++ > 0) return c.analyze(sql);
+      analyzeFor: async (sql, label) => {
+        if (analyses++ > 0) return c.analyzeFor(sql, label);
         exec(rebuild("text"));
         try {
-          return await c.analyze(sql);
+          return await c.analyzeFor(sql, label);
         } finally {
           exec(rebuild("text not null"));
         }
@@ -316,6 +316,56 @@ test("on SQLite, a schema changed and changed back while a statement is analyzed
   assert.equal(analyses, 2);
   assert.ok(!outcome.analysis.columns[0]!.nullable);
   assert.ok(!(JSON.parse(readFileSync(outcome.entry, "utf8")) as { analysis: { columns: { nullable?: boolean }[] } }).analysis.columns[0]!.nullable);
+});
+
+test("an analysis whose connection says its answers came from replicas that had not shown the schema is given but not kept", async () => {
+  const { root, env } = project();
+  let replicas = false;
+  const change = (c: Connection): Connection => ({ ...c, analyzeFor: async (sql, label) => ({ ...(await c.analyzeFor(sql, label)), kept: replicas }) });
+  const outcome = await withConnections("sqlite", change, () => analyze(root, env, SELECT));
+  assert.ok(outcome.ok && outcome.source === "database");
+  assert.deepEqual(outcome.analysis.columns.map((c) => c.name), ["id", "name"]);
+  assert.ok(!existsSync(outcome.entry), "an entry was written");
+  // Once the answers came from servers that had shown it, the analysis is kept.
+  replicas = true;
+  const kept = await withConnections("sqlite", change, () => analyze(root, env, SELECT));
+  assert.ok(kept.ok && kept.source === "database" && existsSync(kept.entry));
+});
+
+test("an analysis not kept is analyzed again while the schema stands, unless the engine says no try would keep it", async () => {
+  const { root, env } = project();
+  for (const [again, analyses] of [[undefined, 3], [false, 1]] as const) {
+    let runs = 0;
+    const change = (c: Connection): Connection => ({
+      ...c,
+      analyzeFor: async (sql, label) => {
+        runs++;
+        return { ...(await c.analyzeFor(sql, label)), kept: false, ...(again !== undefined && { again }) };
+      },
+    });
+    const outcome = await withConnections("sqlite", change, () => analyze(root, env, SELECT));
+    assert.ok(outcome.ok && outcome.source === "database" && !existsSync(outcome.entry));
+    assert.equal(runs, analyses, `again: ${again}`);
+  }
+});
+
+test("the fingerprint the engine read after an analysis stands for the session's own read, and one that moved has the statement analyzed again under it", async () => {
+  const { root, env } = project();
+  const labels: (string | undefined)[] = [];
+  // The engine reads the fingerprint after the analysis, as ClickHouse's does: here, one that moved.
+  const change = (c: Connection): Connection => ({
+    ...c,
+    analyzeFor: async (sql, label) => {
+      labels.push(label);
+      return { ...(await c.analyzeFor(sql, label)), after: "another schema" };
+    },
+  });
+  const outcome = await withConnections("sqlite", change, () => analyze(root, env, SELECT));
+  assert.ok(outcome.ok && outcome.source === "database");
+  assert.equal(labels.length, 2);
+  assert.notEqual(labels[0], "another schema");
+  assert.equal(labels[1], "another schema");
+  assert.equal((JSON.parse(readFileSync(outcome.entry, "utf8")) as { schema: string }).schema, "another schema");
 });
 
 test("the engine's answers from while the fingerprint query failed are dropped once it runs again", async () => {
@@ -697,7 +747,7 @@ test("the module a build step emits carries the analysis and reads nothing at ru
       `export const sql = "select id, name from users where id = ?";`,
       `export const raw = ${JSON.stringify(SELECT)};`,
       `export const params = ["id"];`,
-      `export default defineSqliteQuery({ sql: raw, params, cardinality: "maybeOne", readOnly: true, text: sql, order: ["id"], marks: [[38,39]], inputs: {"id":{"type":{"kind":"integer","bits":64},"nullable":false}}, columns: [["id","int"],["name","text"]], row: (v) => ({ "id": v[0], "name": v[1] }), source: "user.sql", sqlcommenter: true, jsonSchema: {"input":{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"id":{"type":"integer","format":"int64"}},"required":["id"],"additionalProperties":false},"output":{"$schema":"https://json-schema.org/draft/2020-12/schema","anyOf":[{"type":"object","properties":{"id":{"type":"integer","format":"int64"},"name":{"type":"string"}},"required":["id","name"]},{"type":"null"}]}} });`,
+      `export default defineSqliteQuery({ sql: raw, params, cardinality: "maybeOne", readOnly: true, text: sql, order: ["id"], marks: [[38,39]], inputs: {"id":{"type":{"kind":"integer","bits":64},"nullable":false}}, columns: [["id","int"],["name","text"]], row: (v) => ({ "id": v[0], "name": v[1] }), source: "user.sql", sqlcommenter: true });`,
       ``,
     ].join("\n"));
     // A statement in a directory carries its file written with `/`.

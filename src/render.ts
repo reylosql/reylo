@@ -6,7 +6,7 @@
 // `Json`, which the generated module imports from `reylo`.
 import { CODEC_TYPE, leafCodec, type Codec, type Codecs } from "./codecs.ts";
 import { bareName, isMysqlSet, nestsAnyDeep, postgresArray, schemaOf, type EngineType, type Field, type Slot } from "./engine-type.ts";
-import { inDocument, JSON_TYPE, postgresInJson } from "./schema.ts";
+import { inDocument, JSON_TYPE, postgresInJson } from "./in-document.ts";
 import { columnKind, isRowKind, kindType as typeOfKind, RANGE_BOUNDS, type Dialect, type JsonNumbers } from "./values.ts";
 
 /** GeoJSON's type of each geometry subtype the type descriptor names (@types/geojson). */
@@ -38,13 +38,13 @@ export const ident = (name: string) => (/^[A-Za-z_$][\w$]*$/.test(name) ? name :
 
 /**
  * The TypeScript of a value inside a document the database built, typed by the SQL value it was
- * written from, as the database writes that value in there: a scalar's by the table the output
- * schema reads too (src/schema.ts, `inDocument`), an enum's labels, a tuple's elements, a union's
+ * written from, as the database writes that value in there: a scalar's by the table of each
+ * database's writers (src/in-document.ts), an enum's labels, a tuple's elements, a union's
  * members, and any JSON value for one nothing types.
  */
 function jsonImage(t: EngineType, dialect: Dialect, inUnion = false): string {
   const form = inDocument(t, dialect, inUnion);
-  if (form !== undefined) return form.type;
+  if (form !== undefined) return form;
   switch (t.kind) {
     case "enum": return enumLiteral(t, jsonImage(t.type, dialect, inUnion));
     case "tuple": return tupleOf(t, (e) => jsonImage(e, dialect));
@@ -55,7 +55,7 @@ function jsonImage(t: EngineType, dialect: Dialect, inUnion = false): string {
     // A structure standing where no walk reaches it, a union's member or a tuple's element: its
     // Postgres name's form, a row whose columns were not read among them, else any JSON.
     default:
-      return (dialect === "postgres" ? postgresInJson(t)?.type : undefined) ?? JSON_TYPE;
+      return (dialect === "postgres" ? postgresInJson(t) : undefined) ?? JSON_TYPE;
   }
 }
 
@@ -66,9 +66,9 @@ function jsonImage(t: EngineType, dialect: Dialect, inUnion = false): string {
 export function renderType(t: EngineType, inJson = false, dialect: Dialect = "postgres", codecs: Codecs = {}): string {
   const codec = inJson ? undefined : leafCodec(t, dialect, codecs);
   if (codec !== undefined) return codecType(codec, t, (e) => renderType(e, false, dialect));
-  // A value inside a document as the database writes it there, by the output schema's table too.
+  // A value inside a document as the database writes it there (src/in-document.ts).
   const form = inJson ? inDocument(t, dialect) : undefined;
-  if (form !== undefined) return form.type;
+  if (form !== undefined) return form;
   switch (t.kind) {
     // An enum's labels, a CHECK's list, or a literal.
     case "enum":

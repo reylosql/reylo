@@ -290,6 +290,14 @@ pub(crate) fn character_set(name: &str) -> Option<(&'static str, u32, Option<Vec
     })
 }
 
+/// Whether MySQL writes a string stored in the character set into a JSON document as its bytes,
+/// unconverted, which a client then reads as UTF-8: a set whose every character takes two bytes or
+/// more (`ucs2`, `utf16`, `utf16le`, `utf32`). It converts a string of every other set (8.4.13,
+/// through `json_object`, `json_array` and their aggregates).
+pub(crate) fn unconverted_in_json(charset: &str) -> bool {
+    matches!(charset.to_ascii_lowercase().as_str(), "ucs2" | "utf16" | "utf16le" | "utf32")
+}
+
 /// Text stored in `charset`, holding a string column's capacity in bytes (`bytes`, a `TEXT`'s): its
 /// encoding where that says more than any Unicode text would (a Unicode encoding only beside a
 /// size it counts), its code points, and the capacity in its bytes, or in code points where each

@@ -4,7 +4,10 @@ import type { EngineType } from "../src/engine.ts";
 import { analysisWithNestedArrays } from "../src/engine-type.ts";
 import { jsonNumbers, orNull, renderParamType, renderType } from "../src/render.ts";
 import { columnKind, numbersInJson } from "../src/values.ts";
-import { typeSchema } from "../src/schema.ts";
+import { POSTGRES_TEXT_IN_JSON } from "../src/in-document.ts";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { ROOT } from "./helpers.ts";
 import { array, checked, doc, enumOf, field, lite, my, oneOf, pg, record } from "./descriptors.ts";
 
 // A table's row type as the engine renders it once the catalog gave its columns.
@@ -105,8 +108,6 @@ test("pgvector's vector and halfvec are arrays of numbers, as columns and as par
     assert.equal(renderParamType(pg(name), "postgres"), "number[]");
     assert.equal(renderType(array(pg(name)), false, "postgres"), "(number[] | null)[]");
     assert.equal(renderParamType(array(pg(name)), "postgres"), "number[][]");
-    assert.deepEqual(typeSchema(pg(name), "postgres"), { type: "array", items: { type: "number", format: "float" } });
-    assert.deepEqual(typeSchema(pg(name), "postgres", false, true), { type: "string", description: `pg type ${name}` });
   }
   // A sparsevec stays its text.
   assert.equal(renderType(pg("sparsevec"), false, "postgres"), "string");
@@ -116,21 +117,17 @@ test("an hstore is an object of nullable text, as a column, a parameter and insi
   assert.equal(renderType(pg("hstore"), false, "postgres"), "Record<string, string | null>");
   assert.equal(renderParamType(pg("hstore"), "postgres"), "Record<string, string | null>");
   assert.equal(renderType(array(pg("hstore")), false, "postgres"), "(Record<string, string | null> | null)[]");
-  assert.deepEqual(typeSchema(pg("hstore"), "postgres"), { type: "object", additionalProperties: { type: ["string", "null"] } });
   assert.equal(renderType(pg("hstore"), true, "postgres"), "Record<string, string | null>");
   assert.equal(renderType(doc({ kind: "array", element: { type: pg("hstore") } }), false, "postgres"), "(Record<string, string | null>)[]");
-  assert.deepEqual(typeSchema(pg("hstore"), "postgres", false, true), { type: "object", additionalProperties: { type: ["string", "null"] } });
 });
 
 test("inside a document an oid is its text, a geometry its GeoJSON, and an extension's type with no cast to JSON its text", () => {
   // Postgres writes JSON numbers only for the integers, the floats and numeric: `{"o" : "7"}`.
   assert.equal(renderType(pg("oid"), false, "postgres"), "number");
   assert.equal(renderType(pg("oid"), true, "postgres"), "string");
-  assert.deepEqual(typeSchema(pg("oid"), "postgres", false, true), { type: "string" });
   // PostGIS's cast to JSON writes GeoJSON: `{"type":"Point","coordinates":[1,2]}`.
   assert.equal(renderType(pg("geometry"), false, "postgres"), "string");
   assert.equal(renderType(pg("geometry"), true, "postgres"), "{ type: string; [key: string]: Json | undefined }");
-  assert.deepEqual(typeSchema(pg("geometry"), "postgres", false, true), { type: "object", properties: { type: { type: "string" } }, required: ["type"], description: "a GeoJSON geometry" });
   // A pgvector vector, a geography, a cube or an isbn inside a document is the JSON string of its text: `{"v" : "[1,2,3]"}`.
   for (const name of ["vector", "halfvec", "sparsevec", "geography", "cube", "seg", "isbn", "semver", "ulid", "point"]) assert.equal(renderType(pg(name), true, "postgres"), "string", name);
 });
@@ -158,8 +155,6 @@ test("SQLite: an INTEGER is a number, exact or an error; a NUMERIC whichever the
   assert.equal(renderType(lite("number"), false, "sqlite"), "number");
   assert.equal(renderType(lite("number"), true, "sqlite"), "number");
   assert.equal(columnKind(lite("number"), "sqlite"), "int|float");
-  assert.deepEqual(typeSchema(lite("number"), "sqlite"), { type: "number" });
-  assert.deepEqual(typeSchema(lite("number"), "sqlite", false, true), { type: "number" });
   // The driver binds a number for an INTEGER, and the run time a truth value as 1 or 0.
   assert.equal(renderParamType(lite("integer"), "sqlite"), "number");
   assert.equal(renderParamType(lite("numeric"), "sqlite"), "number | string | boolean");
@@ -360,11 +355,6 @@ test("a returned array's elements may be NULL unless the statement shows they ar
   const member = record([field("tags", texts())]);
   const members = [{ written: "text[]" }];
   assert.equal(renderParamType(member, "postgres", false, members), "{ tags: (string | null)[] }");
-  // The JSON Schemas say the same.
-  assert.deepEqual(typeSchema(texts(), "postgres"), { type: "array", items: { type: ["string", "null"] } });
-  assert.deepEqual(typeSchema(texts(false), "postgres"), { type: "array", items: { type: "string" } });
-  assert.deepEqual(typeSchema(texts(), "postgres", true), { type: "array", items: { type: "string" } });
-  assert.deepEqual(typeSchema(member, "postgres", true, false, false, members), { type: "object", properties: { tags: { type: "array", items: { type: ["string", "null"] } } }, required: ["tags"], additionalProperties: false });
 });
 
 test("a JSON value nothing constrains is any JSON value, Json, and so is a value nothing types inside JSON the statement builds; its parameter takes whatever JSON.stringify writes", () => {
@@ -436,5 +426,11 @@ test("a tagged union is { tag, value } as a value, and any JSON inside a documen
   assert.equal(renderType(choice, false), `{ tag: "num"; value: bigint | null } | { tag: "str"; value: string | null }`);
   // A 64-bit integer is a bigint as a value, never inside parsed JSON.
   assert.equal(renderType(choice, true), "Json");
-  assert.deepEqual(typeSchema(choice, "postgres", false, true), {});
+});
+
+test("the types Postgres writes as their text inside a document are the engine's own list, which the Rust crate reads too", () => {
+  const source = readFileSync(join(ROOT, "engine", "core", "src", "schema.rs"), "utf8");
+  const list = /pub const POSTGRES_TEXT_IN_JSON: &\[&str\] = &\[([^\]]*)\];/.exec(source)?.[1];
+  assert.ok(list !== undefined, "engine/core/src/schema.rs names no POSTGRES_TEXT_IN_JSON");
+  assert.deepEqual([...list.matchAll(/"([^"]+)"/g)].map((m) => m[1]), [...POSTGRES_TEXT_IN_JSON]);
 });

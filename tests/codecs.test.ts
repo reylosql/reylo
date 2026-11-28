@@ -20,8 +20,6 @@ import { postgresJsSql } from "./stand-ins.ts";
 import { codecRuntime, definePostgresQuery, defineQuery } from "../src/index.ts";
 import { moduleTypes, standardColumnsType } from "../src/module-types.ts";
 import { renderParamType, renderType } from "../src/render.ts";
-import { querySchemas, typeSchema } from "../src/schema.ts";
-import { validate } from "../src/json-schema.ts";
 import { DecodeError, ParameterError } from "../src/values.ts";
 import type { EngineType } from "../src/engine-type.ts";
 
@@ -115,13 +113,6 @@ test("a codec position is declared its codec's type, through every part Reylo de
   assert.match(types.params, /since: Temporal\.Instant/);
   const plain = moduleTypes("select …", analysis, "postgres", { params: ["since"], placeholders: [] }, true);
   assert.match(plain.row, /id: bigint;[\s\S]*price: string;[\s\S]*at: string/);
-  // The JSON Schema names the JSON form the codec's value writes: a Temporal.Instant's, with a year
-  // outside 0000–9999 as ISO 8601 extends it.
-  const schemas = querySchemas(analysis, "postgres", every);
-  const row = (schemas.output as any).items.properties;
-  assert.deepEqual([row.id, row.price, row.total, row.took], [{ type: "integer", format: "int64" }, { type: "number" }, { type: ["number", "null"] }, { type: "string", description: "an ISO 8601 duration with its sign in front (P1Y2M3DT4H5M6.789S, -P1D)" }]);
-  assert.deepEqual(row.at, { anyOf: [{ type: "string", format: "date-time" }, { type: "string", pattern: "^([+-](0[1-9][0-9]{4}|[1-9][0-9]{5,})|-00(000[1-9]|00[1-9][0-9]|0[1-9][0-9]{2}|[1-9][0-9]{3}))-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]([.][0-9]+)?(Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])$" }] });
-  assert.equal(validate(row.at, JSON.parse(JSON.stringify(Temporal.Instant.from("+012345-01-01T00:00:00Z")))), undefined);
 });
 
 test("a codec gives each value its type exactly, or refuses it naming the column and the value", () => {
@@ -322,8 +313,6 @@ test("a project's js.codecs reach the module a build writes and the types it dec
     // The module passes the codecs' run time, which it alone imports.
     assert.match(code, /^import \{ defineSqliteQuery, codecRuntime \} from "reylo";$/m);
     assert.match(code, /, codecRuntime,/);
-    // The JSON Schema names the JSON form a codec's value writes.
-    assert.match(code, /"at":\{"type":"string","description":"a date and time without a time zone/);
   } finally {
     for (const session of Session.opened()) await session.close();
   }
@@ -372,8 +361,6 @@ test("a decimal library's class is a decimal's type at every position outside JS
     assert.notEqual(renderType(pg("numeric"), true, "postgres", codecs), `import("${library}").${type}`);
     assert.deepEqual([...planLibraries({ array: { fields: { n: `decimal:${library}`, at: "instant" } } })], [library]);
   }
-  // The JSON form is the text a library's toJSON() writes.
-  assert.deepEqual(typeSchema(pg("numeric"), "postgres", false, false, false, undefined, { decimal: "decimal.js" }), { type: "string", format: "decimal", description: "a decimal as its library's toJSON() writes it, in exponent form for a large or small value (1e+40, 1e-7)" });
 });
 
 test("a decimal library's value holds a decimal's exact text, and a parameter of it binds every digit", () => {
@@ -540,8 +527,6 @@ test("a vector is its typed array at every position outside JSON, and nothing bu
   assert.equal(renderParamType(pg("halfvec"), "postgres", false, undefined, codecs), "Float16Array");
   assert.equal(renderType(array(pg("vector")), false, "postgres", codecs), "(Float32Array | null)[]");
   assert.deepEqual(planOf(array(pg("vector")), "postgres", codecs), { array: "vector:float32" });
-  // As JSON a typed array is an array of its numbers, as a Set is one of its members (`AsJson`), where JSON.stringify writes an object by index.
-  for (const name of ["vector", "halfvec"]) assert.deepEqual(typeSchema(pg(name), "postgres", false, false, false, undefined, codecs), { type: "array", items: { type: "number" } });
 });
 
 test("ClickHouse: a codec reaches a tuple's elements, by name and by place, an array's and a map's pairs", () => {
@@ -623,11 +608,6 @@ test("a geometry is GeoJSON with its SRID at every position outside JSON, typed 
   assert.equal(planOf(pg("geometry"), "postgres", {}), undefined);
   assert.equal(renderType(point4326, false, "postgres", codecs), `import("geojson").Point & { srid: number }`);
   assert.equal(renderParamType(point4326, "postgres", false, undefined, codecs), `import("geojson").Point & { srid?: number }`);
-  // The JSON Schema requires srid of a column, and of a parameter, which takes the column's without one, only type.
-  const required = (input: boolean, t: EngineType = point4326) => (typeSchema(t, "postgres", input, false, false, undefined, codecs) as { required?: string[]; items?: { required?: string[] } });
-  assert.deepEqual(required(false).required, ["type", "srid"]);
-  assert.deepEqual(required(true).required, ["type"]);
-  assert.deepEqual(required(true, array(point4326)).items?.required, ["type"]);
   assert.equal(renderType(pg("geometry"), false, "postgres", codecs), `import("geojson").Geometry & { srid: number }`);
   // Inside JSON a geometry is PostGIS's GeoJSON, as without the codec.
   assert.equal(renderType(pg("geometry"), true, "postgres", codecs), renderType(pg("geometry"), true, "postgres"));

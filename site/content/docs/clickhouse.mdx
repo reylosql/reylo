@@ -77,6 +77,8 @@ Your client takes the URL without the prefix, `http://` or `https://`.
 
 The type check sets the format it reads and the settings the URL names, and no other. A user who can only read is enough for a `SELECT`, a `DELETE` and an `UPDATE`. An `INSERT` needs a user who may insert, since ClickHouse builds one to check it.
 
+Behind a load balancer, the type check keeps an analysis only once every replica that answered it has shown the schema it was made for. It tells replicas apart by their `display_name`, the host's name by default, so give each replica its own. It types faster where a connection stays on one replica, as with ClickHouse Cloud's [replica-aware routing](https://clickhouse.com/docs/products/cloud/features/infrastructure/replica-aware-routing), which its requests ask for.
+
 ## Where types come from [#sources]
 
 Reylo types each query from ClickHouse's own description of it.
@@ -538,4 +540,5 @@ What Reylo can't type on ClickHouse, and what to do instead:
 | A statement other than a `SELECT`, an `INSERT`, a `DELETE` or an `UPDATE`, such as `CREATE TABLE`, `SHOW TABLES` or an `ALTER` that changes the table | Run it on your client |
 | A `clickhouse+https://` server whose certificate no public authority signed, such as a self-signed one | None: the type check verifies the certificate against Mozilla's roots |
 | A server before 25.11, or a proxy that drops the `X-ClickHouse-Exception-Tag` header, where an error that ends a result isn't marked | None: the type check stops at an older server, and `.run()` refuses the result |
+| A proxy that drops the `X-ClickHouse-Server-Display-Name` header, which tells replicas apart | None: the type check keeps no analysis in `reylo/.cache/` |
 | The Rust crate | None: sqlx has no ClickHouse driver |
