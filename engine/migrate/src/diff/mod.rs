@@ -273,6 +273,13 @@ pub trait Alterer: Send {
         let _ = (from, to);
         Vec::new()
     }
+    /// Whether the change or the making of `to` may run before the change of an object it depends
+    /// on (`dep_from`, as the target has it `dep_to`), where its database needs nothing of that
+    /// change first (a SQLite table beside one it references that changes in place).
+    fn runs_before(&self, to: &Object, dep_from: &Object, dep_to: &Object) -> bool {
+        let _ = (to, dep_from, dep_to);
+        false
+    }
     /// What the copies of another object's that a change of `from` to `to` drops itself depend on (a
     /// table that leaves a parent drops its copies of the parent's checks, and what those call): each
     /// dropped after the change, since a copy the table also had of its own outlives the other's.
@@ -1800,7 +1807,12 @@ pub fn plan_with(from: &Schema, to: &Schema, alterer: &dyn Alterer, renames_stat
                     }
                     // Unless that change drops what this one is on, which this one changes before.
                     let before_it = matches!(op, Op::Alter(_)) && taken_by.iter().any(|(a, t)| t == d && !to.objects.contains_key(a) && from.objects.get(id.as_str()).is_some_and(|f| f.deps.contains(a)));
-                    if let Some(j) = create_of(d).filter(|_| !before_it) {
+                    // Or its database needs nothing of that change first.
+                    let needless = |j: usize| match (op, &ops[j]) {
+                        (Op::Alter(_) | Op::Create(_), Op::Alter(x)) => from.objects.get(x).zip(to.objects.get(x)).is_some_and(|(a, b)| alterer.runs_before(o, a, b)),
+                        _ => false,
+                    };
+                    if let Some(j) = create_of(d).filter(|j| !before_it && !needless(*j)) {
                         if j != k {
                             after[k].insert(j);
                         }
