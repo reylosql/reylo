@@ -16,20 +16,45 @@ test("postgres: after a migration adds a column under select *, a created type t
   const root = mkdtempSync(join(tmpdir(), "reylo-drift-"));
   writeFileSync(join(root, "package.json"), "{}");
   writeFileSync(join(root, ".env"), `DATABASE_URL=${own.url}\n`);
-  const sql = "select * from items order by id";
-  writeFileSync(join(root, "items.sql"), sql);
-  const { code } = await sqlModule(join(root, "items.sql"), sql);
-  writeFileSync(join(root, "items.mjs"), code.replace(`from "reylo/module"`, `from ${JSON.stringify(MODULE)}`));
-  const items = (await import(pathToFileURL(join(root, "items.mjs")).href)).default;
+  const built = async (name: string, sql: string) => {
+    writeFileSync(join(root, `${name}.sql`), sql);
+    const { code } = await sqlModule(join(root, `${name}.sql`), sql);
+    writeFileSync(join(root, `${name}.mjs`), code.replace(`from "reylo/module"`, `from ${JSON.stringify(MODULE)}`));
+    return (await import(pathToFileURL(join(root, `${name}.mjs`)).href)).default;
+  };
+  const items = await built("items", "select * from items order by id");
+  // A column the migration adds under a name a later column of the statement holds: only the field the row keeps is matched by name.
+  const shadowed = await built("shadowed", "select items.id, array['happy'::mood] as moods, 'ok'::text as label from items");
   const postgres = driver("postgres");
   const admin = postgres(own.url, { max: 1, onnotice: () => {} });
   await admin.unsafe("alter table items add column note text; update items set note = 'x'");
+  const shadowedNow = await built("shadowed_now", "select items.*, array['happy'::mood] as moods, 'ok'::text as tags from items");
+  await admin.unsafe("alter table items add column extra int");
   const pg = driver("pg");
   const client = new pg.Client({ connectionString: own.url });
   await client.connect();
   const js = postgres(own.url, { max: 1 });
   try {
-    for (const db of [client, js]) assert.deepEqual(await items.run(db), [{ id: 1, tags: ["happy", "sad"], note: "x" }]);
+    for (const db of [client, js]) assert.deepEqual(await items.run(db), [{ id: 1, tags: ["happy", "sad"], note: "x", extra: null }]);
+    void shadowed;
+    // The statement's own `tags` is text; the table's, which a migration added, is an enum array the
+    // row doesn't keep. On clients that have met neither type, so that nothing learned before decides.
+    const fresh = new pg.Client({ connectionString: own.url });
+    await fresh.connect();
+    const freshJs = postgres(own.url, { max: 1 });
+    try {
+      for (const db of [fresh, freshJs]) assert.deepEqual(await shadowedNow.run(db), [{ id: 1, tags: "ok", note: "x", extra: null, moods: ["happy"] }]);
+    } finally {
+      await fresh.end();
+      await freshJs.end();
+    }
+    // postgres.js renaming every column: the module's names are matched under its renaming.
+    const upper = postgres(own.url, { max: 1, transform: { column: { from: (name: string) => name.toUpperCase() } } });
+    try {
+      assert.deepEqual(await items.run(upper), [{ ID: 1, TAGS: ["happy", "sad"], NOTE: "x", EXTRA: null }]);
+    } finally {
+      await upper.end();
+    }
   } finally {
     await client.end();
     await js.end();

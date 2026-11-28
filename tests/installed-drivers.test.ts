@@ -86,7 +86,12 @@ test("a workspace package the app depends on brings its dependencies, its devDep
   assert.deepEqual(installedDrivers("mysql", pkg({ name: "app", dependencies: { lib: "*" } }, {}, join(npm, "apps", "app")))!.drivers, ["mariadbDriver"]);
 });
 
-test("a package reached through file:, and the .sql file's own package, bring their dependencies", () => {
+test("a package reached through file:, workspace: with a path, and the .sql file's own package, bring their dependencies", () => {
+  // pnpm links a relative workspace: spec to the package at that path, under the alias.
+  const top = pkg({ name: "top" }, { "pnpm-workspace.yaml": "packages:\n  - apps/*\n  - libs/*\n" });
+  pkg({ name: "@acme/db", dependencies: { "@libsql/client": "*" } }, {}, join(top, "libs", "db"));
+  const app = pkg({ name: "app", dependencies: { database: "workspace:../../libs/db", sqlite3: "*" } }, {}, join(top, "apps", "app"));
+  assert.deepEqual(installedDrivers("sqlite", app)!.drivers, ["durableObjectDriver", "syncSqliteDriver", "libsqlDriver", "sqlite3Driver", "d1Driver"]);
   const shared = pkg({ name: "shared", dependencies: { postgres: "*" } });
   assert.deepEqual(installedDrivers("postgres", pkg({ dependencies: { shared: `file:${shared}` } }))!.drivers, ["postgresJsDriver"]);
   // An app that reaches the queries' package by a path, with no dependency on it.

@@ -143,12 +143,14 @@ function readAppNow(app: string, dir: string | undefined): Read {
     for (const [deps, isRuntime] of [[m.dependencies, true], [m.optionalDependencies, true], [m.peerDependencies, true], [m.devDependencies, false]] as const) {
       for (const [key, spec] of Object.entries(deps ?? {})) {
         // An alias, `"pg8": "npm:pg@^8"`, imports as its key and installs the package it names.
-        const target = typeof spec === "string" ? /^(?:npm|workspace):((?:@[^/@]+\/)?[^@]+)(?:@|$)/.exec(spec)?.[1] : undefined;
+        const target = typeof spec === "string" ? /^(?:npm|workspace):((?:@[^/@.][^/@]*\/)?[^@./][^@]*)(?:@|$)/.exec(spec)?.[1] : undefined;
+        // A path, `workspace:../libs/db` or `file:../libs/db`, is the package there.
+        const path = typeof spec === "string" ? (/^workspace:(\.{1,2}\/.*|\/.*)$/.exec(spec) ?? /^(?:file|link):(.+)$/.exec(spec))?.[1] : undefined;
         for (const name of target === undefined ? [key] : [key, target]) {
           names.add(name);
           if (isRuntime) runtime.add(name);
         }
-        const local = packages.get(key) ?? (target === undefined ? undefined : packages.get(target)) ?? (typeof spec === "string" && /^(?:file|link):/.test(spec) ? resolve(d, spec.replace(/^(?:file|link):/, "")) : undefined);
+        const local = path !== undefined ? resolve(d, path) : (packages.get(key) ?? (target === undefined ? undefined : packages.get(target)));
         if (local !== undefined) add(local);
       }
     }

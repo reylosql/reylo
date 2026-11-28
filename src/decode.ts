@@ -186,8 +186,8 @@ export function installPostgresCatalog(c: typeof postgresCatalog): void {
  * by its oid, a created type's by the module's column (when the module's columns match the result's)
  * or by what the catalog said.
  */
-async function fieldDecoders(fields: Field[], columns: Columns | undefined, key: object, load: Load): Promise<Decoder[]> {
-  const declared = declaredColumn(fields, columns);
+async function fieldDecoders(fields: Field[], columns: Columns | undefined, key: object, load: Load, rename?: (name: string) => string): Promise<Decoder[]> {
+  const declared = declaredColumn(fields, columns, rename);
   const created = fields.map((f, i) => [f, i] as const).filter(([f]) => f.oid >= FIRST_USER_OID);
   const known = learnedOf(key);
   for (const [f, i] of created) {
@@ -211,13 +211,16 @@ async function fieldDecoders(fields: Field[], columns: Columns | undefined, key:
 /**
  * The module's column a result's field is: by position where the result has the module's count of
  * columns, else, after a migration under `select *` added or dropped one, by name, the last column of
- * each name, as a row holds it.
+ * each name, as a row holds it, for the last field of each name alone, the one the row keeps.
+ * `rename` is a driver's own renaming of a result's names (postgres.js's `transform.column`), which
+ * the module's names are matched under.
  */
-function declaredColumn(fields: readonly { name: string }[], columns: Columns | undefined): (f: { name: string }, i: number) => Columns[number] | undefined {
+function declaredColumn(fields: readonly { name: string }[], columns: Columns | undefined, rename?: (name: string) => string): (f: { name: string }, i: number) => Columns[number] | undefined {
   if (!columns?.length) return () => undefined;
   if (columns.length === fields.length) return (_f, i) => columns[i];
-  const byName = new Map(lastOfEach(columns).map((c) => [c[0], c] as const));
-  return (f) => byName.get(f.name);
+  const byName = new Map(lastOfEach(columns).map((c) => [rename ? rename(c[0]) : c[0], c] as const));
+  const last = new Map(fields.map((f, i) => [f.name, i]));
+  return (f, i) => (last.get(f.name) === i ? byName.get(f.name) : undefined);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -499,7 +502,9 @@ export async function postgresJs(c: AnyClient, text: string, params: unknown[], 
   // A row transform (`transform: { row }`) runs on `.raw()` rows too, and leaves them not an array of each value's bytes.
   const transformed = `Reylo cannot read this postgres.js client's rows: its transform.row rewrites every row, Reylo's too, so they would not have the types the query declares. Run Reylo's queries on a postgres() instance without transform.row.`;
   const load: Load = async (sql) => ((await c.unsafe(sql).raw()) as (BufferLike | null)[][]).map((r) => r.map((v) => (v === null ? null : textOf(v))));
-  return await rawRows(raw, columns, c, load, row, transformed);
+  // A `transform.column` renames the result's columns, and the module's names are matched under it.
+  const rename = (c.options as { transform?: { column?: { from?: unknown } } } | undefined)?.transform?.column?.from;
+  return await rawRows(raw, columns, c, load, row, transformed, undefined, typeof rename === "function" ? (rename as (name: string) => string) : undefined);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -533,13 +538,13 @@ async function drizzlePostgres(c: AnyClient, text: string, params: unknown[], co
  * (postgres.js's, and Bun.sql's from 1.4.4): each value by its column's decoder, the text the server
  * wrote, or for the columns `binary` names their binary form, which Reylo writes as that text first.
  */
-async function rawRows(raw: unknown[] & { columns?: { name: string; type: number }[] | null }, columns: Columns | undefined, key: object, load: Load, row: RowBuilder | undefined, transformed: string, binary?: (oid: number) => boolean): Promise<unknown[]> {
+async function rawRows(raw: unknown[] & { columns?: { name: string; type: number }[] | null }, columns: Columns | undefined, key: object, load: Load, row: RowBuilder | undefined, transformed: string, binary?: (oid: number) => boolean, rename?: (name: string) => string): Promise<unknown[]> {
   const fields: Field[] = (raw.columns ?? []).map((f) => ({ name: f.name, oid: f.type }));
   if (!raw.length) return [];
   for (const r of raw) {
     if (!Array.isArray(r) || r.length !== fields.length || !r.every((v) => v === null || v instanceof Uint8Array)) throw new TypeError(transformed);
   }
-  const decoders = await fieldDecoders(fields, columns, key, load);
+  const decoders = await fieldDecoders(fields, columns, key, load, rename);
   const fromBytes = fields.map((f, i): ((v: BufferLike) => unknown) => {
     const decode = decoders[i]!;
     return binary?.(f.oid) ? binaryDecoder(f.oid, decode, f.name) : (v) => decode(textOf(v));
