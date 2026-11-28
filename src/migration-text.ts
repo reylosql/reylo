@@ -272,13 +272,15 @@ export function transactionControl(sql: string): string | undefined {
  */
 export function turnsForeignKeysOn(sql: string): boolean {
   const bare = (token: string | undefined) => token?.replace(/^'/, "").toUpperCase();
-  // Anywhere in a statement, since Turso's engine takes the assignment in `explain pragma …` too.
-  return statementTokens(sql).some((t) =>
-    t.some((token, i) => {
-      if (token !== "PRAGMA") return false;
-      const at = [i + 1, i + 2].find((j) => bare(t[j]) === "FOREIGN_KEYS");
-      const value = at === undefined ? undefined : bare(t[at + 1]);
-      return value !== undefined && !["0", "OFF", "NO", "FALSE"].includes(value);
-    }),
-  );
+  return statementTokens(sql).some((t) => {
+    // The command, past an `explain`, `explain query plan` or Turso's `… format = text|json`, under which Turso's engine takes the assignment too.
+    let i = 0;
+    if (t[i] === "EXPLAIN") i++;
+    if (i === 1 && t[i] === "QUERY" && t[i + 1] === "PLAN") i += 2;
+    if (i === 3 && t[i] === "FORMAT") i += 2;
+    if (t[i] !== "PRAGMA") return false;
+    const at = [i + 1, i + 2].find((j) => bare(t[j]) === "FOREIGN_KEYS");
+    const value = at === undefined ? undefined : bare(t[at + 1]);
+    return value !== undefined && !["0", "OFF", "NO", "FALSE"].includes(value);
+  });
 }
