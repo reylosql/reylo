@@ -219,6 +219,21 @@ pub fn strict_mode(mode: &str) -> Option<String> {
     Some(strict.join(","))
 }
 
+/// The sql_mode a MySQL session in `mode` runs a table's change under: strict, as [`strict_mode`]
+/// makes it, and with NO_AUTO_VALUE_ON_ZERO, so that a column made AUTO_INCREMENT keeps a 0 it holds
+/// rather than taking the next value of its sequence in its place, which a foreign key added back
+/// after can take without a word (a column that is AUTO_INCREMENT already keeps its 0 through a
+/// copy). None where `mode` is both already.
+pub fn table_change_mode(mode: &str) -> Option<String> {
+    let base = strict_mode(mode).unwrap_or_else(|| mode.to_string());
+    let mut modes: Vec<&str> = base.split(',').map(str::trim).filter(|m| !m.is_empty()).collect();
+    if !modes.contains(&"NO_AUTO_VALUE_ON_ZERO") {
+        modes.push("NO_AUTO_VALUE_ON_ZERO");
+    }
+    let changed = modes.join(",");
+    (changed != mode).then_some(changed)
+}
+
 fn set_sql_mode(mode: &str) -> String {
     format!("set session sql_mode = '{}'", mode.replace('\\', "\\\\").replace('\'', "''"))
 }
@@ -557,12 +572,12 @@ impl Db {
         }
     }
 
-    /// Sets a MySQL session whose sql_mode isn't strict to [`strict_mode`] for a table's change, and
-    /// gives its own mode, to set back after; None where it is strict already.
+    /// Sets a MySQL session to [`table_change_mode`] for a table's change, and gives its own mode, to
+    /// set back after; None where its mode is that already.
     async fn make_strict(&mut self) -> Result<Option<String>, Error> {
         let mode = self.rows("select @@session.sql_mode as m").await?.first().map(|r| r.text("m").to_string()).unwrap_or_default();
-        let Some(strict) = strict_mode(&mode) else { return Ok(None) };
-        self.exec(&set_sql_mode(&strict)).await?;
+        let Some(changed) = table_change_mode(&mode) else { return Ok(None) };
+        self.exec(&set_sql_mode(&changed)).await?;
         Ok(Some(mode))
     }
 
@@ -2277,6 +2292,14 @@ mod url_tests {
         assert_eq!(strict_mode("").as_deref(), Some("ALLOW_INVALID_DATES,STRICT_ALL_TABLES"));
         assert_eq!(strict_mode("NO_ENGINE_SUBSTITUTION").as_deref(), Some("NO_ENGINE_SUBSTITUTION,ALLOW_INVALID_DATES,STRICT_ALL_TABLES"));
         assert_eq!(strict_mode("ANSI_QUOTES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,ALLOW_INVALID_DATES").as_deref(), Some("ANSI_QUOTES,ALLOW_INVALID_DATES,STRICT_ALL_TABLES"));
+    }
+
+    #[test]
+    fn a_table_change_keeps_a_zero_a_column_made_auto_increment_holds() {
+        assert_eq!(table_change_mode("STRICT_TRANS_TABLES").as_deref(), Some("STRICT_TRANS_TABLES,NO_AUTO_VALUE_ON_ZERO"));
+        assert_eq!(table_change_mode("").as_deref(), Some("ALLOW_INVALID_DATES,STRICT_ALL_TABLES,NO_AUTO_VALUE_ON_ZERO"));
+        assert_eq!(table_change_mode("STRICT_TRANS_TABLES,NO_AUTO_VALUE_ON_ZERO"), None);
+        assert_eq!(table_change_mode("NO_AUTO_VALUE_ON_ZERO").as_deref(), Some("NO_AUTO_VALUE_ON_ZERO,ALLOW_INVALID_DATES,STRICT_ALL_TABLES"));
     }
 
     #[test]

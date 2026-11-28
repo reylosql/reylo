@@ -1,0 +1,1 @@
+create table p (id int primary key, up int, foreign key (up) references p (id)); create table c (id int primary key, parent int, foreign key (parent) references p (id)); create table d (id int primary key, parent int, constraint d_parent foreign key (parent) references p (id));

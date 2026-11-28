@@ -1,0 +1,1 @@
+create table p (id int primary key, u int not null auto_increment, unique key (u)); create table c (id int primary key, seq int not null auto_increment, foreign key (seq) references p (id)); create table d (id int primary key, pu int, constraint d_pu foreign key (pu) references p (u));
