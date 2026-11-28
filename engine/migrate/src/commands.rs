@@ -5186,7 +5186,11 @@ async fn pending_findings(shadows: &mut Shadows<'_>, target: &mut Db, ran: &[Mig
             // deploy meets. A foreign key is read where a migration adds it back: one in place can't
             // have had its columns re-collated under key checks, which MySQL refuses, so nothing
             // checks it then. A unique key is read too where this migration's change rebuilds it.
-            let added = !checks.contains_key(key) || (d == Dialect::Mysql && check.parent.is_some() && drops_foreign_key(&m.sql, &check.ident, &check.name));
+            // A key dropped and added again in one file (under `lock tables`) is read only where the
+            // file changes each of its columns once: one changed twice may have passed through
+            // another type, which the file's ends don't show.
+            let readded = || drops_foreign_key(&m.sql, &check.ident, &check.name) && check.columns.iter().flatten().all(|c| changes_of(&m.sql, &check.ident, c) <= 1) && check.parent.as_ref().is_some_and(|(p, refs)| refs.iter().all(|r| changes_of(&m.sql, p, r) <= 1));
+            let added = !checks.contains_key(key) || (d == Dialect::Mysql && check.parent.is_some() && readded());
             let rebuilt = matches!(check.kind, RowCheckKind::Keys(_)) && writes.iter().any(|w| w.by == m.name && w.retyped && w.reaches(check));
             let recollated = (d == Dialect::Mysql && (added || rebuilt) && own == Standing::Held && parent.is_none_or(|p| p == Standing::Held) && reached.is_some() && writes.iter().filter(|w| w.reaches(check)).all(|w| w.retyped))
                 .then(|| recollated_rows(check, &tables_here, &tables_now, &converted))
@@ -5955,6 +5959,27 @@ fn drops_foreign_key(sql: &str, table: &str, name: &str) -> bool {
         let named = |k: usize, n: &str| t.get(k).is_some_and(|w| unquoted(&crate::sql::last_written(&w.text), Dialect::Mysql).eq_ignore_ascii_case(n));
         t.len() > 2 && t[0].upper() == "ALTER" && t[1].upper() == "TABLE" && named(2, table) && t.windows(3).enumerate().any(|(k, w)| w[0].upper() == "DROP" && w[1].upper() == "FOREIGN" && w[2].upper() == "KEY" && named(k + 3, name))
     })
+}
+
+/// How many clauses of a MySQL migration's statements change the column `column` of `table`
+/// (`modify` or `change`, with or without `column`), as named before the clause.
+#[cfg(feature = "cli")]
+fn changes_of(sql: &str, table: &str, column: &str) -> usize {
+    let named = |w: Option<&crate::sql::Token>, n: &str| w.is_some_and(|w| unquoted(&crate::sql::last_written(&w.text), Dialect::Mysql).eq_ignore_ascii_case(n));
+    split_statements(sql, Dialect::Mysql)
+        .iter()
+        .filter(|s| s.tokens.len() > 2 && s.tokens[0].upper() == "ALTER" && s.tokens[1].upper() == "TABLE" && named(s.tokens.get(2), table))
+        .map(|s| {
+            let t = &s.tokens;
+            (0..t.len())
+                .filter(|&k| matches!(t[k].upper().as_str(), "MODIFY" | "CHANGE") && (k == 0 || t[k - 1].text == "," || k == 3))
+                .filter(|&k| {
+                    let at = if t.get(k + 1).is_some_and(|w| w.upper() == "COLUMN") { k + 2 } else { k + 1 };
+                    named(t.get(at), column)
+                })
+                .count()
+        })
+        .sum()
 }
 
 /// A MySQL column's identity ([`table_identities`]) in its parts: its type (with a digest of its
@@ -12186,6 +12211,18 @@ mod tests {
     }
 
     use super::*;
+
+    #[cfg(feature = "cli")]
+    #[test]
+    fn counts_each_change_a_mysql_file_makes_to_a_column() {
+        let sql = "lock tables c write, p write;\nalter table c drop foreign key c_code;\nalter table c modify column code char(10);\nalter table c modify `code` varchar(10) collate utf8mb4_bin, change column other other int;\nalter table p modify column code varchar(10) collate utf8mb4_bin not null;\nalter table c add constraint c_code foreign key (code) references p (code);\nunlock tables;\n";
+        assert!(drops_foreign_key(sql, "c", "c_code"));
+        assert!(!drops_foreign_key(sql, "p", "c_code"));
+        assert_eq!(changes_of(sql, "c", "code"), 2);
+        assert_eq!(changes_of(sql, "c", "other"), 1);
+        assert_eq!(changes_of(sql, "p", "code"), 1);
+        assert_eq!(changes_of(sql, "c", "id"), 0);
+    }
 
     #[test]
     fn several_lossy_columns_name_their_flags_and_one_command() {

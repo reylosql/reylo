@@ -1832,13 +1832,20 @@ impl Alterer for MysqlAlterer {
             }
         }
         statements.splice(0..0, front);
+        // A key's drop moves down to its table's held step and takes it in: only past other keys'
+        // drops, which a drop may wait for (a key that references the column), and nothing waits on.
+        let drops_a_key = |s: &str| {
+            let t = tokenize(s, Dialect::Mysql);
+            t.len() > 5 && t[0].upper() == "ALTER" && t[1].upper() == "TABLE" && t[3].upper() == "DROP" && t[4].upper() == "FOREIGN" && t[5].upper() == "KEY"
+        };
         for (here, table) in self.late.borrow().iter() {
             let Some(at) = statements.iter().position(|s| s == here) else { continue };
             let drop = format!("alter table {table} drop foreign key ");
-            if let Some(key) = statements[..at].iter().rposition(|s| s.starts_with(&drop)) {
+            let Some(key) = statements[..at].iter().rposition(|s| s.starts_with(&drop)) else { continue };
+            if statements[key + 1..at].iter().all(|s| drops_a_key(s)) {
                 let clauses = here[format!("alter table {table} ").len()..].to_string();
-                statements.remove(at);
-                statements[key] = format!("{}, {clauses}", statements[key]);
+                statements[at] = format!("{}, {clauses}", statements[key]);
+                statements.remove(key);
             }
         }
         lock_swaps(&self.swaps.borrow(), statements);
