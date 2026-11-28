@@ -1,5 +1,6 @@
 derived.sql: many (n: varchar) -> { v: unknown?, n: varchar? }
 document.sql: many (n: varchar) -> { o: json { v: smallint? }, n: varchar? }
 kept.sql: at_most_one (n: varchar) -> { m: tinyint?, n: varchar? }
+kept_document.sql: many (n: varchar) -> { o: json { c: tinyint?, m: bigint? }, n: varchar? }
 merged.sql: many (n: varchar) -> { v: unknown?, i: unknown?, n: varchar? }
 union.sql: many () -> { v: unknown? }

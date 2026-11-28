@@ -55,12 +55,12 @@ thread_local! {
 
 /// Whether the session reaches a YEAR anywhere a statement may read one, in any schema it sees but
 /// Reylo Migrate's other shadows: a column of a table or a view, a stored function that returns
-/// one, or a view whose definition names the word, as `year(d)` and `cast(… as year)` do. A view
-/// whose definition the account may not read is not seen. Asked once a session, for what
-/// [`cut_years`] cannot trace.
+/// one, or a view whose definition names the word, as `year(d)` and `cast(… as year)` do, or that
+/// the account may not read, whose definition is empty to it. A YEAR in a table the account sees
+/// nothing of is not seen. Asked once a session, for what [`cut_years`] cannot trace.
 const YEARS_QUERY: &str = "select 1 from information_schema.columns where data_type = 'year' and (table_schema = database() or left(table_schema, 13) <> 'reylo_shadow_') \
     union all select 1 from information_schema.routines where data_type = 'year' and (routine_schema = database() or left(routine_schema, 13) <> 'reylo_shadow_') \
-    union all select 1 from information_schema.views where view_definition like '%year%' and (table_schema = database() or left(table_schema, 13) <> 'reylo_shadow_') limit 1";
+    union all select 1 from information_schema.views where (view_definition like '%year%' or coalesce(view_definition, '') = '') and (table_schema = database() or left(table_schema, 13) <> 'reylo_shadow_') limit 1";
 
 /// The server [`crate::structured::MYSQL_SERVER_QUERY`] answered for (`None` where it has not):
 /// whether it is MariaDB, and its major and minor version where its text gives them.
@@ -3010,9 +3010,10 @@ fn resolve(shape: &Shape, outcomes: &[Option<MysqlDescribe>], plan: &crate::mysq
             // A truth value is an integer to the server, so no other type is in doubt.
             Some(c) => {
                 let ty = if unconverted.get(*probe).and_then(|u| u.get(*index)) == Some(&true) { column_type(c) } else { defined_type(c, Some(views), None) };
-                // A computed TINYINT that may be a YEAR's merge with one holds the whole year in a
-                // document ([`merges_year`]): the SMALLINT MySQL 9.2 merges them into.
-                let ty = if c.r#type == 1 && computed(c, Some(views)) && MERGES_YEAR.with(std::cell::Cell::get) { crate::mysql_types::of(2, c.flags, c.charset, c.length) } else { ty };
+                // A computed TINYINT that may be a YEAR's merge with one, where the session or the
+                // statement reaches a YEAR ([`YEARS_QUERY`]), holds the whole year in a document:
+                // the SMALLINT MySQL 9.2 merges them into.
+                let ty = if c.r#type == 1 && computed(c, Some(views)) && YEAR_REACHED.with(std::cell::Cell::get) { crate::mysql_types::of(2, c.flags, c.charset, c.length) } else { ty };
                 let ty = flows.get(*probe).and_then(|f| f.get(*index)).and_then(|reached| widened(&ty, *reached)).unwrap_or(ty);
                 // A JSON column a CHECK holds to a JSON Schema: the values it admits.
                 let ty = match documents.get(*probe).and_then(|d| d.get(*index)).cloned().flatten() {
