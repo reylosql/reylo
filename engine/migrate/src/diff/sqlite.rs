@@ -630,8 +630,8 @@ impl SqliteAlterer {
         let schemas = self.schemas.borrow();
         let Some(both) = schemas.as_ref() else { return false };
         let (Some(from), Some(to)) = (both.0.objects.get(by), both.1.objects.get(by)) else { return false };
-        let out = alter_table(from, to, &|name| self.decided.of(name), Some(both)).unwrap_or_default();
-        let dropped = |o: &&Object| out.iter().any(|s| *s == format!("drop table {}", quote(&Info::of(o).name)));
+        let out: BTreeSet<String> = alter_table(from, to, &|name| self.decided.of(name), Some(both)).unwrap_or_default().into_iter().collect();
+        let dropped = |o: &&Object| out.contains(&format!("drop table {}", quote(&Info::of(o).name)));
         let made: BTreeSet<String> = both.0.objects.values().filter(|o| o.kind == Some(Kind::Table)).filter(dropped).map(|o| o.id.clone()).collect();
         let answer = made.contains(id);
         self.remade.borrow_mut().insert(by.to_string(), made);
@@ -740,12 +740,18 @@ impl Alterer for SqliteAlterer {
         // Every table whose change makes it again, read off what that change writes.
         let tables: Vec<&String> = f.objects.values().filter(|o| o.kind == Some(Kind::Table) && o.id != from.id && t.objects.contains_key(&o.id)).map(|o| &o.id).collect();
         let mut out: Vec<String> = tables.iter().filter(|p| self.makes_again(p, &from.id)).map(|p| (*p).clone()).collect();
-        // A table that stops referencing one this change drops stops first, but for one it makes again.
-        let made: Vec<&String> = tables.iter().copied().filter(|m| self.makes_again(&from.id, m)).chain(std::iter::once(&from.id)).collect();
-        for y in tables.iter().filter(|y| !made.contains(y)) {
-            let (Some(was), Some(is)) = (f.objects.get(*y), t.objects.get(*y)) else { continue };
-            if made.iter().any(|m| was.deps.contains(*m) && !is.deps.contains(*m)) && !out.contains(*y) {
-                out.push((*y).clone());
+        // A table that stops referencing one this change drops stops first: but for one it makes
+        // again, one that comes to reference one of them, which waits for this change already, and
+        // one whose own change drops a table one of these stops referencing, which no order serves.
+        let made = |by: &String| -> Vec<&String> { tables.iter().copied().chain(std::iter::once(&from.id)).filter(|m| self.makes_again(by, m)).collect() };
+        let stops = |a: &str, b: &str| f.objects.get(a).zip(t.objects.get(a)).is_some_and(|(was, is)| was.deps.contains(b) && !is.deps.contains(b));
+        let mine = made(&from.id);
+        for y in tables.iter().copied().filter(|y| !mine.contains(y)) {
+            let comes = t.objects.get(y).is_some_and(|is| mine.iter().any(|m| is.deps.contains(*m)));
+            let theirs = made(y);
+            let crossed = mine.iter().any(|x| theirs.iter().any(|w| stops(x, w)));
+            if mine.iter().any(|m| stops(y, m)) && !comes && !crossed && !out.contains(y) {
+                out.push(y.clone());
             }
         }
         let decided = |name: &str| self.decided.of(name);
