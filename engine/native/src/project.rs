@@ -384,6 +384,44 @@ impl Project {
     /// The type check's connection, `direct_url`, its `$(command)`s run, else `DATABASE_URL`, and
     /// where it came from, for a message: `"direct_url" in .reylo.yaml, DB_PASSWORD in .env`.
     pub fn type_check_url(&self) -> Result<Option<(String, String)>, String> {
+        let Some((url, source)) = self.written_url()? else { return Ok(None) };
+        // libpq's variables the env files set, for what DATABASE_URL leaves out ([`with_env_files`]):
+        // the URL the app connects with, with the files loaded into its environment, however the type
+        // check names it (`direct_url: ${DATABASE_URL}` too). Any other `direct_url` is Reylo's alone.
+        if self.found("DATABASE_URL").is_none_or(|(app, _)| app != url) || dialect_of(&url) != Some("postgres") {
+            return Ok(Some((url, source)));
+        }
+        // The environment's variable, else the env files', written into the URL whichever source it
+        // comes from, so that one connection is one URL. A variable the environment sets, even empty,
+        // the files leave alone, as dotenv does (in any case of its name on Windows, as Windows reads
+        // one); an empty one is none, as the engine reads it.
+        let set = |name: &str| self.env.iter().find(|(key, _)| key.as_str() == name || (cfg!(windows) && key.eq_ignore_ascii_case(name))).map(|(_, value)| value.clone());
+        let files: Vec<(&PathBuf, HashMap<String, String>)> = self.env_files.iter().map(|p| (p, read_env_file(p))).collect();
+        let mut hits: HashMap<&str, (String, Option<&PathBuf>)> = HashMap::new();
+        for (name, _) in LIBPQ_VARIABLES {
+            // A certificate file is named from where it was set: the working directory for the
+            // environment's, as libpq reads it, and the project's root, where its env files are, for theirs.
+            let certificate = |value: String, from: &Path| if matches!(name, "PGSSLROOTCERT" | "PGSSLCERT" | "PGSSLKEY") && !value.is_empty() && value != "system" { from.join(&value).to_string_lossy().into_owned() } else { value };
+            if let Some(value) = set(name) {
+                if !value.is_empty() {
+                    hits.insert(name, (certificate(value, &self.cwd), None));
+                }
+                continue;
+            }
+            if let Some((path, value)) = files.iter().find_map(|(path, vars)| vars.get(name).map(|v| (*path, v.clone()))) {
+                hits.insert(name, (certificate(value, &self.root), Some(path)));
+            }
+        }
+        let (url, names) = with_env_files(&url, &|name| hits.get(name).map(|(value, _)| value.clone()));
+        let source = names.iter().fold(source, |source, name| match hits[*name].1 {
+            Some(path) => format!("{source}, {name} in {}", shown(&self.cwd, path)),
+            None => format!("{source}, {name} in the environment"),
+        });
+        Ok(Some((url, source)))
+    }
+
+    /// The type check's URL as the project writes it: `direct_url`, else `DATABASE_URL`.
+    fn written_url(&self) -> Result<Option<(String, String)>, String> {
         let Some(written) = &self.config.direct_url else { return Ok(self.found("DATABASE_URL")) };
         let parts = url_parts(written).map_err(|open| format!("{}: \"direct_url\" opens $( at column {} and never closes it.", self.shown_file(), written[..open].chars().count() + 1))?;
         let encoded = in_userinfo(&parts);
@@ -600,6 +638,68 @@ fn in_userinfo(parts: &[Part]) -> Vec<usize> {
     placed.into_iter().filter(|(at, _)| *at >= start && *at < userinfo_end).map(|(_, k)| k).collect()
 }
 
+/// libpq's variables the engine reads for a part of a Postgres URL the URL leaves out (`parse` in
+/// postgres.rs), each with the URL's parameter that names the part.
+const LIBPQ_VARIABLES: [(&str, &str); 10] = [
+    ("PGHOST", "host"),
+    ("PGPORT", "port"),
+    ("PGUSER", "user"),
+    ("PGPASSWORD", "password"),
+    ("PGDATABASE", "dbname"),
+    ("PGOPTIONS", "options"),
+    ("PGSSLMODE", "sslmode"),
+    ("PGSSLROOTCERT", "sslrootcert"),
+    ("PGSSLCERT", "sslcert"),
+    ("PGSSLKEY", "sslkey"),
+];
+
+/// A Postgres URL with libpq's variables that `set` gives (the env files', where the environment
+/// sets none) for the parts it leaves out, each as the URL's own parameter, and the names of those
+/// it took. An app that loads its env files into its environment connects with them, and libpq
+/// reads a variable only for a part the URL does not name: a host where the URL names none, a port
+/// where it names one host or none and no port, a user, a password and a database it leaves out,
+/// and options, a TLS mode or a certificate file its parameters do not name. Written into the URL,
+/// the engine and the cache's names read them, as `withEnvFiles` in `src/project.ts` writes them
+/// (both are held to url-env-file-cases.json).
+pub fn with_env_files(url: &str, set: &dyn Fn(&str) -> Option<String>) -> (String, Vec<&'static str>) {
+    let (base, query) = url.split_once('?').unwrap_or((url, ""));
+    let rest = base.split_once("://").map_or(base, |(_, rest)| rest);
+    let (authority, path) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
+    let (login, list) = authority.rsplit_once('@').unwrap_or(("", authority));
+    let (user, password) = login.split_once(':').unwrap_or((login, ""));
+    // The authority's hosts, each with its port where it writes one: an IPv6 address in brackets.
+    let hosts: Vec<Option<&str>> = list.split(',').filter(|h| !h.is_empty()).map(|chunk| match chunk.strip_prefix('[') {
+        Some(inner) => inner.split_once(']').and_then(|(_, rest)| rest.strip_prefix(':')),
+        None => chunk.split_once(':').map(|(_, port)| port),
+    }).collect();
+    let named: Vec<String> = query.split('&').filter(|p| !p.is_empty()).map(|pair| crate::decode(pair.split('=').next().unwrap_or_default())).collect();
+    let named = |name: &str| named.iter().any(|n| n == name);
+    let left_out = |parameter: &str| match parameter {
+        "host" => hosts.is_empty() && !named("host") && !named("hostaddr"),
+        // Several hosts with no port take 5432 each, as libpq reads them.
+        "port" => hosts.len() <= 1 && !hosts.iter().any(|port| port.is_some_and(|p| !p.is_empty())) && !named("port"),
+        "user" => user.is_empty() && !named("user"),
+        "password" => password.is_empty() && !named("password"),
+        "dbname" => (path.is_empty() || path == "/") && !named("dbname"),
+        "sslmode" => !named("sslmode") && !named("ssl"),
+        other => !named(other),
+    };
+    let mut pairs = Vec::new();
+    let mut names = Vec::new();
+    for (name, parameter) in LIBPQ_VARIABLES {
+        let Some(value) = set(name).filter(|v| !v.is_empty()) else { continue };
+        if left_out(parameter) {
+            pairs.push(format!("{parameter}={}", percent_encode(&value)));
+            names.push(name);
+        }
+    }
+    if pairs.is_empty() {
+        return (url.to_string(), names);
+    }
+    let joint = if !url.contains('?') { "?" } else if query.is_empty() { "" } else { "&" };
+    (format!("{url}{joint}{}", pairs.join("&")), names)
+}
+
 fn percent_encode(text: &str) -> String {
     text.bytes()
         .map(|b| if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'!' | b'~' | b'*' | b'\'' | b'(' | b')') { (b as char).to_string() } else { format!("%{b:02X}") })
@@ -804,6 +904,18 @@ mod tests {
     }
 
     #[test]
+    fn libpqs_variables_from_the_env_files_name_what_the_url_leaves_out_as_the_type_check_writes_them() {
+        // The loader writes them by the same cases (tests/project.test.ts).
+        let cases: Vec<serde_json::Value> = serde_json::from_str(include_str!("url-env-file-cases.json")).unwrap();
+        for case in cases {
+            let set = |name: &str| case["files"][name].as_str().map(String::from);
+            let (url, names) = with_env_files(case["url"].as_str().unwrap(), &set);
+            assert_eq!(url, case["folded"].as_str().unwrap(), "{}", case["case"]);
+            assert_eq!(names, case["names"].as_array().unwrap().iter().map(|n| n.as_str().unwrap()).collect::<Vec<_>>(), "{}", case["case"]);
+        }
+    }
+
+    #[test]
     fn reads_env_files_as_the_type_check_does() {
         // The type check's reader is held to the same cases (tests/project.test.ts).
         let cases: Vec<serde_json::Value> = serde_json::from_str(include_str!("env-file-cases.json")).unwrap();
@@ -835,6 +947,36 @@ mod tests {
         assert_eq!(p.expand("url", "${MISSING_VAR_X:-${MISSING_VAR_Y:-z}}").unwrap(), "z");
         assert!(p.expand("url", "${MISSING_VAR_X:-${MISSING_VAR_Y}}").unwrap_err().contains("${MISSING_VAR_Y}"));
         assert_eq!(p.expand("url", "${MISSING_VAR_X:-unclosed").unwrap(), "${MISSING_VAR_X:-unclosed");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_type_check_url_takes_libpqs_variables_from_the_env_files_where_the_environment_sets_none() {
+        let dir = std::env::temp_dir().join(format!("reylo-env-libpq-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(".env"), "DATABASE_URL=postgres://app@db.internal/\nPGDATABASE=shop\nPGPASSWORD=s3cret\n").unwrap();
+        std::fs::write(dir.join(".env.local"), "PGDATABASE=local\n").unwrap();
+        std::fs::write(dir.join(".reylo.yaml"), "allow_untyped_params: true\n").unwrap();
+        // The first file that sets a variable wins, as for DATABASE_URL.
+        let url = |env: &[(&str, &str)]| Project::resolve(&dir, env.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()).unwrap().type_check_url().unwrap().unwrap();
+        assert_eq!(url(&[]), ("postgres://app@db.internal/?password=s3cret&dbname=local".to_string(), "DATABASE_URL in .env, PGPASSWORD in .env, PGDATABASE in .env.local".to_string()));
+        // The environment's variable wins over the files', and is written in too, so that one connection is one URL.
+        assert_eq!(url(&[("PGDATABASE", "other")]), ("postgres://app@db.internal/?password=s3cret&dbname=other".to_string(), "DATABASE_URL in .env, PGPASSWORD in .env, PGDATABASE in the environment".to_string()));
+        // A URL that names its database takes no PGDATABASE, and one of another database none at all.
+        assert_eq!(url(&[("DATABASE_URL", "postgres://app:pw@db.internal/shop")]).0, "postgres://app:pw@db.internal/shop");
+        assert_eq!(url(&[("DATABASE_URL", "mysql://root@127.0.0.1/app")]).0, "mysql://root@127.0.0.1/app");
+        // A variable the environment sets empty, the files leave alone, as dotenv does.
+        assert_eq!(url(&[("PGDATABASE", "")]).0, "postgres://app@db.internal/?password=s3cret");
+        // A certificate file is named from the project's root, where its env files are.
+        std::fs::write(dir.join(".env"), "DATABASE_URL=postgres://app@db.internal/shop\nPGSSLROOTCERT=certs/root.pem\n").unwrap();
+        std::fs::remove_file(dir.join(".env.local")).unwrap();
+        assert_eq!(url(&[]).0, format!("postgres://app@db.internal/shop?sslrootcert={}", percent_encode(&dir.join("certs/root.pem").to_string_lossy())));
+        // A direct_url of Reylo's own takes no variable the env files set; one that names DATABASE_URL does.
+        std::fs::write(dir.join(".env"), "DATABASE_URL=postgres://app@db.internal/\nPGDATABASE=shop\n").unwrap();
+        std::fs::write(dir.join(".reylo.yaml"), "direct_url: postgres://localhost/\n").unwrap();
+        assert_eq!(url(&[]).0, "postgres://localhost/");
+        std::fs::write(dir.join(".reylo.yaml"), "direct_url: ${DATABASE_URL}\n").unwrap();
+        assert_eq!(url(&[]).0, "postgres://app@db.internal/?dbname=shop");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
