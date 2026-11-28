@@ -2472,7 +2472,24 @@ async fn a_lone_statement_cut_off(mut p: P, landed: bool) {
     }
     db.close().await;
     p.output();
-    if landed {
+    if p.d == Dialect::Mysql {
+        // MySQL commits the statement before its row is finished, and a statement may leave nothing in
+        // the schema to say it ran: deploy and the dry run refuse, running nothing, and history push
+        // settles it from the schema where it can.
+        assert_eq!(p.migrate().await, 1);
+        assert_has!(p.output(), r"✗ A deploy was cut off while it ran 20261027110000_index\.sql\n[\s\S]*  If it's a change the schema can't show, such as a truncate, and it didn't run, run it by hand first:\n    reylo run --url <url> --file \S*20261027110000_index\.sql\n  Then settle it from the schema, running nothing:\n    reylo migrate history push --url <url>");
+        assert_eq!(p.dry_run().await, 1);
+        assert_has!(p.output(), r"A deploy was cut off while it ran 20261027110000_index\.sql");
+        assert_eq!(p.history_push().await, 0, "{}", p.peek());
+        let out = p.output();
+        if landed {
+            assert_has!(&out, r"\+ 20261027110000_index\.sql +recorded");
+        } else {
+            assert_has!(&out, r"20261027110000_index\.sql +taken out of the history");
+            assert_eq!(p.migrate().await, 0, "{}", p.peek());
+            assert_has!(p.output(), r"✓ 20261027110000_index\.sql +applied");
+        }
+    } else if landed {
         // Its change is in place, so this database isn't as Reylo's last finished run left it: deploy
         // refuses, a dry run says what happened, and history push records it.
         assert_eq!(p.migrate().await, 1);
@@ -2518,6 +2535,16 @@ async fn a_lone_statement_cut_off_with_no_fingerprint_to_compare(mut p: P) {
     db.exec("update __reylo_migrations set fingerprint = null").await.unwrap();
     db.close().await;
     p.output();
+    if p.d == Dialect::Mysql {
+        // A MySQL deploy refuses before it runs anything, fingerprint or none.
+        assert_eq!(p.migrate().await, 1);
+        assert_has!(p.output(), r"✗ A deploy was cut off while it ran 20261027110000_index\.sql");
+        assert_eq!(p.history_push().await, 0, "{}", p.peek());
+        assert_has!(p.output(), r"\+ 20261027110000_index\.sql +recorded");
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        assert_has!(p.output(), "Up to date");
+        return;
+    }
     // Run again, it fails where it landed, and says how to find out.
     assert_eq!(p.migrate().await, 1);
     assert_has!(p.output(), r"✗ 20261027110000_index\.sql  failed\n[\s\S]*A run before this one was cut off here, so its change may be in place\.\n  See whether it is:\n    reylo migrate deploy --dry-run\n  Record it if it is, running nothing:\n    reylo migrate history push");
@@ -2527,6 +2554,153 @@ async fn a_lone_statement_cut_off_with_no_fingerprint_to_compare(mut p: P) {
     p.output();
     assert_eq!(p.migrate().await, 0, "{}", p.peek());
     assert_has!(p.output(), "Up to date");
+}
+
+/// A truncate leaves MySQL's schema as it was, so after a deploy cut off with its row marked started
+/// nothing says whether it ran, and running it again would empty what the app wrote since: deploy,
+/// the dry run and status refuse to guess, and history push records it as run, leaving the
+/// migration after it, which refills the table, for the deploy to run.
+#[tokio::test(flavor = "current_thread")]
+async fn a_mysql_truncate_cut_off_is_never_run_again_by_itself() {
+    let Some(mut p) = P::new(Dialect::Mysql).await else { return };
+    p.file("20261027100000_t.sql", "create table t (id bigint primary key);");
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    p.file("20261027110000_empty.sql", "truncate table t;");
+    p.file("20261027120000_seed.sql", "insert into t values (1);");
+    // The cut: the row marked started, whether or not the truncate ran, then rows the app wrote since.
+    p.exec("insert into __reylo_migrations (name, `sql`, applied_at) values ('20261027110000_empty.sql', 'truncate table t;', null)").await;
+    p.exec("insert into t values (10), (11)").await;
+    p.output();
+    assert_eq!(p.migrate().await, 1);
+    assert_has!(p.output(), r"✗ A deploy was cut off while it ran 20261027110000_empty\.sql");
+    assert_eq!(p.rows("select id from t").await.len(), 2, "nothing ran");
+    assert_eq!(p.dry_run().await, 1);
+    assert_has!(p.output(), r"A deploy was cut off while it ran 20261027110000_empty\.sql");
+    assert_eq!(p.status().await, 1);
+    assert_has!(p.output(), r"20261027110000_empty\.sql +cut off before it finished\n +See how to settle it:\n +reylo migrate deploy --dry-run");
+    assert_eq!(p.history_push().await, 0, "{}", p.peek());
+    assert_has!(p.output(), r"\+ 20261027110000_empty\.sql +recorded: [^\n]*may not have run here");
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    assert_has!(p.output(), r"✓ 20261027120000_seed\.sql +applied");
+    assert_eq!(p.rows("select id from t").await.len(), 3);
+}
+
+/// A cut-off run's file edited since: its row is matched by the text that started, which the
+/// refusal gives back, since history push would take a row of other text out, for deploy to run.
+#[tokio::test(flavor = "current_thread")]
+async fn a_mysql_cut_off_run_whose_file_was_edited_gives_its_text_back() {
+    let Some(mut p) = P::new(Dialect::Mysql).await else { return };
+    p.file("20261027100000_t.sql", "create table t (id bigint primary key);");
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    p.file("20261027110000_empty.sql", "delete from t;");
+    p.exec("insert into __reylo_migrations (name, `sql`, applied_at) values ('20261027110000_empty.sql', 'truncate table t;', null)").await;
+    p.output();
+    assert_eq!(p.migrate().await, 1);
+    assert_has!(p.output(), r"No file reads as it did when it started\. Write this back to \S*20261027110000_empty\.sql first:\n    truncate table t;");
+    // History push keeps the row, the only record that the truncate may have run.
+    assert_eq!(p.history_push().await, 1);
+    assert_has!(p.output(), r"No file reads as it did when it started");
+    assert_eq!(p.rows("select name from __reylo_migrations where applied_at is null").await.len(), 1);
+}
+
+/// A cut-off run's file that the lock doesn't list yet: history push records only what the lock
+/// lists, so it keeps the run's row rather than take it out for a later deploy to run again.
+#[tokio::test(flavor = "current_thread")]
+async fn a_mysql_cut_off_run_the_lock_doesnt_list_is_kept() {
+    let Some(mut p) = P::new(Dialect::Mysql).await else { return };
+    p.strict = true;
+    p.file("20261027100000_t.sql", "create table t (id bigint primary key);");
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    assert_eq!(p.run(async |o, log| reylo_migrate::lock_from_history(o, log).await).await, 0, "{}", p.peek());
+    p.file("20261027110000_empty.sql", "truncate table t;");
+    p.exec("insert into __reylo_migrations (name, `sql`, applied_at) values ('20261027110000_empty.sql', 'truncate table t;', null)").await;
+    p.output();
+    assert_eq!(p.history_push().await, 1);
+    assert_has!(p.output(), r"✗ The lock doesn't list 20261027110000_empty\.sql, which a deploy cut off here started");
+    assert_eq!(p.rows("select name from __reylo_migrations where applied_at is null").await.len(), 1);
+}
+
+/// A cut-off run's file renamed to a draft that reads as a migration the lock lists and this database
+/// ran: neither is taken for it, so history push keeps its row.
+#[tokio::test(flavor = "current_thread")]
+async fn a_mysql_cut_off_run_reading_as_a_migration_already_run_is_kept() {
+    let Some(mut p) = P::new(Dialect::Mysql).await else { return };
+    p.strict = true;
+    p.file("20261027100000_t.sql", "create table t (id bigint primary key);");
+    p.file("20261027100001_wipe.sql", "truncate table t;");
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    assert_eq!(p.run(async |o, log| reylo_migrate::lock_from_history(o, log).await).await, 0, "{}", p.peek());
+    p.file("20261027120000_reset.sql", "truncate table t;");
+    p.exec("insert into __reylo_migrations (name, `sql`, applied_at) values ('20261027110000_empty.sql', 'truncate table t;', null)").await;
+    p.output();
+    assert_eq!(p.history_push().await, 1);
+    assert_has!(p.output(), r"No file reads as it did when it started");
+    assert_eq!(p.rows("select name from __reylo_migrations where applied_at is null").await.len(), 1);
+    assert_eq!(p.migrate().await, 1);
+}
+
+/// A cut-off run's file renamed into two that read the same: neither is taken for it, and history
+/// push keeps its row until its text is back under its name.
+#[tokio::test(flavor = "current_thread")]
+async fn a_mysql_cut_off_run_matching_two_renamed_files_is_kept() {
+    let Some(mut p) = P::new(Dialect::Mysql).await else { return };
+    p.file("20261027100000_t.sql", "create table t (id bigint primary key);");
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    p.file("20261027110001_reset.sql", "truncate table t;");
+    p.file("20261027110002_reset_again.sql", "truncate table t;");
+    p.exec("insert into __reylo_migrations (name, `sql`, applied_at) values ('20261027110000_empty.sql', 'truncate table t;', null)").await;
+    p.output();
+    assert_eq!(p.migrate().await, 1);
+    assert_has!(p.output(), r"No file reads as it did when it started\. Write this back to \S*20261027110000_empty\.sql first:");
+    assert_eq!(p.history_push().await, 1);
+    assert_eq!(p.history().await, ["20261027100000_t.sql"]);
+}
+
+/// A cut-off run's file renamed since: history push matches the started row by its text, and records
+/// the migration under its new name, so nothing runs it again.
+#[tokio::test(flavor = "current_thread")]
+async fn a_mysql_cut_off_run_whose_file_was_renamed_is_recorded_under_the_new_name() {
+    let Some(mut p) = P::new(Dialect::Mysql).await else { return };
+    p.file("20261027100000_t.sql", "create table t (id bigint primary key);");
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    p.file("20261027110001_reset.sql", "truncate table t;");
+    p.exec("insert into __reylo_migrations (name, `sql`, applied_at) values ('20261027110000_empty.sql', 'truncate table t;', null)").await;
+    p.exec("insert into t values (10)").await;
+    p.output();
+    assert_eq!(p.migrate().await, 1);
+    let out = p.output();
+    assert_has!(&out, r"reylo run --url <url> --file \S*20261027110001_reset\.sql");
+    assert!(!out.contains("No file reads"), "{out}");
+    assert_eq!(p.history_push().await, 0, "{}", p.peek());
+    assert_has!(p.output(), r"\+ 20261027110001_reset\.sql +recorded");
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    assert_has!(p.output(), "Up to date");
+    assert_eq!(p.rows("select id from t").await.len(), 1);
+}
+
+/// A row marked started while another session holds the migration lock may be a deploy's still
+/// running: status and the dry run say so, and offer no hand run.
+#[tokio::test(flavor = "current_thread")]
+async fn a_mysql_run_another_session_holds_is_not_called_cut_off() {
+    let Some(mut p) = P::new(Dialect::Mysql).await else { return };
+    p.file("20261027100000_t.sql", "create table t (id bigint primary key);");
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    p.file("20261027110000_empty.sql", "truncate table t;");
+    p.exec("insert into __reylo_migrations (name, `sql`, applied_at) values ('20261027110000_empty.sql', 'truncate table t;', null)").await;
+    let mut held = Db::connect(&p.url, &p.dir).await.unwrap();
+    held.rows("select get_lock(concat('reylo_migrate_', left(sha2(coalesce(database(), ''), 256), 32)), 0)").await.unwrap();
+    p.output();
+    assert_eq!(p.status().await, 1);
+    let out = p.output();
+    assert_has!(&out, r"20261027110000_empty\.sql +started, while another run holds this database");
+    assert!(!out.contains("reylo run"), "{out}");
+    assert_eq!(p.dry_run().await, 1);
+    let out = p.output();
+    assert_has!(&out, r"✗ Another run of reylo migrate holds this database\n  It may be a deploy running 20261027110000_empty\.sql now");
+    assert!(!out.contains("reylo run"), "{out}");
+    held.close().await;
+    assert_eq!(p.dry_run().await, 1);
+    assert_has!(p.output(), r"✗ A deploy was cut off while it ran 20261027110000_empty\.sql");
 }
 
 async fn a_shadow_left_by_a_killed_run_is_swept(mut p: P) {
@@ -10192,7 +10366,8 @@ async fn a_first_deploys_sqlite_file_is_left_to_the_command(mut p: P) {
 /// A cut-off run whose change landed, on a database with no fingerprint to hold it to, which the
 /// deploy after the build runs again: the build runs where that succeeds, and not where it fails.
 async fn a_landed_run_the_deploy_retries(mut p: P, idempotent: bool) {
-    if p.d == Dialect::Sqlite || (idempotent && p.d != Dialect::Postgres) {
+    // A MySQL run cut off is never retried: a_lone_statement_cut_off holds its refusal.
+    if p.d != Dialect::Postgres {
         return;
     }
     let int = p.t.int;

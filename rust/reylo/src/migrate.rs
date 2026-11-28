@@ -82,6 +82,7 @@ impl Migrator {
                     Some("pending") => State::Pending,
                     Some("edited") => State::Edited,
                     Some("missing") => State::Missing,
+                    Some("running") => State::Running,
                     _ => State::CutOff,
                 },
                 applied_at: m["applied_at"].as_str().map(String::from),
@@ -401,8 +402,12 @@ pub enum State {
     /// It ran, and the build doesn't hold it.
     Missing,
     /// Its run was cut off before it finished: `reylo migrate deploy --dry-run` says whether it
-    /// landed.
+    /// landed, but on MySQL, where a truncate shows nothing either way, `.run()` refuses until
+    /// `reylo migrate history push` settles it.
     CutOff,
+    /// Its row is marked started while another run of `reylo migrate` holds the database (MySQL):
+    /// a deploy may be running it now.
+    Running,
 }
 
 /// One reason `reylo migrate` refuses, with what fixes it.

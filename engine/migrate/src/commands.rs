@@ -2590,6 +2590,9 @@ pub async fn check(db: &mut Db, server: Option<&mut Server>, opts: &Options) -> 
         problems.extend(stamped.clone());
         problems
     };
+    // Whether another run holds a MySQL database, asked before its history is read: a dry run takes no
+    // lock, so a row marked started may be a deploy's still running ([`cut_off_problem`]).
+    let running = server.is_some() && d == Dialect::Mysql && deploy_running(db).await;
     let history = read_history(db).await?;
     // A migrations directory that isn't there, on a database that ran migrations, is one refusal: a
     // typo in dir, not every migration taken away.
@@ -2660,6 +2663,14 @@ pub async fn check(db: &mut Db, server: Option<&mut Server>, opts: &Options) -> 
     }
     if !problems.is_empty() {
         return Ok(Plan { problems: with_stamp(problems), ..Plan::default() });
+    }
+    // MySQL commits a migration's DDL before its row is finished, so a row marked started may be one
+    // whose change is in place, and the schema can't always say: a truncate, or a swap of two names,
+    // leaves it as it was. Nothing runs until someone says which: a deploy refuses here, and the dry
+    // run says so beside whatever else it finds.
+    let cut_off = history.iter().find(|r| !r.applied).filter(|_| d == Dialect::Mysql).map(|r| cut_off_problem(r, &files, &dir, running, d));
+    if let (Some(problem), None) = (&cut_off, &server) {
+        return Ok(Plan { problems: with_stamp(vec![problem.clone()]), ..Plan::default() });
     }
 
     // An index a cut-off `create index concurrently` left invalid is dropped before its migration
@@ -2732,7 +2743,7 @@ pub async fn check(db: &mut Db, server: Option<&mut Server>, opts: &Options) -> 
         let mut run = Run { live: &live, url: &opts.url, schema_sql: schema_sql.as_deref(), schema: shown(&opts.schema), applied_files: &applied_files, records, pending, started, landed: vec![], d };
         let result = check_in_shadows(&mut shadows, db, &mut run).await;
         shadows.finish().await;
-        let problems = result?;
+        let problems: Vec<Problem> = cut_off.into_iter().chain(result?).collect();
         Ok(Plan { problems, records: run.records, pending: run.pending, unchanged, resumed, landed: run.landed, leftovers, ran: applied_files.clone(), deploys })
     }
 }
@@ -4563,6 +4574,49 @@ fn deploy_failure(m: &Migration, e: &Error, d: Dialect, started: bool, undone: b
         .fix("If another database already ran it, write a new migration instead", &["reylo migrate new <name>"])
 }
 
+/// The file a cut-off run of `row` started from: the one of its name, where it still reads as the
+/// row does, or, where no file has that name, the one file renamed since that reads so. None where it
+/// was edited, deleted, or several files read so: its text has to go back under its name first.
+fn started_file<'a>(row: &HistoryRow, files: &'a [Migration], d: Dialect) -> Option<&'a Migration> {
+    match files.iter().find(|f| f.name == row.name) {
+        Some(f) => same_statements(&f.sql, &row.sql, d).then_some(f),
+        None => match files.iter().filter(|f| same_statements(&f.sql, &row.sql, d)).collect::<Vec<_>>().as_slice() {
+            [one] => Some(one),
+            _ => None,
+        },
+    }
+}
+
+/// The refusal for a MySQL database a run of `row` was cut off on before its row was finished, or
+/// where another run holds it. A change the schema can't show, such as a truncate, that didn't run
+/// is run by hand first, while the row still holds every deploy back, so nothing the migrations run
+/// after it runs before it. Then history push settles it: it records the migration where its change
+/// is in place, or the schema can't show it, and takes it out to run again where it never ran.
+fn cut_off_problem(row: &HistoryRow, files: &[Migration], dir: &str, running: bool, d: Dialect) -> Problem {
+    if running {
+        return Problem::new("migrate-running", "Another run of reylo migrate holds this database").note(format!("It may be a deploy running {} now: look again once it finishes.", row.name));
+    }
+    let file = started_file(row, files, d);
+    let path = file.map(|f| shown(&f.path)).unwrap_or_else(|| format!("{dir}/{}", row.name));
+    let mut problem = Problem::new("cut-off-unsettled", format!("A deploy was cut off while it ran {}", row.name)).note("MySQL commits a migration's change before its history row is finished, so it may have run.");
+    if file.is_none() {
+        problem = problem.note(format!("No file reads as it did when it started. Write this back to {path} first:")).sql(&row.sql);
+    }
+    problem
+        .fix("If it's a change the schema can't show, such as a truncate, and it didn't run, run it by hand first", &[&format!("reylo run --url <url> --file {}", shell_word(&path))])
+        .fix("Then settle it from the schema, running nothing", &["reylo migrate history push --url <url>"])
+        .note("That records it where its change is in place, or the schema can't show it, and takes it out to run again where it never ran.")
+}
+
+/// Whether another session holds this MySQL database's migration lock: a deploy running now.
+async fn deploy_running(db: &mut Db) -> bool {
+    if db.dialect() != Dialect::Mysql {
+        return false;
+    }
+    let rows = db.rows("select coalesce(is_used_lock(concat('reylo_migrate_', left(sha2(coalesce(database(), ''), 256), 32))) <> connection_id(), 0)").await;
+    rows.ok().and_then(|r| r.first().and_then(|r| r.first().map(|v| v == "1"))).unwrap_or(false)
+}
+
 /// What a command says where the fingerprint its last run stored can't be compared.
 fn uncompared_line() -> String {
     then(note("This database can't be compared here with what its last migration left"), &[("To compare it with a dry run", &["reylo migrate deploy --dry-run"])])
@@ -4611,7 +4665,8 @@ async fn dry_run_on(opts: &Options, command: Option<&[String]>, made: &mut Vec<P
     let unmodeled = crate::catalog::unmodeled(&mut db, false).await;
     let result = check(&mut db, Some(&mut server), opts).await;
     let result = match result {
-        Ok(mut plan) if plan.ok() && lock_free(opts) => {
+        // A MySQL run cut off is said beside what the late check finds, which it doesn't touch.
+        Ok(mut plan) if plan.problems.iter().all(|p| matches!(p.code, "cut-off-unsettled" | "migrate-running")) && lock_free(opts) => {
             let (files, _) = opts.migrations()?;
             // Read again since the check: what changed meanwhile is held to a shadow as well.
             let unreplayable = replay_problems(opts, &files, None, db.dialect());
@@ -6689,6 +6744,22 @@ async fn history_push_on(db: &mut Db, server: &mut Server, opts: &Options, init:
     }
     let l = read_lock(opts).unwrap_or_default();
     let order: Vec<Migration> = if lock_free(opts) { files.clone() } else { l.entries.iter().filter_map(|e| files.iter().find(|f| f.name == e.name).cloned()).collect() };
+    // A MySQL row a cut-off run started is the only record that its change may be in place: one that
+    // no migration this command records reads as isn't taken out, which would let the next deploy
+    // run it again. That is a file edited, deleted or renamed into several, or one the lock doesn't
+    // list yet.
+    // The file is found among every migration file, so that one an earlier migration reads the same
+    // as is no match, and must be one the lock lists.
+    let listed = |f: &Migration| order.iter().any(|o| o.name == f.name);
+    if d == Dialect::Mysql {
+        if let Some(r) = before_rows.iter().find(|r| !r.applied && !started_file(r, &files, d).is_some_and(listed)) {
+            let problem = match started_file(r, &files, d) {
+                Some(f) => Problem::new("cut-off-unlocked", format!("The lock doesn't list {}, which a deploy cut off here started", f.name)).note("History push records only what the lock lists, so it keeps the run's row until the lock lists that file."),
+                None => cut_off_problem(r, &files, &shown(&opts.dir), false, d),
+            };
+            return Ok(refuse(&[problem], log));
+        }
+    }
     let live = crate::catalog::without_comments(&catalog(db).await?);
     // On Supabase, the settings the database began under, which the migrations it ran may have
     // changed before any was recorded: the one a replay reaches it from, where its privileges can't
@@ -6784,8 +6855,10 @@ async fn history_push_on(db: &mut Db, server: &mut Server, opts: &Options, init:
     };
     // A migration at the end of the run that changes data and nothing a schema shows can't be told
     // to have run: it stays pending, to run.
-    // One the history says ran, as written, stays recorded.
-    let ran = |m: &Migration| before_rows.iter().any(|r| r.applied && r.name == m.name && same_statements(&r.sql, &m.sql, d));
+    // One the history says ran, as written, stays recorded, and so does one a cut-off run started,
+    // under its name or renamed since: where its change is in place, or the schema can't say, a
+    // deploy refused to run it again, and this command is how it is recorded as run.
+    let ran = |m: &Migration| before_rows.iter().any(|r| if r.applied { r.name == m.name && same_statements(&r.sql, &m.sql, d) } else { started_file(r, &files, d).is_some_and(|f| f.name == m.name) });
     let matched = matches.last().copied().map(|mut n| {
         while n > 0 && !data_statements(&order[n - 1].sql, d).is_empty() && matches.contains(&(n - 1)) && !ran(&order[n - 1]) {
             n -= 1;
@@ -6798,7 +6871,7 @@ async fn history_push_on(db: &mut Db, server: &mut Server, opts: &Options, init:
     // where it can't be). It is looked for too where a run that changes data also matches, which
     // can't be recorded by its schema alone. Where it can't move, the change is undone instead, for
     // deploy to run the migrations in their order.
-    let unproven = |n: usize| history_run.is_some_and(|h| order[h.min(n)..n].iter().any(|m| !data_statements(&m.sql, d).is_empty()));
+    let unproven = |n: usize| history_run.is_some_and(|h| order[h.min(n)..n].iter().any(|m| !data_statements(&m.sql, d).is_empty() && !ran(m)));
     let mut moved: Option<(Vec<Migration>, usize, String, String)> = None;
     let mut unskipped: Option<String> = None;
     if let Some(h) = history_run.filter(|&h| !init && h < order.len() && matched.is_none_or(unproven)) {
@@ -7101,6 +7174,9 @@ async fn status_on(db: &mut Db, opts: &Options, log: Log<'_>) -> Result<i32, Err
     let d = db.dialect();
     let (files, strays) = opts.migrations()?;
     let schema_sql = opts.schema_text();
+    // A row marked started on MySQL while another run holds the migration lock may be a deploy's
+    // now: asked before the history is read.
+    let running = deploy_running(db).await;
     let history = if has_history(db).await? { read_history(db).await? } else { vec![] };
     let times = applied_times(db).await?;
     let order = run_order(opts, &files);
@@ -7116,9 +7192,16 @@ async fn status_on(db: &mut Db, opts: &Options, log: Log<'_>) -> Result<i32, Err
         let at = times.get(&r.name).map(|t| format!("applied {} {} UTC", &t[..10], &t[11..16])).unwrap_or_else(|| "applied".into());
         let wrong = |rows: &mut Rows, log: Log<'_>, what: &str| rows.row(log, &paint("bold red", "✗"), &r.name, what);
         let state = match (r.applied, files.iter().find(|f| f.name == r.name)) {
+            (false, _) if running => {
+                rows.row(log, &paint("yellow", "!"), &r.name, "started, while another run holds this database");
+                "running"
+            }
             (false, _) => {
                 wrong(&mut rows, log, "cut off before it finished");
-                log(&steps(6, &[("See whether it landed", &["reylo migrate deploy --dry-run"])]));
+                // On MySQL the dry run gives the whole refusal: the text it started with where its file
+                // changed, and the order to settle it in.
+                let lead = if d == Dialect::Mysql { "See how to settle it" } else { "See whether it landed" };
+                log(&steps(6, &[(lead, &["reylo migrate deploy --dry-run"])]));
                 "cut-off"
             }
             (true, None) => {
@@ -7343,8 +7426,13 @@ async fn lock_from_history_on(db: &mut Db, server: &mut Server, opts: &Options, 
     let history = if has_history(db).await? { read_history(db).await? } else { vec![] };
     let schema_sql = opts.schema_text();
     let mut problems = applied_unlike(opts, &history, &files, d);
-    if history.iter().any(|r| !r.applied) {
-        problems.push(Problem::new("run-cut-off", "A run on this database was cut off before it finished").fix("Finish it first", &["reylo migrate dev"]));
+    if let Some(r) = history.iter().find(|r| !r.applied) {
+        // On MySQL, dev would run it again whether or not its change is in place.
+        problems.push(if d == Dialect::Mysql {
+            cut_off_problem(r, &files, &shown(&opts.dir), false, d)
+        } else {
+            Problem::new("run-cut-off", "A run on this database was cut off before it finished").fix("Finish it first", &["reylo migrate dev"])
+        });
     }
     problems.extend(replay_problems(opts, &files, schema_sql.as_deref(), d));
     if !problems.is_empty() {
