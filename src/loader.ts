@@ -36,8 +36,14 @@ function warnUnverified(line: string): void {
   console.warn(`reylo: ${line}`);
 }
 
-export async function sqlModule(path: string, sql: string): Promise<SqlModule> {
-  const { input, entry, session } = await moduleInputOf(path, sql);
+/**
+ * The module of the statement `sql`, read from the file at `path`, built for the app at `app`, the
+ * root of the bundle a bundler builds, which says which drivers the module passes
+ * (src/installed-drivers.ts); with no app named, as for a module no bundler builds (Node's preload,
+ * Jest), it passes every driver.
+ */
+export async function sqlModule(path: string, sql: string, app?: string | null): Promise<SqlModule> {
+  const { input, entry, session } = await moduleInputOf(path, sql, app);
   return { code: moduleCode(input), entry, watched: [...session.project.watched.filter((f) => existsSync(f)), ...(input.driversWatched ?? [])] };
 }
 
@@ -46,7 +52,7 @@ export async function sqlModule(path: string, sql: string): Promise<SqlModule> {
  * session that analyzed it and the `reylo/.cache/` entry the analysis came from; or the error that
  * fails the build, which starts with `path`.
  */
-export async function moduleInputOf(path: string, sql: string, places: readonly string[] = []): Promise<{ input: ModuleInput; session: Session; entry: string }> {
+export async function moduleInputOf(path: string, sql: string, app: string | null = null): Promise<{ input: ModuleInput; session: Session; entry: string }> {
   const session = await Session.for(dirname(path));
   let outcome = await session.analyze(sql);
   // A statement the database refuses may have been analyzed against a schema read a few seconds
@@ -89,8 +95,8 @@ export async function moduleInputOf(path: string, sql: string, places: readonly 
   // as another value (src/execute.ts, `QueryModule`).
   const marks = await marksOf(analysis, trimmedStatement(analysis.rewritten.sql), dialect, (region) => session.lex(region));
   const input: ModuleInput = { analysis, raw: sql, params, marks, source: sourceName(path), dialect, codecs: session.project.codecs, sqlcommenter: session.project.sqlcommenter, allowNestedArrays: session.project.allowNestedArrays };
-  // The drivers the project installs, which the module passes, so that an app bundles theirs alone.
-  const installed = installedDrivers(dialect, dirname(path), places);
+  // The drivers the app depends on, which the module passes, so that the app bundles theirs alone.
+  const installed = installedDrivers(dialect, app);
   if (installed) Object.assign(input, { drivers: installed.drivers, driversWatched: installed.watched });
   // The libraries a codec builds values with are imported from the app's own install beside the
   // `.sql` file.

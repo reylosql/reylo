@@ -1,4 +1,4 @@
-// The drivers a module passes, by the packages its project installs (src/installed-drivers.ts).
+// The drivers a module passes, by what the app being built depends on (src/installed-drivers.ts).
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
@@ -6,78 +6,69 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { installedDrivers } from "../src/installed-drivers.ts";
 
-/** A project's root at a new directory, with a lockfile, an empty package of each name in its `node_modules`, and `files` beside them; at `at`, a package of a workspace, with no lockfile of its own. */
-function root(packages: string[], files: Record<string, string> = {}, at?: string): string {
-  const dir = at ?? mkdtempSync(join(tmpdir(), "reylo-drivers-"));
-  mkdirSync(join(dir, "node_modules"), { recursive: true });
-  writeFileSync(join(dir, "package.json"), files["package.json"] ?? "{}");
-  if (at === undefined && !files["pnpm-workspace.yaml"]) writeFileSync(join(dir, "package-lock.json"), "{}");
-  for (const name of packages) {
-    mkdirSync(join(dir, "node_modules", name), { recursive: true });
-    writeFileSync(join(dir, "node_modules", name, "package.json"), "{}");
-  }
+/** A package at `dir` (a new directory where none is given) declaring `manifest`, with `files` beside it. */
+function pkg(manifest: object, files: Record<string, string> = {}, dir = mkdtempSync(join(tmpdir(), "reylo-drivers-"))): string {
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "package.json"), JSON.stringify(manifest));
   for (const [name, text] of Object.entries(files)) writeFileSync(join(dir, name), text);
   return dir;
 }
 
-/** The drivers a module of a `.sql` file in a project with `packages` installed passes. */
-function scanned(dialect: "postgres" | "mysql" | "sqlite", packages: string[], files?: Record<string, string>): string[] {
-  const dir = join(root(packages, files), "src", "queries");
-  mkdirSync(dir, { recursive: true });
-  return installedDrivers(dialect, dir)!.drivers;
-}
+/** The drivers of an app that declares `dependencies` (and `devDependencies`). */
+const of = (dialect: "postgres" | "mysql" | "sqlite", dependencies: string[], devDependencies: string[] = [], files?: Record<string, string>) =>
+  installedDrivers(dialect, pkg({ dependencies: Object.fromEntries(dependencies.map((d) => [d, "*"])), devDependencies: Object.fromEntries(devDependencies.map((d) => [d, "*"])) }, files))!.drivers;
 
-test("a module passes the drivers its project installs, in the order they are tried", () => {
-  assert.deepEqual(scanned("postgres", ["pg"]), ["pgDriver"]);
-  assert.deepEqual(scanned("postgres", ["drizzle-orm", "postgres", "@electric-sql/pglite"]), ["drizzlePostgresDriver", "pgliteDriver", "postgresJsDriver"]);
+test("a module passes the drivers its app depends on, in the order they are tried", () => {
+  assert.deepEqual(of("postgres", ["pg"]), ["pgDriver"]);
+  assert.deepEqual(of("postgres", ["drizzle-orm", "postgres"], ["@electric-sql/pglite"]), ["drizzlePostgresDriver", "pgliteDriver", "postgresJsDriver"]);
   // Neon's Pool and Client are pg's shape, and its neon() function its own; pg-promise hands out pg's Pool.
-  assert.deepEqual(scanned("postgres", ["@neondatabase/serverless"]), ["pgDriver", "neonDriver"]);
-  assert.deepEqual(scanned("postgres", ["pg-promise"]), ["pgPromiseDriver", "pgDriver"]);
-  assert.deepEqual(scanned("mysql", ["mysql2"]), ["mysql2Driver"]);
-  assert.deepEqual(scanned("mysql", ["mariadb", "@planetscale/database", "knex"]), ["knexDriver", "mariadbDriver", "planetscaleDriver"]);
+  assert.deepEqual(of("postgres", ["@neondatabase/serverless"]), ["pgDriver", "neonDriver"]);
+  assert.deepEqual(of("postgres", ["pg-promise"]), ["pgPromiseDriver", "pgDriver"]);
+  assert.deepEqual(of("mysql", ["mysql2"]), ["mysql2Driver"]);
+  assert.deepEqual(of("mysql", ["mariadb", "@planetscale/database", "knex"]), ["knexDriver", "mariadbDriver", "planetscaleDriver"]);
   // Effect's MySQL client runs on mysql2's connection.
-  assert.deepEqual(scanned("mysql", ["effect", "@effect/sql-mysql2"]), ["mysql2Driver"]);
-  assert.deepEqual(scanned("sqlite", ["better-sqlite3"]), ["syncSqliteDriver"]);
-  assert.deepEqual(scanned("sqlite", ["@libsql/client", "sqlite3"]), ["syncSqliteDriver", "libsqlDriver", "sqlite3Driver"]);
+  assert.deepEqual(of("mysql", ["effect", "@effect/sql-mysql2"]), ["mysql2Driver"]);
+  // node:sqlite's way, a Durable Object's storage and D1 have no package, and every SQLite module passes them.
+  assert.deepEqual(of("sqlite", ["better-sqlite3"]), ["durableObjectDriver", "syncSqliteDriver", "d1Driver"]);
+  assert.deepEqual(of("sqlite", ["@libsql/client", "sqlite3"]), ["durableObjectDriver", "syncSqliteDriver", "libsqlDriver", "sqlite3Driver", "d1Driver"]);
+  // An alias is the package it names.
+  assert.deepEqual(installedDrivers("postgres", pkg({ dependencies: { pg8: "npm:pg@^8" } }))!.drivers, ["pgDriver"]);
 });
 
-test("Bun's drivers by its lockfile or its types, and Cloudflare's by wrangler or its config", () => {
-  assert.deepEqual(scanned("postgres", ["pg"], { "bun.lock": "" }), ["pgDriver", "bunPostgresDriver"]);
-  assert.deepEqual(scanned("postgres", ["pg", "@types/bun"]), ["pgDriver", "bunPostgresDriver"]);
-  assert.deepEqual(scanned("sqlite", ["@libsql/client"], { "wrangler.jsonc": "{}" }), ["durableObjectDriver", "syncSqliteDriver", "libsqlDriver", "d1Driver"]);
+test("Bun's drivers by its lockfile, its types or a packageManager naming it", () => {
+  assert.deepEqual(of("postgres", ["pg"], [], { "bun.lock": "" }), ["pgDriver", "bunPostgresDriver"]);
+  assert.deepEqual(of("postgres", ["pg"], ["@types/bun"]), ["pgDriver", "bunPostgresDriver"]);
+  assert.deepEqual(installedDrivers("mysql", pkg({ packageManager: "bun@1.3.0", dependencies: { mysql2: "*" } }))!.drivers, ["bunMysqlDriver", "mysql2Driver"]);
 });
 
-test("where no driver's own package is installed, nothing says which driver the app has, and the module passes every one", () => {
-  assert.equal(scanned("postgres", ["left-pad"]).length, 10);
-  // A wrapper, a runtime and node:sqlite name no driver.
-  assert.equal(scanned("postgres", ["drizzle-orm", "knex", "effect"], { "bun.lock": "" }).length, 10);
-  assert.equal(scanned("sqlite", ["wrangler"]).length, 12);
-  // Nor does a project with no node_modules at all, as on Yarn's Plug'n'Play or Deno.
-  const bare = mkdtempSync(join(tmpdir(), "reylo-drivers-"));
-  writeFileSync(join(bare, "deno.json"), "{}");
-  assert.equal(installedDrivers("postgres", bare)!.drivers.length, 10);
+test("an app that declares no driver's own package says nothing of its driver, and its modules pass every one; a module no bundler builds passes every one too", () => {
+  assert.equal(of("postgres", ["left-pad"]).length, 10);
+  // A wrapper and a runtime name no driver.
+  assert.equal(of("postgres", ["drizzle-orm", "knex", "effect"], [], { "bun.lock": "" }).length, 10);
+  assert.equal(of("sqlite", ["wrangler"]).length, 12);
+  assert.equal(installedDrivers("postgres", mkdtempSync(join(tmpdir(), "reylo-drivers-")))!.drivers.length, 10);
+  assert.equal(installedDrivers("postgres", null)!.drivers.length, 10);
 });
 
-test("a workspace's packages are read: the app's install holds the driver the package of its queries lists none of", () => {
-  const top = root([], { "pnpm-workspace.yaml": "packages:\n  - packages/*\n  - 'apps/*'\n" });
-  root(["@electric-sql/pglite"], { "package.json": '{"name":"db"}' }, join(top, "packages", "db"));
-  root(["pg"], { "package.json": '{"name":"web"}' }, join(top, "apps", "web"));
-  const queries = join(top, "packages", "db", "queries");
-  mkdirSync(queries, { recursive: true });
-  const found = installedDrivers("postgres", queries)!;
-  // The queries' tests run on PGlite, and the app on pg.
-  assert.deepEqual(found.drivers, ["pgliteDriver", "pgDriver"]);
-  assert.ok(found.watched.includes(join(top, "apps", "web", "package.json")));
-  // package.json's workspaces too.
-  const npm = root([], { "package.json": '{"workspaces":["apps/*"]}' });
-  root(["mysql2"], { "package.json": '{"name":"web"}' }, join(npm, "apps", "web"));
-  mkdirSync(join(npm, "queries"));
-  assert.deepEqual(installedDrivers("mysql", join(npm, "queries"))!.drivers, ["mysql2Driver"]);
+test("a workspace package the app depends on brings its dependencies, never its devDependencies", () => {
+  const top = pkg({ name: "top" }, { "pnpm-workspace.yaml": "packages:\n- apps/*\n# the shared code\n- 'packages/**'\n" });
+  // The queries' package runs its tests on PGlite, and depends on postgres for its seed script.
+  pkg({ name: "@acme/db", dependencies: { postgres: "*" }, devDependencies: { "@electric-sql/pglite": "*" } }, {}, join(top, "packages", "data", "db"));
+  const web = pkg({ name: "web", dependencies: { "@acme/db": "workspace:*", pg: "*" } }, {}, join(top, "apps", "web"));
+  const found = installedDrivers("postgres", web)!;
+  assert.deepEqual(found.drivers, ["pgDriver", "postgresJsDriver"]);
+  assert.ok(found.watched.includes(join(top, "packages", "data", "db", "package.json")));
+  assert.ok(found.watched.includes(join(top, "pnpm-workspace.yaml")));
+  // A flow list, and package.json's workspaces with braces.
+  const flow = pkg({ name: "top" }, { "pnpm-workspace.yaml": "packages: [apps/*, libs/*]\n" });
+  pkg({ name: "lib", dependencies: { mysql2: "*" } }, {}, join(flow, "libs", "lib"));
+  assert.deepEqual(installedDrivers("mysql", pkg({ name: "app", dependencies: { lib: "workspace:^" } }, {}, join(flow, "apps", "app")))!.drivers, ["mysql2Driver"]);
+  const npm = pkg({ workspaces: ["{apps,libs}/*"] });
+  pkg({ name: "lib", dependencies: { mariadb: "*" } }, {}, join(npm, "libs", "lib"));
+  assert.deepEqual(installedDrivers("mysql", pkg({ name: "app", dependencies: { lib: "*" } }, {}, join(npm, "apps", "app")))!.drivers, ["mariadbDriver"]);
 });
 
-test("reylo generate reads the install of the directory it writes to as well", () => {
-  const queries = join(root([]), "queries");
-  mkdirSync(queries);
-  const app = root(["postgres"]);
-  assert.deepEqual(installedDrivers("postgres", queries, [app])!.drivers, ["postgresJsDriver"]);
+test("a package reached through file: brings its dependencies", () => {
+  const shared = pkg({ name: "shared", dependencies: { postgres: "*" } });
+  assert.deepEqual(installedDrivers("postgres", pkg({ dependencies: { shared: `file:${shared}` } }))!.drivers, ["postgresJsDriver"]);
 });

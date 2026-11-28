@@ -2207,7 +2207,7 @@ test("postgres: Slonik, through a tag from its own createSqlTag that passes ever
 test("an unsupported client rejects, naming what it has and what reylo takes", async () => {
   await assert.rejects(() => execute({ connect() {}, end() {} } as never, pg) as Promise<unknown>, (e: TypeError) => e instanceof TypeError && /postgres statement on an object with connect, end\. It takes .*query\(text, values\) as on pg/.test(e.message));
   // An object with Drizzle's select() but no session over a client is no Drizzle database.
-  await assert.rejects(() => execute({ $client: {}, select() {} } as never, pg) as Promise<unknown>, /object with select\. .*; a Knex instance over one of them\./);
+  await assert.rejects(() => execute({ $client: {}, select() {} } as never, pg) as Promise<unknown>, /object with select\. .*; a Knex instance over one of them; a Drizzle database over one of them\./);
   // Kysely and Prisma decode their values themselves, so each is told to pass the driver's client.
   class Kysely { selectFrom() {} executeQuery() {} transaction() {} }
   await assert.rejects(() => execute(new Kysely() as never, pg) as Promise<unknown>, /object with selectFrom, executeQuery, transaction\. .* Kysely decodes the values of its queries itself: pass the pool or database its dialect was made with\.$/);

@@ -13,7 +13,8 @@ type Request = { path: string; source: string; port: MessagePort; done: Int32Arr
 parentPort!.on("message", async ({ path, source, port, done }: Request) => {
   let reply: { code: string } | { error: string };
   try {
-    reply = { code: (await (await tooling(dirname(path))).sqlModule(path, source)).code };
+    // No bundler builds it, so it passes every driver.
+    reply = { code: (await (await tooling(dirname(path))).sqlModule(path, source, null)).code };
   } catch (e) {
     reply = { error: (e as Error).message };
   }

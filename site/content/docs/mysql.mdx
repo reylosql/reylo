@@ -583,7 +583,7 @@ When the query fires no trigger and calls no stored function, its error type is 
 
 Reylo decodes its query results itself, so your client's options don't affect Reylo's queries, or the reverse. Type checking reads your schema over its own connection, whatever driver your app uses.
 
-A query bundles the code of the drivers your project installs, and no other.
+A bundled query holds the code of the drivers your app depends on, and no other.
 
 Each example below runs this query:
 

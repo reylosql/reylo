@@ -1,26 +1,27 @@
-// The drivers a project installs, which a module a build step writes passes its define function
-// (src/loader.ts), so that an app's bundle holds the code of the drivers it can run on and no
-// other's. Each driver is found by the packages that bring it, installed in any `node_modules` of
-// the project: above the `.sql` file and the file a build writes, up to the project's root, and in each package of the workspace that root is, where a workspace package of
-// queries alone lists no driver and the app's own package lists it.
+// The drivers an app depends on, which a module a build step writes passes its define function
+// (src/loader.ts), so that the app's bundle holds the code of the drivers it can run on and no
+// other's. They are read from what the app being built declares: its package.json's dependencies of
+// every kind, and the dependencies its workspace's packages bring it, followed by name through the
+// workspace (a package of queries the app depends on brings its dependencies, never its
+// devDependencies, which the app does not install). The app is the package the bundler builds, its
+// root, never the `.sql` file's: a package of queries shared by several apps runs on each app's
+// driver.
 //
-// A runtime's own driver has no package: Bun's is found by its lockfile or its types, Node's
-// `node:sqlite` is always there, and a Durable Object's storage and D1 by wrangler or its config.
-// Where the project installs no package of a driver of the dialect (Yarn's Plug'n'Play, Deno, or a
-// project that installs only a wrapper such as drizzle-orm), nothing says which drivers the app
-// has, and the module passes every one.
-import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+// Bun's drivers have no package: Bun's lockfile, its types or a `packageManager` naming Bun say the
+// app runs on Bun. Node's `node:sqlite` and Cloudflare's SQLite (a Durable Object's storage and
+// D1) have none either, and are small, so every SQLite module passes them. An app that declares no
+// driver's own package of the dialect (one that declares only a wrapper such as drizzle-orm, or no
+// package.json at all) says nothing of which driver it has, and its modules pass every one.
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import type { Dialect } from "./execute.ts";
 
-/** Bun's own drivers, which no package brings: a Bun lockfile or Bun's types say the app runs on Bun. */
+/** Bun's own drivers, which no package brings. */
 const BUN = Symbol("bun");
-/** Node's own SQLite, `node:sqlite`, which no package brings, so every SQLite module passes its driver. */
-const NODE = Symbol("node");
-/** Cloudflare's own SQLite, a Durable Object's storage and D1, which no package brings: a project on Workers has wrangler, or its config. */
-const CLOUDFLARE = Symbol("cloudflare");
+/** A runtime's own SQLite with no package, small enough that every SQLite module passes it: node:sqlite, a Durable Object's storage and D1. */
+const ALWAYS = Symbol("always");
 
-/** A driver as "reylo/module" exports it, the packages and runtimes any one of which brings it, and whether it is a wrapper over another driver, which says nothing of which one the app has. */
+/** A driver as "reylo/module" exports it, the packages any one of which brings it, and whether it is a wrapper over another driver, which says nothing of which one the app has. */
 type Entry = readonly [driver: string, from: readonly (string | symbol)[], wrapper?: true];
 
 /** Each dialect's drivers, in the order they are tried. */
@@ -49,96 +50,199 @@ const DRIVERS: Partial<Record<Dialect, readonly Entry[]>> = {
   sqlite: [
     ["knexDriver", ["knex"], true],
     ["effectSqliteDriver", ["effect"], true],
-    ["durableObjectDriver", [CLOUDFLARE]],
+    ["durableObjectDriver", [ALWAYS]],
     ["sqliteWasmDriver", ["@sqlite.org/sqlite-wasm"]],
     ["sqlJsDriver", ["sql.js", "sql.js-fts5"]],
-    // node:sqlite has no package, and better-sqlite3, bun:sqlite, libsql's Database and Turso's compat Database share its way.
-    ["syncSqliteDriver", [NODE, "better-sqlite3", "libsql", "@tursodatabase/database", "@tursodatabase/database-wasm"]],
+    // node:sqlite's way, which better-sqlite3, bun:sqlite, libsql's Database and Turso's compat Database share.
+    ["syncSqliteDriver", [ALWAYS, "better-sqlite3", "libsql", "@tursodatabase/database", "@tursodatabase/database-wasm"]],
     ["bunSqliteDriver", [BUN]],
     ["libsqlDriver", ["@libsql/client", "@libsql/client-wasm"]],
     ["tursoDriver", ["@tursodatabase/database", "@tursodatabase/database-wasm", "@tursodatabase/sync"]],
     ["sqlitePackageDriver", ["sqlite"]],
     ["sqlite3Driver", ["sqlite3"]],
-    ["d1Driver", [CLOUDFLARE]],
+    ["d1Driver", [ALWAYS]],
   ],
 };
 
-/** The files that mark a project's root: an ancestor past it is no part of the project. */
-const ROOT_MARKS = ["package-lock.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", "yarn.lock", "bun.lock", "bun.lockb", "deno.json", "deno.jsonc", ".git"];
-const BUN_LOCKS = ["bun.lock", "bun.lockb"];
-const WRANGLER = ["wrangler.toml", "wrangler.json", "wrangler.jsonc"];
+type Manifest = { name?: string; packageManager?: string; engines?: Record<string, string>; workspaces?: string[] | { packages?: string[] }; dependencies?: Record<string, string>; devDependencies?: Record<string, string>; optionalDependencies?: Record<string, string>; peerDependencies?: Record<string, string> };
+
+/** What was read for an app, kept while none of the files it read has changed. */
+const cache = new Map<string, { read: Read; stamps: string }>();
+type Read = { names: Set<string>; bun: boolean; watched: string[] } | undefined;
 
 /**
- * The drivers of `dialect` the project of a `.sql` file in `dir` installs, in the order they are
- * tried, and the files that say so, which a bundler watches, so that the module is written again
- * when the app installs another driver. `places` are other directories of the project the build
- * reads, as the one `reylo generate` writes to. Undefined for a dialect whose module names no
- * drivers.
+ * The drivers of `dialect` the app at `app` depends on, in the order they are tried, and the files
+ * that say so, which a bundler watches, so that the module is written again when the app adds a
+ * driver. `null` is a module no bundler builds (Node's preload, Jest), whose size is nothing to
+ * anyone: it passes every driver. Undefined for a dialect whose module names no drivers.
  */
-export function installedDrivers(dialect: Dialect, dir: string, places: readonly string[] = []): { drivers: string[]; watched: string[] } | undefined {
+export function installedDrivers(dialect: Dialect, app: string | null): { drivers: string[]; watched: string[] } | undefined {
   const all = DRIVERS[dialect];
   if (!all) return undefined;
-  const roots = new Set<string>();
+  const read = app === null ? undefined : readApp(resolve(app));
+  const has = (from: string | symbol) => from === ALWAYS || (from === BUN ? read!.bun : read!.names.has(from as string));
+  // A driver's own package says which driver the app has; a wrapper and a runtime do not.
+  const evidence = read !== undefined && all.some(([, from, wrapper]) => !wrapper && from.some((f) => typeof f === "string" && read.names.has(f)));
+  return { drivers: (evidence ? all.filter(([, from]) => from.some(has)) : all).map(([driver]) => driver), watched: read?.watched ?? [] };
+}
+
+/** The names of the packages the app at `dir` depends on, through its workspace, and whether it runs on Bun; undefined where no package.json is at or above `dir`. */
+function readApp(dir: string): Read {
+  const hit = cache.get(dir);
+  if (hit && hit.stamps === stamps(hit.read?.watched ?? [])) return hit.read;
+  const read = readAppNow(dir);
+  cache.set(dir, { read, stamps: stamps(read?.watched ?? []) });
+  return read;
+}
+
+function readAppNow(dir: string): Read {
+  let appDir: string | undefined;
+  for (let d = dir; ; d = dirname(d)) {
+    if (existsSync(join(d, "package.json"))) {
+      appDir = d;
+      break;
+    }
+    if (dirname(d) === d) return undefined;
+  }
   const watched = new Set<string>();
-  let bun = false;
-  let workers = false;
-  /** Reads `d` for installs and the files that say which runtime the app has. */
-  const read = (d: string) => {
-    if (existsSync(join(d, "node_modules"))) roots.add(join(d, "node_modules"));
-    for (const f of ["package.json", ...BUN_LOCKS, ...WRANGLER]) {
-      if (!existsSync(join(d, f))) continue;
-      watched.add(join(d, f));
-      if (BUN_LOCKS.includes(f)) bun = true;
-      if (WRANGLER.includes(f)) workers = true;
+  const manifest = (d: string): Manifest | undefined => {
+    try {
+      const m = JSON.parse(readFileSync(join(d, "package.json"), "utf8")) as Manifest;
+      watched.add(join(d, "package.json"));
+      return m;
+    } catch {
+      return undefined;
     }
   };
-  const tops = new Set<string>();
-  for (const start of [dir, ...places]) {
-    for (let d = resolve(start); ; d = dirname(d)) {
-      read(d);
-      if (ROOT_MARKS.some((m) => existsSync(join(d, m))) || dirname(d) === d) {
-        tops.add(d);
-        break;
+  const app = manifest(appDir);
+  if (!app) return undefined;
+  const root = workspaceRoot(appDir);
+  const packages = root ? workspacePackages(root, watched) : new Map<string, string>();
+  const names = new Set<string>();
+  let bun = false;
+  const seen = new Set<string>();
+  /** Adds what the package at `d` declares: every kind of dependency for the app itself, and for a workspace package it brings, all but its devDependencies. */
+  const add = (d: string, m: Manifest, own: boolean) => {
+    if (seen.has(d)) return;
+    seen.add(d);
+    if (m.packageManager?.startsWith("bun@") || m.engines?.bun !== undefined) bun = true;
+    for (const deps of [m.dependencies, m.optionalDependencies, m.peerDependencies, own ? m.devDependencies : undefined]) {
+      for (const [key, spec] of Object.entries(deps ?? {})) {
+        // An alias, `"pg8": "npm:pg@^8"`, is the package it names.
+        const name = typeof spec === "string" && spec.startsWith("npm:") ? spec.slice(4).replace(/(?!^)@.*$/, "") : key;
+        names.add(name);
+        const local = packages.get(key) ?? (typeof spec === "string" && /^(?:file|link):/.test(spec) ? resolve(d, spec.replace(/^(?:file|link):/, "")) : undefined);
+        const brought = local === undefined ? undefined : manifest(local);
+        if (local !== undefined && brought) add(local, brought, false);
+      }
+    }
+  };
+  add(appDir, app, true);
+  if (names.has("@types/bun") || names.has("bun-types")) bun = true;
+  for (const d of new Set([appDir, ...(root ? [root] : [])])) {
+    for (const lock of ["bun.lock", "bun.lockb"]) {
+      if (existsSync(join(d, lock))) {
+        bun = true;
+        watched.add(join(d, lock));
+      }
+    }
+    if (root === d) {
+      const m = manifest(d);
+      if (m?.packageManager?.startsWith("bun@")) bun = true;
+    }
+  }
+  return { names, bun, watched: [...watched] };
+}
+
+/** The root of the workspace `dir` is in: the nearest directory at or above it with a pnpm-workspace.yaml, a package.json that lists workspaces, or a deno.json that does. */
+function workspaceRoot(dir: string): string | undefined {
+  for (let d = dir; ; d = dirname(d)) {
+    if (existsSync(join(d, "pnpm-workspace.yaml"))) return d;
+    try {
+      if ((JSON.parse(readFileSync(join(d, "package.json"), "utf8")) as Manifest).workspaces !== undefined) return d;
+    } catch {}
+    for (const deno of ["deno.json", "deno.jsonc"]) {
+      try {
+        if (/"workspace"\s*:/.test(readFileSync(join(d, deno), "utf8"))) return d;
+      } catch {}
+    }
+    if (dirname(d) === d) return undefined;
+  }
+}
+
+/** Each package of the workspace at `root`, by its name, from the globs its pnpm-workspace.yaml, package.json or deno.json lists. */
+function workspacePackages(root: string, watched: Set<string>): Map<string, string> {
+  const globs: string[] = [];
+  const text = (f: string) => {
+    try {
+      const t = readFileSync(join(root, f), "utf8");
+      watched.add(join(root, f));
+      return t;
+    } catch {
+      return undefined;
+    }
+  };
+  const yaml = text("pnpm-workspace.yaml");
+  if (yaml !== undefined) {
+    // `packages:` as a block list, indented or not, comments between its items, or as a flow list.
+    const at = yaml.search(/^packages\s*:/m);
+    if (at >= 0) {
+      const rest = yaml.slice(at).replace(/^packages\s*:/, "");
+      const flow = /^\s*\[([^\]]*)\]/.exec(rest);
+      if (flow) globs.push(...flow[1]!.split(","));
+      else for (const line of rest.split("\n").slice(1)) {
+        if (/^\s*(?:#.*)?$/.test(line)) continue;
+        const item = /^\s*-\s*(.+?)\s*(?:#.*)?$/.exec(line);
+        if (!item) break;
+        globs.push(item[1]!);
       }
     }
   }
-  // Each package of a workspace, whose own install may hold the app's driver.
-  for (const top of tops) for (const pkg of workspacePackages(top)) read(pkg);
-  const installed = (name: string) => [...roots].some((root) => existsSync(join(root, name, "package.json")));
-  if (installed("@types/bun") || installed("bun-types")) bun = true;
-  const has = (from: string | symbol) => (from === BUN ? bun : from === NODE ? true : from === CLOUDFLARE ? workers || installed("wrangler") || installed("@cloudflare/workers-types") : installed(from as string));
-  const found = all.filter(([, from]) => from.some(has));
-  // A driver's own package says which driver the app has; a wrapper, a runtime and node:sqlite do not.
-  const evidence = found.some(([, from, wrapper]) => !wrapper && from.some((f) => typeof f === "string" && has(f)));
-  return { drivers: (evidence ? found : all).map(([driver]) => driver), watched: [...watched] };
-}
-
-/** The package directories of the workspace whose root is `top`: from pnpm-workspace.yaml's `packages`, or package.json's `workspaces`, each pattern a directory or one ending in `/*` or `/**`. */
-function workspacePackages(top: string): string[] {
-  const patterns: string[] = [];
-  try {
-    const yaml = readFileSync(join(top, "pnpm-workspace.yaml"), "utf8");
-    const list = /^packages:\s*\n((?:\s+-\s*.+\n?)+)/m.exec(yaml)?.[1] ?? "";
-    for (const m of list.matchAll(/-\s*["']?([^"'\n#]+?)["']?\s*(?:#.*)?$/gm)) patterns.push(m[1]!.trim());
-  } catch {}
-  try {
-    const pkg = JSON.parse(readFileSync(join(top, "package.json"), "utf8")) as { workspaces?: string[] | { packages?: string[] } };
-    const ws = Array.isArray(pkg.workspaces) ? pkg.workspaces : (pkg.workspaces?.packages ?? []);
-    patterns.push(...ws.filter((w) => typeof w === "string"));
-  } catch {}
-  const out: string[] = [];
-  for (const pattern of patterns) {
-    if (pattern.startsWith("!")) continue;
-    const base = pattern.replace(/\/\*\*?$/, "");
-    if (base.includes("*")) continue;
-    if (base === pattern) out.push(join(top, base));
-    else out.push(...subdirectories(join(top, base), pattern.endsWith("**") ? 3 : 1));
+  for (const f of ["package.json", "deno.json", "deno.jsonc"]) {
+    const t = text(f);
+    if (t === undefined) continue;
+    try {
+      const m = JSON.parse(f === "package.json" ? t : t.replace(/^\s*\/\/.*$/gm, "")) as { workspaces?: string[] | { packages?: string[] }; workspace?: string[] };
+      const ws = Array.isArray(m.workspaces) ? m.workspaces : (m.workspaces?.packages ?? m.workspace ?? []);
+      globs.push(...ws.filter((w): w is string => typeof w === "string"));
+    } catch {}
   }
-  return out.filter((d) => existsSync(join(d, "package.json")));
+  const patterns = globs.map((g) => g.trim().replace(/^["']|["']$/g, "").replace(/^\.\//, "").replace(/\/+$/, "")).filter((g) => g && !g.startsWith("!"));
+  const matchers = patterns.map(globMatcher);
+  const out = new Map<string, string>();
+  for (const d of directories(root, 5)) {
+    const rel = relative(root, d).split(sep).join("/");
+    if (!matchers.some((m) => m.test(rel)) || !existsSync(join(d, "package.json"))) continue;
+    try {
+      const name = (JSON.parse(readFileSync(join(d, "package.json"), "utf8")) as Manifest).name;
+      if (name) out.set(name, d);
+    } catch {}
+  }
+  return out;
 }
 
-/** The directories under `dir`, `depth` levels down at most, past any `node_modules`. */
-function subdirectories(dir: string, depth: number): string[] {
+/** A workspace glob as a test of a directory's path from the root: `*` within one level, `**` across any, and `{a,b}` either. */
+function globMatcher(glob: string): RegExp {
+  let re = "";
+  for (let i = 0; i < glob.length; i++) {
+    const c = glob[i]!;
+    if (c === "*" && glob[i + 1] === "*") {
+      re += ".*";
+      i++;
+      if (glob[i + 1] === "/") i++;
+    } else if (c === "*") re += "[^/]*";
+    else if (c === "?") re += "[^/]";
+    else if (c === "{") {
+      const end = glob.indexOf("}", i);
+      re += `(?:${glob.slice(i + 1, end).split(",").map((s) => s.replace(/[.+^$()|[\]\\]/g, "\\$&")).join("|")})`;
+      i = end;
+    } else re += c.replace(/[.+^$()|[\]\\]/g, "\\$&");
+  }
+  return new RegExp(`^${re}$`);
+}
+
+/** The directories under `dir`, `depth` levels down at most, past `node_modules` and hidden ones. */
+function directories(dir: string, depth: number): string[] {
   if (depth === 0) return [];
   let names: string[];
   try {
@@ -146,5 +250,16 @@ function subdirectories(dir: string, depth: number): string[] {
   } catch {
     return [];
   }
-  return names.flatMap((name) => [join(dir, name), ...subdirectories(join(dir, name), depth - 1)]);
+  return names.flatMap((name) => [join(dir, name), ...directories(join(dir, name), depth - 1)]);
+}
+
+/** When each of `files` last changed, so that what was read from them is read again after any changes. */
+function stamps(files: readonly string[]): string {
+  return files.map((f) => {
+    try {
+      return statSync(f).mtimeMs;
+    } catch {
+      return "-";
+    }
+  }).join(",");
 }

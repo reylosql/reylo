@@ -150,8 +150,8 @@ async function queryOf(name: string, file: string, base: string, outDir: string)
   let input: ModuleInput;
   let session: Session;
   try {
-    // The drivers the project installs, read from the file's directory and the one written to.
-    ({ input, session } = await moduleInputOf(file, sql, [outDir]));
+    // The drivers of the app the file is written into.
+    ({ input, session } = await moduleInputOf(file, sql, outDir));
   } catch (e) {
     // The build's errors start with the file's absolute path.
     const message = (e as Error).message;

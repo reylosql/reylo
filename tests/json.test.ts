@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { sqlModule } from "../src/loader.ts";
 import { reyloImport } from "../src/module-types.ts";
-import { closeSessions, declarations, driver, DRIVERS, INDEX, MODULE, mysqlDatabase, mysqlLive, pgLive, postgresDatabase, ROOT, linkDriver } from "./helpers.ts";
+import { closeSessions, declarations, driver, DRIVERS, INDEX, MODULE, mysqlDatabase, mysqlLive, pgLive, postgresDatabase, ROOT } from "./helpers.ts";
 
 // A `json` or `jsonb` value that nothing in the schema or the statement gives a shape is any JSON
 // value, `Json`, which `reylo` exports and a module imports where one of its types names it; so is
@@ -120,7 +120,7 @@ function project(url: string, driver: string): string {
   writeFileSync(join(root, "package.json"), "{}");
   writeFileSync(join(root, ".env"), `DATABASE_URL=${url}\n`);
   mkdirSync(join(root, "node_modules"));
-  linkDriver(join(root, "node_modules"), driver);
+  symlinkSync(join(DRIVERS, driver), join(root, "node_modules", driver));
   return root;
 }
 

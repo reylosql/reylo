@@ -504,7 +504,7 @@ export function executeSync<D extends Dialect>(client: SyncClientFor<D>, query: 
   if (!query.runtime.runSync) throw refuseSync(`a ${query.dialect} statement has none`);
   if (!query.runtime.answersAtOnce?.(c, query)) {
     const atOnce = query.drivers?.filter((d) => d.atOnce).map((d) => d.label);
-    throw refuseSync(atOnce ? `this client answers through a promise, or is none of the synchronous drivers this query's project installs (${atOnce.join("; ") || "none"})` : "this client answers through a promise");
+    throw refuseSync(atOnce ? `this client answers through a promise, or is none of the synchronous drivers its app depends on (${atOnce.join("; ") || "none"})` : "this client answers through a promise");
   }
   const rows = syncRows(c, query, params);
   if (Array.isArray(rows)) return withCodecs(query, rows) as unknown[];
@@ -980,7 +980,7 @@ function unsupported(c: unknown, { dialect, runtime, drivers }: QueryModule): Ty
               ? " A wrapper around a driver's client hands back the values its driver already converted, a Date for a timestamp and a string for a bigint, which reylo cannot read back: pass the driver's own pool, client or transaction, or keep the wrapper one of them, as a subclass or a proxy."
               : "";
   // The drivers' own clients first, then the wrappers over them.
-  const labels = drivers && [...drivers.filter((d) => d.run || d.atOnce), ...drivers.filter((d) => !d.run && !d.atOnce)].map((d) => d.label);
-  const takes = labels ? `It takes ${labels.join("; ")}. A module a build step writes takes the drivers its project installs: install your client's driver in the project of the .sql file, or in a package of its workspace, and build the module again.` : `It takes a client with ${runtime.clients}.`;
+  const labels = drivers && [...drivers.filter((d) => d.run || d.atOnce), ...drivers.filter((d) => !d.run && !d.atOnce)].map((d) => d.label).concat("a Drizzle database over one of them");
+  const takes = labels ? `It takes ${labels.join("; ")}. A module a bundler builds takes the drivers its app depends on: add your client's driver to the app's package.json, or to a package of its workspace it depends on, and build again.` : `It takes a client with ${runtime.clients}.`;
   return new TypeError(`reylo cannot run a ${dialect} statement on ${seen}. ${takes}${hint}`);
 }

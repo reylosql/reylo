@@ -1,8 +1,8 @@
 // What the loader's tests share: the test databases `REYLO_TEST_PG`, `REYLO_TEST_MYSQL` and `REYLO_TEST_CLICKHOUSE` name and a database of a test's own on each, the drivers `lab/drivers` installs, a statement written by hand compiled by the engine's lexer, and the content mapper run over its JSON-RPC protocol, as the type check runs it.
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, symlinkSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { pathToFileURL } from "node:url";
 import { reportedDiagnostics } from "../src/mapper-diagnostics.ts";
@@ -14,35 +14,6 @@ export const ROOT = join(import.meta.dirname, "..");
 export const DRIVERS = join(ROOT, "lab", "drivers", "node_modules");
 export const MAPPER = join(ROOT, "src", "mapper.ts");
 export const INDEX = pathToFileURL(join(ROOT, "src", "index.ts")).href;
-/** Each dialect's drivers the lab installs, and Slonik and Effect from the root's install: every one a test runs a module of that dialect on. */
-const FAMILIES: Record<"postgres" | "mysql" | "sqlite", readonly (readonly [from: string, name: string])[]> = {
-  postgres: [...["pg", "postgres", "pg-promise", "@electric-sql/pglite", "@neondatabase/serverless", "drizzle-orm", "knex"].map((name) => [DRIVERS, name] as const), ...["slonik", "effect"].map((name) => [join(ROOT, "node_modules"), name] as const)],
-  mysql: ["mysql2", "mariadb", "@planetscale/database", "drizzle-orm", "knex"].map((name) => [DRIVERS, name] as const),
-  sqlite: [...["better-sqlite3", "@libsql/client", "@tursodatabase/database", "sqlite", "sqlite3", "sql.js", "@sqlite.org/sqlite-wasm", "wrangler", "drizzle-orm", "knex"].map((name) => [DRIVERS, name] as const), [join(ROOT, "node_modules"), "effect"] as const],
-};
-
-/**
- * Links every driver of a dialect a test runs a project's modules on into its `node_modules`: a
- * module passes the drivers its project installs (src/installed-drivers.ts), as an app installs the
- * ones it runs on.
- */
-export function linkDrivers(nodeModules: string, dialect: keyof typeof FAMILIES): void {
-  for (const [from, name] of FAMILIES[dialect]) {
-    const to = join(nodeModules, name);
-    if (existsSync(to) || !existsSync(join(from, name))) continue;
-    mkdirSync(dirname(to), { recursive: true });
-    symlinkSync(join(from, name), to);
-  }
-}
-
-/** Links `driver` from lab/drivers into a test project's `node_modules`, with every driver of its dialect (`linkDrivers`). */
-export function linkDriver(nodeModules: string, driver: string): void {
-  const dialect = (Object.keys(FAMILIES) as (keyof typeof FAMILIES)[]).find((d) => FAMILIES[d].some(([, name]) => name === driver));
-  if (dialect) return linkDrivers(nodeModules, dialect);
-  mkdirSync(nodeModules, { recursive: true });
-  if (!existsSync(join(nodeModules, driver))) symlinkSync(join(DRIVERS, driver), join(nodeModules, driver));
-}
-
 /** What a module a build step writes imports, "reylo/module", as a test that writes one outside the repository reaches it. */
 export const MODULE = pathToFileURL(join(ROOT, "src", "module.ts")).href;
 export const PG = process.env.REYLO_TEST_PG;

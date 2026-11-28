@@ -1069,8 +1069,9 @@ export const neonDriver: PostgresDriver = {
       return pgFamily(c, (types) => c.query(p.text, withJson(p), { fullResults: true, arrayMode: false, types }), p.query.columns, load);
     }
     // A function with unsafe() and no query() is Bun.sql's (whose transaction() aliases begin()),
-    // postgres.js's, or a wrapper around one: never Neon's.
-    if (typeof c.unsafe === "function") return undefined;
+    // postgres.js's, or a wrapper around one, and one with raw() and a client is a Knex instance,
+    // whose call starts a query builder: never Neon's.
+    if (typeof c.unsafe === "function" || typeof c.raw === "function") return undefined;
     return neonCallable(c as never, p.text, withJson(p).map(asByteaHex), p.query.columns);
   },
 };

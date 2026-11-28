@@ -26,7 +26,7 @@ export default function reylo() {
     name: "reylo",
     setup(build: Build) {
       build.onLoad({ filter: /\.sql$/ }, async (args) => {
-        const { code, entry, watched } = await (await tooling(dirname(args.path))).sqlModule(args.path, readFileSync(args.path, "utf8"));
+        const { code, entry, watched } = await (await tooling(dirname(args.path))).sqlModule(args.path, readFileSync(args.path, "utf8"), build.initialOptions?.absWorkingDir ?? process.cwd());
         // In watch mode a new analysis of the statement (the type check's, after a migration)
         // rebuilds the module, and so does a change to the project file or a `.env` file.
         return { contents: code, loader: "js", watchFiles: [entry, ...watched] };

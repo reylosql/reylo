@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { Session } from "../src/analyze.ts";
 import { sqlModule } from "../src/loader.ts";
-import { DRIVERS, INDEX, MODULE, MYSQL, driver, mysqlDatabase, mysqlLive, pgLive, postgresDatabase, linkDriver } from "./helpers.ts";
+import { DRIVERS, INDEX, MODULE, MYSQL, driver, mysqlDatabase, mysqlLive, pgLive, postgresDatabase } from "./helpers.ts";
 
 // A Postgres row value of known fields, and each built-in geometric type, is an object of its
 // fields, and a range an object of its bounds (src/values.ts): the run time decodes each from the
@@ -49,7 +49,7 @@ function project(url: string, yaml?: string, drivers = ["pg", "postgres"]): stri
   writeFileSync(join(root, ".env"), `DATABASE_URL=${url}\n`);
   if (yaml !== undefined) writeFileSync(join(root, ".reylo.yaml"), yaml);
   mkdirSync(join(root, "node_modules"));
-  for (const name of drivers) linkDriver(join(root, "node_modules"), name);
+  for (const name of drivers) symlinkSync(join(DRIVERS, name), join(root, "node_modules", name));
   return root;
 }
 

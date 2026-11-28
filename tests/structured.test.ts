@@ -10,7 +10,7 @@ import { pathToFileURL } from "node:url";
 import { Session } from "../src/analyze.ts";
 import { sqlModule } from "../src/loader.ts";
 import { moduleTypes } from "../src/module-types.ts";
-import { DRIVERS, PG, MYSQL, pgLive, mysqlLive, INDEX, MODULE, postgresDatabase, closeSessions, plain, mysqlDatabase, driver, linkDriver } from "./helpers.ts";
+import { DRIVERS, PG, MYSQL, pgLive, mysqlLive, INDEX, MODULE, postgresDatabase, closeSessions, plain, mysqlDatabase, driver } from "./helpers.ts";
 
 // Structured parameters (wiki/structured-params.md): a parameter cast to `rows(…)` or `row(…)` is
 // typed by its column list and written for its position; the run time checks each value, and a key
@@ -24,7 +24,7 @@ function project(driver?: string): string {
   writeFileSync(join(root, "package.json"), "{}");
   if (driver) {
     mkdirSync(join(root, "node_modules"));
-    linkDriver(join(root, "node_modules"), driver);
+    symlinkSync(join(DRIVERS, driver), join(root, "node_modules", driver));
   }
   return root;
 }
