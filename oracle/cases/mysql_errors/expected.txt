@@ -15,8 +15,10 @@ insert_json_table_nested_comment.sql: none () -> {  }
 insert_json_table_view.sql: none () -> {  }
 insert_post.sql: none (id: int, user_id: int, title: varchar(≤20)) -> {  }
 insert_user.sql: none (id: int, email: varchar(≤20), age: int?) -> {  }
+select_group_concat_view.sql: one () -> { ids: text? }
 select_recursive.sql: many () -> { x: varchar? }
 select_recursive_view.sql: many () -> { echo: varchar? }
 select_taxed.sql: many () -> { id: int | bigint, taxed: int | bigint? }
 select_view.sql: at_most_one (id: int32) -> { id: int | bigint, email: varchar }
+select_window_view.sql: many () -> { rn: bigint }
 upsert_user.sql: none (id: int, email: varchar(≤20), age: int?) -> {  }

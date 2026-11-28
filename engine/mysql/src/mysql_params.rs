@@ -991,7 +991,13 @@ impl Walk {
             ast::GroupByExpr::Expressions(list, _) => list.as_slice(),
             _ => &[],
         };
-        for e in s.selection.iter().chain(group_by).chain(s.having.iter()).chain(s.qualify.iter()) {
+        let mut windows = Vec::new();
+        for named in &s.named_window {
+            if let ast::NamedWindowExpr::WindowSpec(spec) = &named.1 {
+                window(spec, &mut windows);
+            }
+        }
+        for e in s.selection.iter().chain(group_by).chain(s.having.iter()).chain(s.qualify.iter()).chain(windows) {
             self.expr(e, env);
         }
     }
@@ -1047,8 +1053,12 @@ impl Walk {
     fn expr(&mut self, e: &Expr, env: &Env) {
         let mut children: Vec<&Expr> = Vec::new();
         let mut queries: Vec<&Query> = Vec::new();
+        // Every variant is named, and a struct's fields too, so that one that can hold a subquery
+        // is never passed over: a view it reads would escape what `tables` lists.
         match e {
-            Expr::IsFalse(x) | Expr::IsNotFalse(x) | Expr::IsTrue(x) | Expr::IsNotTrue(x) | Expr::IsNull(x) | Expr::IsNotNull(x) | Expr::IsUnknown(x) | Expr::IsNotUnknown(x) | Expr::Nested(x) => children.push(x),
+            Expr::Identifier(_) | Expr::CompoundIdentifier(_) | Expr::Value(_) | Expr::TypedString(_) | Expr::Wildcard(_) | Expr::QualifiedWildcard(..) | Expr::MatchAgainst { .. } => {}
+            Expr::IsFalse(x) | Expr::IsNotFalse(x) | Expr::IsTrue(x) | Expr::IsNotTrue(x) | Expr::IsNull(x) | Expr::IsNotNull(x) | Expr::IsUnknown(x) | Expr::IsNotUnknown(x) | Expr::Nested(x) | Expr::OuterJoin(x) | Expr::Prior(x) => children.push(x),
+            Expr::IsJson { expr, .. } | Expr::IsNormalized { expr, .. } | Expr::Named { expr, .. } => children.push(expr),
             Expr::IsDistinctFrom(a, b) | Expr::IsNotDistinctFrom(a, b) => children.extend([a.as_ref(), b.as_ref()]),
             Expr::BinaryOp { left, right, .. } | Expr::AnyOp { left, right, .. } | Expr::AllOp { left, right, .. } => children.extend([left.as_ref(), right.as_ref()]),
             Expr::UnaryOp { expr, .. } | Expr::Cast { expr, .. } | Expr::Collate { expr, .. } | Expr::Extract { expr, .. } | Expr::Ceil { expr, .. } | Expr::Floor { expr, .. } => children.push(expr),
@@ -1064,6 +1074,7 @@ impl Walk {
                 children.push(expr);
                 queries.push(subquery);
             }
+            Expr::InUnnest { expr, array_expr, .. } => children.extend([expr.as_ref(), array_expr.as_ref()]),
             Expr::Between { expr, low, high, .. } => children.extend([expr.as_ref(), low.as_ref(), high.as_ref()]),
             Expr::Like { expr, pattern, escape_char, .. } | Expr::ILike { expr, pattern, escape_char, .. } | Expr::SimilarTo { expr, pattern, escape_char, .. } => {
                 children.extend([expr.as_ref(), pattern.as_ref()]);
@@ -1086,16 +1097,30 @@ impl Walk {
                 children.extend([expr.as_ref(), overlay_what.as_ref(), overlay_from.as_ref()]);
                 children.extend(overlay_for.as_deref());
             }
-            Expr::Function(f) => {
-                for args in [&f.parameters, &f.args] {
+            Expr::Function(ast::Function { name: _, uses_odbc_syntax: _, parameters, args, within_group, filter, null_treatment: _, over }) => {
+                for args in [parameters, args] {
                     match args {
-                        ast::FunctionArguments::List(list) => children.extend(list.args.iter().filter_map(arg_expr)),
+                        ast::FunctionArguments::List(ast::FunctionArgumentList { duplicate_treatment: _, args, clauses }) => {
+                            children.extend(args.iter().filter_map(arg_expr));
+                            for clause in clauses {
+                                use ast::FunctionArgumentClause as C;
+                                match clause {
+                                    C::Where(x) | C::Limit(x) | C::Having(ast::HavingBound(_, x)) => children.push(x),
+                                    C::OrderBy(list) => children.extend(list.iter().map(|o| &o.expr)),
+                                    C::OnOverflow(ast::ListAggOnOverflow::Truncate { filler, .. }) => children.extend(filler.as_deref()),
+                                    C::OnOverflow(ast::ListAggOnOverflow::Error) | C::IgnoreOrRespectNulls(_) | C::Separator(_) | C::Using(_) | C::JsonNullClause(_) | C::JsonReturningClause(_) => {}
+                                }
+                            }
+                        }
                         ast::FunctionArguments::Subquery(q) => queries.push(q),
                         ast::FunctionArguments::None => {}
                     }
                 }
-                children.extend(f.filter.as_deref());
-                children.extend(f.within_group.iter().map(|o| &o.expr));
+                children.extend(filter.as_deref());
+                children.extend(within_group.iter().map(|o| &o.expr));
+                if let Some(ast::WindowType::WindowSpec(spec)) = over {
+                    window(spec, &mut children);
+                }
             }
             Expr::Case { operand, conditions, else_result, .. } => {
                 children.extend(operand.as_deref());
@@ -1106,19 +1131,43 @@ impl Walk {
             }
             Expr::Exists { subquery, .. } => queries.push(subquery),
             Expr::Subquery(q) => queries.push(q),
-            Expr::Tuple(list) => children.extend(list),
+            Expr::GroupingSets(sets) | Expr::Cube(sets) | Expr::Rollup(sets) => children.extend(sets.iter().flatten()),
+            Expr::Tuple(list) | Expr::Struct { values: list, .. } | Expr::Array(ast::Array { elem: list, .. }) => children.extend(list),
+            Expr::Dictionary(fields) => children.extend(fields.iter().map(|f| f.value.as_ref())),
+            Expr::Map(ast::Map { entries }) => children.extend(entries.iter().flat_map(|e| [e.key.as_ref(), e.value.as_ref()])),
+            Expr::Lambda(l) => children.push(&l.body),
             Expr::Interval(i) => children.push(&i.value),
             Expr::JsonAccess { value, .. } => children.push(value),
-            Expr::CompoundFieldAccess { root, .. } => children.push(root),
+            Expr::CompoundFieldAccess { root, access_chain } => {
+                children.push(root);
+                for access in access_chain {
+                    match access {
+                        ast::AccessExpr::Dot(x) | ast::AccessExpr::Subscript(ast::Subscript::Index { index: x }) => children.push(x),
+                        ast::AccessExpr::Subscript(ast::Subscript::Slice { lower_bound, upper_bound, stride }) => children.extend([lower_bound, upper_bound, stride].into_iter().flatten()),
+                    }
+                }
+            }
             Expr::MemberOf(m) => children.extend([m.value.as_ref(), m.array.as_ref()]),
             Expr::Prefixed { value, .. } => children.push(value),
-            _ => {}
         }
         for child in children {
             self.expr(child, env);
         }
         for q in queries {
             self.query(q, env);
+        }
+    }
+}
+
+/// The expressions of a window's PARTITION BY, ORDER BY and frame bounds, which may hold subqueries.
+fn window<'e>(spec: &'e ast::WindowSpec, out: &mut Vec<&'e Expr>) {
+    out.extend(spec.partition_by.iter());
+    out.extend(spec.order_by.iter().map(|o| &o.expr));
+    if let Some(frame) = &spec.window_frame {
+        for bound in std::iter::once(&frame.start_bound).chain(frame.end_bound.iter()) {
+            if let ast::WindowFrameBound::Preceding(Some(x)) | ast::WindowFrameBound::Following(Some(x)) = bound {
+                out.push(x);
+            }
         }
     }
 }
