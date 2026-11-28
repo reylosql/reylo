@@ -168,22 +168,25 @@ const quoted = (name: string) => `"${name.replace(/"/g, '""')}"`;
  * them, read from each key's declaration: a row whose key columns are all set and that no parent
  * row matches. Turso's engine answers that pragma with no rows before 0.9, so it is held this way.
  */
-async function brokenKeys(rows: (sql: string, values?: unknown[]) => Promise<unknown[]>): Promise<number> {
+export async function brokenKeys(rows: (sql: string, values?: unknown[]) => Promise<unknown[]>): Promise<number> {
   let broken = 0;
   const tables = (await rows("select name from sqlite_schema where type = 'table' and name not like 'sqlite!_%' escape '!'")) as { name: string }[];
   for (const { name } of tables) {
-    const columns = (await rows(`select id, "table" as parent, "from", "to" from pragma_foreign_key_list(?) order by id, seq`, [name])) as { id: number; parent: string; from: string; to: string | null }[];
+    // The pragmas' statement forms: Turso's table-valued ones fail on a name holding a `"`.
+    const columns = (await rows(`pragma foreign_key_list(${quoted(name)})`)) as { id: number; seq: number; table: string; from: string; to: string | null }[];
     const keys = new Map<number, typeof columns>();
-    for (const c of columns) keys.set(c.id, [...(keys.get(c.id) ?? []), c]);
+    for (const c of [...columns].sort((a, b) => a.id - b.id || a.seq - b.seq)) keys.set(c.id, [...(keys.get(c.id) ?? []), c]);
     for (const key of keys.values()) {
-      const parent = key[0]!.parent;
+      const parent = key[0]!.table;
       const set = key.map((k) => `c.${quoted(k.from)} is not null`).join(" and ");
       let unmatched = "";
       // A parent table that doesn't exist matches no row; a key that names no columns takes the parent's primary key.
       if ((await rows("select 1 from sqlite_schema where type = 'table' and name = ? collate nocase", [parent])).length) {
-        const to = key.every((k) => k.to) ? key.map((k) => k.to!) : ((await rows("select name from pragma_table_info(?) where pk > 0 order by pk", [parent])) as { name: string }[]).map((r) => r.name);
+        const primary = async () => ((await rows(`pragma table_info(${quoted(parent)})`)) as { name: string; pk: number }[]).filter((c) => c.pk > 0).sort((a, b) => a.pk - b.pk).map((c) => c.name);
+        const to = key.every((k) => k.to) ? key.map((k) => k.to!) : await primary();
         if (to.length !== key.length) continue;
-        unmatched = ` and not exists (select 1 from ${quoted(parent)} as p where ${key.map((k, i) => `p.${quoted(to[i]!)} = c.${quoted(k.from)}`).join(" and ")})`;
+        // `+` takes the child's affinity off its value, so the parent column's affinity and collation decide the match, as a key compares.
+        unmatched = ` and not exists (select 1 from ${quoted(parent)} as p where ${key.map((k, i) => `p.${quoted(to[i]!)} = +c.${quoted(k.from)}`).join(" and ")})`;
       }
       const [count] = (await rows(`select count(*) as n from ${quoted(name)} as c where ${set}${unmatched}`)) as { n: number | bigint }[];
       broken += Number(count?.n ?? 0);

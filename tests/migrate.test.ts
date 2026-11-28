@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
-import { migrate, runMigrations, runMigrationsOn, type MigrationConnection, type MigrationStorage } from "../src/migrate.ts";
+import { brokenKeys, migrate, runMigrations, runMigrationsOn, type MigrationConnection, type MigrationStorage } from "../src/migrate.ts";
 import { driver } from "./helpers.ts";
 
 // A Durable Object's storage over node:sqlite, as far as `migrate` uses it: `sql.exec` runs one or
@@ -192,7 +192,7 @@ test("migrate(db) leaves the app's foreign keys as it had them, whatever a migra
 
 test("migrate(db) on Turso's engine holds keys from their declarations: composite, implied by the parent's primary key, and to a table that's gone", async () => {
   const db = await driver("@tursodatabase/database").connect(":memory:");
-  const PAIRS = { name: "20261107120000_pairs.sql", sql: "create table pairs (a int, b int, primary key (a, b)); create table refs (x int, y int, note text, foreign key (x, y) references pairs); insert into pairs values (1, 2); insert into refs values (1, 2, 'ok'), (null, 9, 'unset');" };
+  const PAIRS = { name: "20261107120000_pairs.sql", sql: "create table pairs (a int, b int, primary key (a, b)); create table refs (x int, y int, note text, foreign key (x, y) references pairs); insert into pairs values (1, 2); insert into refs values (1, 2, 'ok'), (null, 9, 'unset'); create table \"odd \"\"name\" (id integer primary key);" };
   assert.deepEqual(await runMigrationsOn(db, [USERS, PAIRS]), [USERS.name, PAIRS.name]);
   const ORPHAN = { name: "20261108120000_orphan.sql", sql: "insert into refs values (1, 3, 'orphan');" };
   await assert.rejects(runMigrationsOn(db, [USERS, PAIRS, ORPHAN]), /rolled back: 1 rows break a foreign key after this migration$/);
@@ -248,4 +248,22 @@ test("migrate(db) refuses a pending migration with its own commit before running
   // A comment is no statement, whatever it says, as SQLite reads it.
   const NOTED = { name: "20261106120000_noted.sql", sql: "--Rollback: drop table bio;\nalter table users add column bio text; -- End of file\n" };
   assert.deepEqual(await runMigrationsOn(db, [USERS, NOTED]), [USERS.name, NOTED.name]);
+});
+
+test("the key check Turso's engine runs counts the rows SQLite's foreign_key_check counts, on the same schemas", async () => {
+  const schemas = [
+    "create table p (id text primary key); create table c (p int references p (id)); insert into p values ('01'); insert into c values (1);",
+    "create table p (id primary key); create table c (p int references p (id)); insert into p values ('1'); insert into c values (1);",
+    "create table p (id int primary key); create table c (p text references p (id)); insert into p values (1); insert into c values ('1'), ('2');",
+    "create table p (name text collate nocase unique); create table c (p text references p (name)); insert into p values ('Ada'); insert into c values ('ADA'), ('Grace');",
+    "create table p (a int, b int, primary key (a, b)) without rowid; create table c (x int, y int, foreign key (x, y) references p); insert into p values (1, 2); insert into c values (1, 2), (1, 3), (null, 3);",
+    "create table t (id integer primary key, up int references t (id)); insert into t values (1, null), (2, 1), (3, 9);",
+    'create table "odd ""name" (id integer primary key); create table c (p int references "odd ""name" (id), q int references gone (id)); insert into c values (1, 1);',
+  ];
+  for (const schema of schemas) {
+    const db = new DatabaseSync(":memory:");
+    db.exec(`pragma foreign_keys = off; ${schema}`);
+    const rows = async (sql: string, values: unknown[] = []) => db.prepare(sql).all(...(values as [])) as unknown[];
+    assert.equal(await brokenKeys(rows), db.prepare("pragma foreign_key_check").all().length, schema);
+  }
 });

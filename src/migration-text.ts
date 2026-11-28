@@ -183,7 +183,8 @@ export function transactionControl(sql: string): string | undefined {
   let k = 0;
   while (k < sql.length) {
     const c = sql[k]!;
-    if (SPACING.test(c)) {
+    // SQLite reads a byte order mark as spacing, wherever it is.
+    if (SPACING.test(c) || c === "\uFEFF") {
       k++;
       continue;
     }
@@ -212,8 +213,10 @@ export function transactionControl(sql: string): string | undefined {
     }
     // A number is one token, its dot and exponent included (`1.`, `2.5e-3`), so its dot qualifies no name.
     if (/[0-9]/.test(c) || (c === "." && /[0-9]/.test(sql[k + 1] ?? ""))) {
+      // A sign belongs to a decimal number's exponent alone, and only before its digits.
+      const decimal = !/^0[xX]/.test(sql.slice(k, k + 2));
       let end = k + 1;
-      while (end < sql.length && (/[0-9A-Za-z_.]/.test(sql[end]!) || (/[+-]/.test(sql[end]!) && /[eE]/.test(sql[end - 1]!)))) end++;
+      while (end < sql.length && (/[0-9A-Za-z_.]/.test(sql[end]!) || (decimal && /[+-]/.test(sql[end]!) && /[eE]/.test(sql[end - 1]!) && /[0-9]/.test(sql[end + 1] ?? "")))) end++;
       k = end;
       head.push("");
       afterEnd = afterDot = false;

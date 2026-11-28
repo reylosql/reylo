@@ -104,6 +104,18 @@
     {
       "sql": "create table cal (event text, begin text); commit;",
       "control": "commit"
+    },
+    {
+      "sql": "﻿begin; create table x (a);",
+      "control": "begin"
+    },
+    {
+      "sql": "create table a (x); ﻿commit;",
+      "control": "commit"
+    },
+    {
+      "sql": "create trigger t after insert on a begin select 0xE-case when 1 then 2 end; end; create table z (a);",
+      "control": null
     }
   ]
 }
