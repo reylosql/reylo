@@ -1285,29 +1285,30 @@ export function parseArray(text: string, element: (text: string) => unknown, del
  * its own by the dimensions its text had (`recordDepth`). An array a row value's field holds is held
  * to the field's kind, in a column of rows or an array of them, and named by its field.
  */
-export function withinDimensions(v: unknown, kind: Kind, column: string, path?: FieldPath): unknown {
+export function withinDimensions(v: unknown, kind: Kind, column: string, path?: FieldPath, jsonOnly = false): unknown {
   if (!kind.endsWith("[]")) {
     // Of two fields of one name the row holds the last one's value, and its type shows that field.
-    if (isRowKind(kind) && isObject(v)) for (const [name, inner] of lastOfEach(rowFields(kind))) if (holdsArray(inner)) withinDimensions(v[name], inner, column, { fields: [...(path?.fields ?? []), name], inArray: path?.inArray ?? false });
+    if (isRowKind(kind) && isObject(v)) for (const [name, inner] of lastOfEach(rowFields(kind))) if (holdsArray(inner)) withinDimensions(v[name], inner, column, { fields: [...(path?.fields ?? []), name], inArray: path?.inArray ?? false }, jsonOnly);
     return v;
   }
   if (!Array.isArray(v)) return v;
   const element = elementKind(kind);
   const declared = (kind.length - element.length) / 2;
   const whole = wholeArrayKind(element);
-  // Each row value the array holds, at every level, its fields held to their own kinds.
+  // Under allow_nested_arrays only an array of JSON is held to its dimensions: its type has no deeper form, since its value can't tell a level from a JSON array.
+  const holds = !jsonOnly || element === "json";
   const rows = (level: unknown[]): void => {
     if (!holdsArray(element)) return;
     const inside: FieldPath = { fields: path?.fields ?? [], inArray: true };
     const each = (at: unknown[]): void => {
-      for (const e of at) Array.isArray(e) ? each(e) : withinDimensions(e, element, column, inside);
+      for (const e of at) Array.isArray(e) ? each(e) : withinDimensions(e, element, column, inside, jsonOnly);
     };
     each(level);
   };
   // A whole array's own dimensions, from its text, whatever its elements are.
   const recorded = wholeDepths.get(v);
   if (recorded !== undefined && whole === undefined) {
-    if (recorded > declared) throw tooDeep(column, recorded, declared, path);
+    if (holds && recorded > declared) throw tooDeep(column, recorded, declared, path);
     rows(v);
     return v;
   }
@@ -1316,18 +1317,28 @@ export function withinDimensions(v: unknown, kind: Kind, column: string, path?: 
     // An array of whole arrays: only its text told its own levels from its elements' (a driver's
     // own arrays are taken at the levels declared); each element is held to its own.
     const depth = recorded ?? declared;
-    if (depth > declared) throw tooDeep(column, depth, declared, path);
+    if (holds && depth > declared) throw tooDeep(column, depth, declared, path);
     const each = (level: unknown[], at: number): void => {
-      for (const e of level) if (Array.isArray(e)) at > 1 ? each(e, at - 1) : withinDimensions(e, whole, column, path && { ...path, inArray: true });
+      for (const e of level) if (Array.isArray(e)) at > 1 ? each(e, at - 1) : withinDimensions(e, whole, column, path && { ...path, inArray: true }, jsonOnly);
     };
     each(v, declared);
     return v;
   }
   let depth = 0;
   for (let level: unknown = v; Array.isArray(level) && (depth === 0 || isLevel(element, level)); level = level.find((e) => e !== null)) depth++;
-  if (depth > declared) throw tooDeep(column, depth, declared, path);
+  if (holds && depth > declared) throw tooDeep(column, depth, declared, path);
   rows(v);
   return v;
+}
+
+const holdsJsonArrayCache = new Map<Kind, boolean>();
+/** Whether a value of `kind` is an array of JSON or holds one in a row value's field: what `withinDimensions` holds to its dimensions under allow_nested_arrays too. */
+export function holdsJsonArray(kind: Kind): boolean {
+  if (kind.endsWith("[]")) return elementKind(kind) === "json" || holdsJsonArray(elementKind(kind));
+  if (!isRowKind(kind)) return false;
+  let holds = holdsJsonArrayCache.get(kind);
+  if (holds === undefined) holdsJsonArrayCache.set(kind, (holds = rowFields(kind).some(([, inner]) => holdsJsonArray(inner))));
+  return holds;
 }
 
 /** The row value's fields that lead to an array, from the column, and whether an array of rows stands between, so that the field can't be read off the column alone. */
@@ -1413,7 +1424,8 @@ export function textDecoder(kind: Kind, delim = ","): Decoder {
   }
   if (kind.endsWith("[]")) {
     const element = textDecoder(elementKind(kind), delim);
-    if (wholeArrayKind(elementKind(kind)) !== undefined) return (x) => recordDepth(x, parseArray(x, element, delim));
+    // An array of whole arrays, or of JSON, which may be arrays themselves: only the text tells its levels from its elements'.
+    if (wholeArrayKind(elementKind(kind)) !== undefined || elementKind(kind) === "json") return (x) => recordDepth(x, parseArray(x, element, delim));
     return isRowKind(elementKind(kind)) && delim === "," ? rowsDecoder(element) : (x) => parseArray(x, element, delim);
   }
   if (isRowKind(kind)) return rowDecoder(kind);
@@ -1598,7 +1610,7 @@ export function coerce(kind: Kind, v: unknown, column: string, delim = ",", post
     const element = elementKind(kind);
     if (typeof v === "string") {
       const parsed = parseArray(v, (s) => coerce(element, s, column, ",", postgres), delim);
-      return wholeArrayKind(element) === undefined ? parsed : recordDepth(v, parsed);
+      return wholeArrayKind(element) === undefined && element !== "json" ? parsed : recordDepth(v, parsed);
     }
     if (Array.isArray(v)) {
       // A driver's own array, as PGlite's parser gives one, whose arrays are its levels: each whole

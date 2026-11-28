@@ -118,4 +118,7 @@ test("a Postgres array parameter is typed with one dimension by default, and at 
   // A JSON element may be an array itself, which a parameter writes whole, so a jsonb[] stays one level.
   const docs = { ...analysis, params: [{ name: "docs", nullable: false, type: { kind: "array", label: "_jsonb", element: { type: { kind: "json", label: "jsonb" } } } }] } as unknown as Analysis;
   assert.match(moduleTypes("", docs, "postgres", undefined, true, ".reylo.yaml", {}, true).params, /docs: JsonInput\[\]/);
+  // A column of it too: `.run()` holds an array of JSON to one dimension under the flag.
+  const column = { ...analysis, columns: [{ name: "docs", nullable: false, type: { kind: "array", label: "_jsonb", element: { nullable: true, type: { kind: "json", label: "jsonb" } } } }] } as unknown as Analysis;
+  assert.match(moduleTypes("", column, "postgres", undefined, true, ".reylo.yaml", {}, true).row, /docs: Json\[\]/);
 });

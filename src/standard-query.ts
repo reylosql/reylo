@@ -162,7 +162,7 @@ export function standardQuery<D extends Dialect, Output>(module: QueryModule<D>,
   const kept = new Set(lastOfEach((module.columns ?? []).map(([name], i) => [name, i] as const)).map(([, i]) => i));
   const decoders = (mapped ? module.columns : undefined)?.map(([name, kind, delim], i): ((v: never) => unknown) => {
     const at = module.nonFinite?.[i] ?? undefined;
-    const read = module.runtime.decoder(name, kind, delim, at, module.nestedArrays || !kept.has(i));
+    const read = module.runtime.decoder(name, kind, delim, at, module.nestedArrays, !kept.has(i));
     // Postgres's decoder reads a document's plan itself; on MySQL and SQLite it is read here, as `.run()` reads it.
     const decode = at === undefined || dialect === "postgres" ? read : (v: never) => numbersInJson(read(v), at, name);
     // A family the project file's `js.codecs` gives another type takes it here too, as in `.run()` (src/codecs.ts).

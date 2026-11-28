@@ -26,7 +26,7 @@
 // those oids are arrays, cached in a WeakMap keyed by the app's object. A row value the module knows
 // the fields of has the kind of its column whatever its oid: `record` is one oid for every shape of
 // row, and a built-in catalog table's row type is below 10000 too.
-import { civilFromDays, coerce, DecodeError, elementKind, holdsArray, isRowKind, numbersInJson, scalarKind, textDecoder, utf8, wholeArrayKind, withFraction, withinDimensions, type Columns, type Decoder, type JsonNumbers, type Kind } from "./values.ts";
+import { civilFromDays, coerce, DecodeError, elementKind, holdsArray, holdsJsonArray, isRowKind, numbersInJson, scalarKind, textDecoder, utf8, wholeArrayKind, withFraction, withinDimensions, type Columns, type Decoder, type JsonNumbers, type Kind } from "./values.ts";
 import { lastOfEach, namesInResult, rowOf, type RowBuilder } from "./row.ts";
 import { arrayLiteral, asByteaHex, EFFECT_SQL, isJsonValue, jsonElements, jsonText, postgresText, type AnyClient as Client, type Bound, type EffectSql, type Marks, type QueryModule, type Runtime } from "./execute.ts";
 import { readPostgresError } from "./query-error.ts";
@@ -1065,10 +1065,12 @@ async function runPostgres(c: Client, query: QueryModule<"postgres">, { text, va
 }
 
 /** A Postgres column's text as its kind, with the non-finite numbers inside its JSON as numbers and an array held to its dimensions, as `.run()` gives them (src/execute.ts). */
-function postgresDecoder(name: string, kind: Kind, delim: string | undefined, nonFinite: JsonNumbers | undefined, nestedArrays: boolean | undefined): (v: string) => unknown {
+function postgresDecoder(name: string, kind: Kind, delim: string | undefined, nonFinite: JsonNumbers | undefined, nestedArrays: boolean | undefined, dropped?: boolean): (v: string) => unknown {
   const decode = textDecoder(kind, delim);
   const numbers = nonFinite === undefined ? decode : (v: string) => numbersInJson(decode(v), nonFinite, name);
-  return holdsArray(kind) && !nestedArrays ? (v) => withinDimensions(numbers(v), kind, name) : numbers;
+  // A column a later one of its name replaces is never returned; an array of JSON has one dimension under allow_nested_arrays too.
+  if (dropped || !(nestedArrays ? holdsJsonArray(kind) : holdsArray(kind))) return numbers;
+  return (v) => withinDimensions(numbers(v), kind, name, undefined, nestedArrays === true);
 }
 
 /** Postgres's half of the run time (src/execute.ts, `Runtime`), which `definePostgresQuery` passes. */

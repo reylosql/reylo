@@ -173,6 +173,8 @@ function check(type: EngineType, written: string, v: unknown, dialect: Dialect, 
             const inner = type.element.type;
             return Array.isArray(checked) && inner.kind === "array" ? wholeText(inner, checked) : checked;
           }
+          // Postgres reads a JSON array inside a member as one more dimension of the array, so a JSON element may be anything but one.
+          if (dialect === "postgres" && kind === "json" && Array.isArray(e)) return at(`is a JSON array, which an element of ${written} can't be: Postgres reads it as one more dimension of the array. Pass the array as one value of a jsonb column, or wrap it in an object.`);
           const level = dialect === "postgres" && Array.isArray(e) && isLevel(kind, e);
           return check(level ? type : type.element.type, level ? written : element, e, dialect, at);
         });

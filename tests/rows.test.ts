@@ -193,6 +193,13 @@ test("an array member tells its levels from its elements as a parameter does, so
   assert.throws(() => prepareRows("tagged", tagged.rows, [{ tags: [["x"]] }], "postgres", true), /"tags" element 1 element 1 /);
 });
 
+test("a jsonb[] member's element is any JSON but an array, which Postgres would read as one more dimension", () => {
+  const docsOf = structured(false, [["docs", array({ kind: "json", label: "jsonb" } as EngineType), "jsonb[]", true, true]]);
+  assert.equal(renderParamType(docsOf.type, "postgres", false, docsOf.members), "readonly { docs?: Exclude<JsonInput, readonly unknown[]>[] | null }[]");
+  assert.deepEqual(prepareRows("docs", docsOf.rows, [{ docs: [{ a: [1] }, "x", null] }], "postgres", true).value, [{ docs: [{ a: [1] }, "x", null] }]);
+  assert.throws(() => prepareRows("docs", docsOf.rows, [{ docs: [[1, 2]] }], "postgres", true), /"docs" element 1 is a JSON array, which an element of jsonb\[\] can't be: Postgres reads it as one more dimension/);
+});
+
 test("an hstore member takes an object of its keys, written as the text hstore reads", () => {
   const settingsOf = structured(true, [["prefs", pg("hstore"), "hstore", false, false]]);
   const settings = settingsOf.rows;

@@ -1516,6 +1516,33 @@ test("postgres: an array a row value's field holds is held to one dimension on p
   }
 });
 
+test("postgres: a jsonb[] has one dimension on pg, postgres.js and PGlite, under allow_nested_arrays too, and what it returns goes back in unchanged", { skip: pgLive }, async () => {
+  const own = await postgresDatabase("reylo_execute_jsonb_arrays", "create table t (id int4 primary key, docs jsonb[]); insert into t values (1, '{\"[1,2]\",\"[3,4]\"}'), (2, '{{1,2},{3,4}}')");
+  const pg = driver("pg");
+  const client = new pg.Client(own.url);
+  await client.connect();
+  const { PGlite } = driver("@electric-sql/pglite");
+  const lite = new PGlite();
+  await lite.exec("create table t (id int4 primary key, docs jsonb[]); insert into t values (1, '{\"[1,2]\",\"[3,4]\"}'), (2, '{{1,2},{3,4}}')");
+  const docs = array({ kind: "json", label: "jsonb" } as EngineType, true, "_jsonb");
+  try {
+    for (const nestedArrays of [false, true]) {
+      const read = defineQuery({ dialect: "postgres", sql: "select docs from t where id = $1", params: ["id"], cardinality: "one", inputs: { id: { type: pgType("int4") } }, columns: [["docs", "json[]"]], nestedArrays });
+      const write = defineQuery({ dialect: "postgres", sql: "update t set docs = $2 where id = $1 returning docs::text as text", params: ["id", "docs"], cardinality: "one", inputs: { id: { type: pgType("int4") }, docs: { type: docs } }, columns: [["text", "text"]], nestedArrays });
+      for (const [name, c] of [["pg", client], ["postgres.js", own.sql], ["PGlite", lite]] as const) {
+        const one = (await read.run(c as never, { id: 1 })) as { docs: unknown };
+        assert.deepEqual(one.docs, [[1, 2], [3, 4]], name);
+        assert.deepEqual({ ...((await write.run(c as never, { id: 1, docs: one.docs })) as object) }, { text: '{"[1, 2]","[3, 4]"}' }, `${name}, written back`);
+        await assert.rejects(async () => read.run(c as never, { id: 2 }), /Column "docs" holds an array of 2 dimensions, and its type has one/, `${name}, nestedArrays ${nestedArrays}`);
+      }
+    }
+  } finally {
+    await client.end();
+    await lite.close();
+    await own.drop();
+  }
+});
+
 test("postgres: under allow_nested_arrays, an array of every element whose value is an array or an object comes back and goes back in at depths 1 to 3 on pg, postgres.js and PGlite", { skip: pgLive }, async () => {
   const own = await postgresDatabase("reylo_execute_nested_arrays");
   const pg = driver("pg");
