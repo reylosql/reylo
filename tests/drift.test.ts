@@ -79,6 +79,20 @@ test("postgres: after a migration adds a column under select *, a created type t
       await freshAlias.end();
       await freshAliasPg.end();
     }
+    // An array of two dimensions, whose oid is its element's array's: it fits its declaration, so it and
+    // an added enum of its name are both left, and neither takes the declared kind, nor teaches the
+    // client one for the enum.
+    await admin.unsafe(`create table things (id int primary key); insert into things values (1)`);
+    const ranked = await built("ranked", "select array[[1,2],[3,4]] as tags, things.* from things");
+    const mood = await built("mood", "select 'sad'::mood as m");
+    await admin.unsafe(`alter table things add column tags mood; update things set tags = 'sad'`);
+    const freshRank = postgres(own.url, { max: 1 });
+    try {
+      assert.deepEqual(await ranked.run(freshRank), [{ tags: "sad", id: 1 }]);
+      assert.deepEqual(await mood.run(freshRank), { m: "sad" });
+    } finally {
+      await freshRank.end();
+    }
     // A column renamed and another added under a name like it: the new one is no declared column.
     await admin.unsafe(`create table moods (id int primary key, mood_list mood[]); insert into moods values (1, '{sad}')`);
     const moods = await built("moods", "select * from moods");

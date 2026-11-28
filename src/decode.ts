@@ -227,7 +227,9 @@ function declaredColumn(fields: readonly Field[], columns: Columns | undefined, 
   // declared one is not the declaration's, and the one field left, if one is, is. Where more are
   // left, as two types the database created are, none takes a declared kind, and each is read by
   // its type, or as its text.
-  const fits = (f: Field, c: Columns[number]) => !(SCALAR_OIDS[f.oid] !== undefined || ARRAY_OIDS.has(f.oid)) || builtin(f.oid)?.kind === c[1];
+  // Postgres gives an array of every rank one oid, so an array's kind is compared without its rank.
+  const rankless = (kind: Kind) => kind.replace(/(?:\[\])+$/, "[]");
+  const fits = (f: Field, c: Columns[number]) => !(SCALAR_OIDS[f.oid] !== undefined || ARRAY_OIDS.has(f.oid)) || rankless(builtin(f.oid)?.kind ?? "") === rankless(c[1]);
   const chosen = new Map<string, number | null>();
   fields.forEach((f, i) => {
     const c = byName.get(f.name);
