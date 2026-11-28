@@ -46,3 +46,11 @@ create table rounding (
 insert into rounding (id, to_int, to_scale, past_float, through_real, single, below_single, kept_int, kept_float, kept_single, kept_real) values
   (1, 2.9, 2.58, 0.3, 0.1000000012, 0.1, 0.7, 2, 0.3, 0.5, 0.1),
   (2, null, null, null, null, null, null, null, null, null, null);
+-- Bounds a double reads as one number are compared digit by digit: a minimum above its maximum is a CHECK no value meets, and the tighter of two bounds is the larger.
+create table crossed (
+  id int primary key,
+  fraction numeric check (fraction >= 0.10000000000000000001 and fraction <= 0.1),
+  whole numeric check (whole between 9007199254740993 and 9007199254740992),
+  tight numeric check (tight >= 9007199254740992 and tight >= 9007199254740993)
+);
+insert into crossed values (1, null, null, 9007199254740993);
