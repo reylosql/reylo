@@ -2016,9 +2016,7 @@ fn on_tick(tick: &str, seconds: i64, fraction: &str) -> bool {
 
 /// The float a number's canonical text writes at a float type's widths, rounded to the nearest, ties
 /// to even, as what tells it from the others (`65504` and `65519` are one binary16), or why there
-/// is none: past the largest finite value. It rounds through a double, so a text halfway between
-/// two of a narrower float's values may round as the double nearest it does. A float wider than a
-/// double is told apart by its text.
+/// is none: past the largest finite value. A float wider than a double is told apart by its text.
 fn float_value(text: &str, f: &FloatType) -> Result<String, &'static str> {
     if f.exponent_bits > 11 || f.mantissa_bits > 52 {
         return Ok(text.to_string());
@@ -2029,7 +2027,18 @@ fn float_value(text: &str, f: &FloatType) -> Result<String, &'static str> {
     // The power of two of its leading bit, no lower than the least a normal value has.
     let leading = ((value.abs().to_bits() >> 52) & 0x7ff) as i32 - 1023;
     let step = two_to(leading.max(1 - highest) - mantissa);
-    let rounded = (value / step).round_ties_even() * step;
+    let scaled = value / step;
+    let mut whole = scaled.round_ties_even();
+    // Read as a double, a text just past a midpoint of the narrower float can land on it: the text
+    // against the midpoint's exact digits says which way it rounds.
+    if scaled.fract().abs() == 0.5 {
+        match number_order(text.trim_start_matches('-'), &format!("{:.1100}", value.abs())) {
+            Some(std::cmp::Ordering::Greater) => whole = scaled.trunc() + scaled.signum(),
+            Some(std::cmp::Ordering::Less) => whole = scaled.trunc(),
+            _ => {}
+        }
+    }
+    let rounded = whole * step;
     let largest = (2.0 - two_to(-mantissa)) * two_to(highest);
     if !rounded.is_finite() || rounded.abs() > largest {
         return Err("past its type's finite range");
@@ -2508,6 +2517,10 @@ mod tests {
         }
         refused(json!({"kind": "enum", "type": {"kind": "integer", "bits": 32}, "values": [{"value": "0"}, {"value": "-0"}]}));
         refused(json!({"kind": "enum", "type": {"kind": "float", "exponent_bits": 5, "mantissa_bits": 10}, "values": [{"value": "65504"}, {"value": "65519"}]}));
+        // A text just past a midpoint rounds away from it, though the double nearest it is the midpoint.
+        refused(json!({"kind": "enum", "type": {"kind": "float", "exponent_bits": 5, "mantissa_bits": 10}, "values": [{"value": "1.0009765625"}, {"value": "1.0004882812500001"}]}));
+        // And the midpoint itself rounds to even.
+        refused(json!({"kind": "enum", "type": {"kind": "float", "exponent_bits": 5, "mantissa_bits": 10}, "values": [{"value": "1"}, {"value": "1.00048828125"}]}));
         refused(json!({"kind": "enum", "type": {"kind": "time", "tick": "60"}, "values": [{"value": "12:00"}, {"value": "12:00:00"}]}));
         refused(json!({"kind": "enum", "type": {"kind": "uuid"}, "values": [{"value": "01890a5d-ac96-7ed0-8f4c-c3b8d0a1b2c3"}, {"value": "01890A5D-AC96-7ED0-8F4C-C3B8D0A1B2C3"}]}));
         refused(json!({"kind": "enum", "type": {"kind": "instant", "tick": "1/1000"}, "values": [{"value": "2026-01-01T00:00:00.5Z"}, {"value": "2026-01-01T00:00:00.500Z"}]}));
@@ -2539,6 +2552,7 @@ mod tests {
             (json!({"kind": "datetime", "tick": "1/300"}), json!(["2026-01-01T00:00:00.003"])),
             (json!({"kind": "float", "exponent_bits": 5, "mantissa_bits": 10}), json!(["65504", "0.1"])),
             (json!({"kind": "float", "exponent_bits": 5, "mantissa_bits": 10}), json!(["65519"])),
+            (json!({"kind": "float", "exponent_bits": 5, "mantissa_bits": 10}), json!(["1", "1.0004882812500001"])),
             // A time at a minute's precision is ISO 8601's extended form too.
             (json!({"kind": "time", "tick": "60"}), json!(["12:00", "12:01"])),
             (json!({"kind": "instant", "tick": "60"}), json!(["2026-01-01T10:00Z"])),
