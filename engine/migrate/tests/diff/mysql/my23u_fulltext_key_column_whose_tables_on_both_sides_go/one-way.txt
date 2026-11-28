@@ -1,0 +1,1 @@
+Dropping p loses the rows a_p references, so the way back can't add the key again.

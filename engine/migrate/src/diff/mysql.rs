@@ -1840,7 +1840,9 @@ impl Alterer for MysqlAlterer {
     fn finish(&self, statements: &mut Vec<String>) {
         // A table's held step joins the last drop of its own keys before it, which MySQL runs as one
         // statement, placed after every statement that takes a key on the column away (a key that
-        // references it, or that key's table), which the step waits for, and as early as that.
+        // references it, or that key's table), which the step waits for. The drop moves down past
+        // those alone: anything else between may wait for the drop (the table its key references,
+        // dropped), and then the two stay apart, as the plan has them.
         let unkeyed_by = self.unkeyed_by.borrow();
         for (here, table, columns) in self.late.borrow().iter() {
             let Some(at) = statements.iter().position(|s| s == here) else { continue };
@@ -1851,13 +1853,17 @@ impl Alterer for MysqlAlterer {
             let after = statements[key + 1..at].iter().rposition(|s| unkeys(s)).map(|k| key + 1 + k);
             let clauses = here[format!("alter table {table} ").len()..].to_string();
             let joined = format!("{}, {clauses}", statements[key]);
-            statements.remove(at);
             match after {
-                Some(last) => {
+                Some(last) if statements[key + 1..=last].iter().all(|s| unkeys(s)) => {
+                    statements.remove(at);
                     statements.insert(last + 1, joined);
                     statements.remove(key);
                 }
-                None => statements[key] = joined,
+                Some(_) => {}
+                None => {
+                    statements.remove(at);
+                    statements[key] = joined;
+                }
             }
         }
         // The NOT NULL steps no key holds back go first, before any key goes.
