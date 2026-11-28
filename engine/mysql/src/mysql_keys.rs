@@ -582,7 +582,8 @@ impl<'a> From<'a> {
         self.items
             .iter()
             .map(|it| match &it.source {
-                Source::Query(q, ctes, _) | Source::Lateral(q, ctes) => query_varies(q, ctes, self.keys, VIEW_DEPTH),
+                Source::Query(q, ctes, _) => !materialized(q) && query_varies(q, ctes, self.keys, VIEW_DEPTH),
+                Source::Lateral(q, ctes) => query_varies(q, ctes, self.keys, VIEW_DEPTH),
                 _ => false,
             })
             .collect()
@@ -740,8 +741,7 @@ fn calls_unvouched(e: &Expr) -> bool {
                         ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Wildcard) => false,
                         _ => true,
                     }),
-                    // A subquery in a select list keeps the server from merging the derived table.
-                    ast::FunctionArguments::Subquery(_) => false,
+                    ast::FunctionArguments::Subquery(q) => lists_unvouched(q),
                 }
         }
         Expr::Nested(inner)
@@ -771,8 +771,30 @@ fn calls_unvouched(e: &Expr) -> bool {
         Expr::Interval(i) => calls_unvouched(&i.value),
         Expr::MemberOf(m) => calls_unvouched(&m.value) || calls_unvouched(&m.array),
         Expr::Tuple(items) => items.iter().any(calls_unvouched),
-        // A subquery keeps the server from merging the derived table, which it computes once.
-        Expr::Subquery(_) | Expr::Exists { .. } | Expr::InSubquery { .. } | Expr::MatchAgainst { .. } => false,
+        // The server folds a subquery of no table into the query around it (`(select pick())` is
+        // `pick()`, `pick() in (select 1)` is `pick() = 1`), and then merges as if it were not there.
+        Expr::Subquery(q) | Expr::Exists { subquery: q, .. } => lists_unvouched(q),
+        Expr::InSubquery { expr, subquery, .. } => calls_unvouched(expr) || lists_unvouched(subquery),
+        Expr::MatchAgainst { .. } => false,
+        _ => true,
+    }
+}
+
+/// Whether the server computes a derived table, WITH query or view once and stores its rows,
+/// never merging it into the query that reads it, so that every row reads one value of each of its
+/// columns: one with a LIMIT, a set operation, DISTINCT, GROUP BY, HAVING or an aggregate, or no
+/// table (https://dev.mysql.com/doc/refman/8.4/en/derived-table-optimization.html). A LATERAL one
+/// is computed again for each row it is joined to.
+fn materialized(q: &Query) -> bool {
+    if q.limit_clause.is_some() {
+        return true;
+    }
+    match q.body.as_ref() {
+        SetExpr::Query(inner) => materialized(inner),
+        SetExpr::Select(s) => {
+            let grouped = !matches!(&s.group_by, GroupByExpr::Expressions(keys, modifiers) if keys.is_empty() && modifiers.is_empty());
+            s.from.is_empty() || s.distinct.is_some() || grouped || s.having.is_some() || crate::mysql::lone_aggregate(s)
+        }
         _ => true,
     }
 }
@@ -780,6 +802,9 @@ fn calls_unvouched(e: &Expr) -> bool {
 /// Whether a query, or a derived table or WITH query inside it, lists a value [`calls_unvouched`]
 /// makes: the server may merge each level into the one around it.
 fn lists_unvouched(q: &Query) -> bool {
+    if let SetExpr::Query(inner) = q.body.as_ref() {
+        return lists_unvouched(inner);
+    }
     fn factor(f: &TableFactor) -> bool {
         match f {
             TableFactor::Derived { subquery, .. } => lists_unvouched(subquery),

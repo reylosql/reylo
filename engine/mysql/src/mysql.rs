@@ -3859,8 +3859,18 @@ mod tests {
             "select distinct x.id from users u, (select y.id from (select pick() as id from posts where posts.id = 1) y) x",
             "select distinct x.id from users u, (with c as (select pick() as id from posts where posts.id = 1) select id from c) x",
             "select distinct x.id from users u, (select pick() as id from posts where posts.id = 1) x where x.id = 1",
+            "select distinct x.v from users u, ((select id, pick() as v from posts)) x where x.id = 1",
+            "select distinct x.v from users u, (select (select pick()) as v from posts where id = 1) x",
+            "select distinct x.v from users u, (select pick() in (select 1) as v from posts where id = 1) x",
         ] {
             assert_eq!(rows(sql), "many", "{sql}");
+        }
+        // The server computes a derived table with a LIMIT, DISTINCT, GROUP BY or an aggregate once.
+        for sql in [
+            "select distinct x.v from users u, (select pick() as v from posts limit 1) x",
+            "select distinct x.v from users u, (select max(pick()) as v from posts) x",
+        ] {
+            assert_eq!(rows(sql), "at_most_one", "{sql}");
         }
         // A built-in, a column and an aggregate give one value.
         for sql in [
