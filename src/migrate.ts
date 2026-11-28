@@ -37,13 +37,13 @@ export type Migration = { readonly name: string; readonly sql: string };
 const HISTORY = "__reylo_migrations";
 
 /** What runs: a script, a query whose rows come back, one statement with its values, or a transaction's ends. */
-type Step = { exec: string } | { all: string } | { run: string; values: unknown[] } | "begin" | "commit";
+type Step = { exec: string } | { all: string; values?: unknown[] } | { run: string; values: unknown[] } | "begin" | "commit";
 
-/** The database the error messages name, and where its migrations came from. */
-type Words = { database: string; source: string; sourceOrder: string; restore: string };
+/** The database the error messages name, where its migrations came from, and what to do about one it ran that they lack. */
+type Words = { database: string; any: string; source: string; sourceOrder: string; restore: string };
 
-const OBJECT: Words = { database: "this Durable Object", source: "this build", sourceOrder: "this build's order", restore: "deploy a build whose migrations include it" };
-const CONNECTION: Words = { database: "this database", source: "the project", sourceOrder: "the lock's order", restore: "put it back in the project's migrations" };
+const OBJECT: Words = { database: "this Durable Object", any: "an object", source: "this build", sourceOrder: "this build's order", restore: "deploy a build whose migrations include it" };
+const CONNECTION: Words = { database: "this database", any: "a database", source: "the project", sourceOrder: "the lock's order", restore: "put it back in the project's migrations" };
 
 /**
  * The steps of a deploy's last step on SQLite: the history table made, the history held against
@@ -53,26 +53,36 @@ const CONNECTION: Words = { database: "this database", source: "the project", so
 function* steps(list: readonly Migration[], words: Words): Generator<Step, string[], unknown[] | undefined> {
   yield { exec: `create table if not exists ${HISTORY} (name text primary key, sql text not null, applied_at text, fingerprint text, catalog text)` };
   // In the order they ran, as reylo migrate reads its history (`read_history`).
-  const ran = ((yield { all: `select name, sql from ${HISTORY} order by applied_at is null, applied_at, rowid, case when name = 'init.sql' then '' else name end` }) ?? []) as { name: string; sql: string }[];
+  const ran = yield { all: `select name, sql from ${HISTORY} order by applied_at is null, applied_at, rowid, case when name = 'init.sql' then '' else name end` };
+  // A client whose statements answer some other way, as D1's `{ results }` or sqlite3's callbacks, runs nothing.
+  if (!Array.isArray(ran)) throw new TypeError("reylo: migrate takes a SQLite connection whose prepare(sql).all() gives its rows, as Turso's @tursodatabase/database, better-sqlite3, node:sqlite and bun:sqlite do");
   const listed = new Map(list.map((m) => [m.name, m]));
-  ran.forEach((row, i) => {
+  (ran as { name: string; sql: string }[]).forEach((row, i) => {
     const m = listed.get(row.name);
     if (!m) throw new Error(`reylo: ${words.database} ran the migration ${row.name}, which ${words.source} doesn't have: ${words.restore}`);
     // As the lock compares them: comments, spacing and line endings aside (src/migration-text.ts).
-    if (!sameMigration(m.sql, row.sql)) throw new Error(`reylo: the migration ${row.name} isn't the text ${words.database} ran: put the change in a new migration instead of editing one a database may have run`);
+    if (!sameMigration(m.sql, row.sql)) throw new Error(`reylo: the migration ${row.name} isn't the text ${words.database} ran: put the change in a new migration instead of editing one ${words.any} may have run`);
     if (list[i]?.name !== row.name) throw new Error(`reylo: ${words.database} ran ${row.name} where ${words.sourceOrder} has ${list[i]?.name ?? "nothing"} first: migrations run in the lock's order, so add a new one after those that ran`);
   });
-  const done = new Set(ran.map((r) => r.name));
+  const done = new Set((ran as { name: string }[]).map((r) => r.name));
   const applied: string[] = [];
   for (const m of list) {
     if (done.has(m.name)) continue;
     try {
       yield "begin";
+    } catch (e) {
+      throw new Error(`reylo: the migration ${m.name} couldn't begin its transaction on ${words.database}, and nothing of it ran: ${(e as Error).message}`, { cause: e });
+    }
+    try {
+      // Another start of the app, on the same file, may have run it since the history was read.
+      if (((yield { all: `select 1 from ${HISTORY} where name = ?`, values: [m.name] }) ?? []).length) {
+        yield "commit";
+        continue;
+      }
       yield { exec: m.sql };
       // As reylo migrate checks a SQLite migration's foreign keys before it commits (`run` in
       // engine/migrate/src/commands.rs): a deferred one it broke fails here, rolling back the
-      // migration alone, rather than at the object's commit, which resets the object. Turso's
-      // engine answers this pragma with no rows, and fails the commit instead.
+      // migration alone, rather than at the object's commit, which resets the object.
       const broken = ((yield { all: "pragma foreign_key_check" }) ?? []).length;
       if (broken) throw new Error(`${broken} rows break a foreign key after this migration`);
       // The check read every key and found each whole, so what SQLite still counts as deferred
@@ -107,7 +117,10 @@ export function runMigrations(storage: MigrationStorage, list: readonly Migratio
   const answer = (step: Step): IteratorResult<Step, string[]> => {
     let rows: unknown[] | undefined;
     try {
-      rows = typeof step === "string" ? undefined : "run" in step ? (sql.exec(step.run, ...step.values), undefined) : sql.exec("exec" in step ? step.exec : step.all).toArray();
+      if (typeof step === "string") rows = undefined;
+      else if ("exec" in step) sql.exec(step.exec);
+      else if ("all" in step) rows = sql.exec(step.all, ...(step.values ?? [])).toArray();
+      else sql.exec(step.run, ...step.values);
     } catch (e) {
       return run.throw(e);
     }
@@ -119,46 +132,73 @@ export function runMigrations(storage: MigrationStorage, list: readonly Migratio
       continue;
     }
     // A Durable Object refuses `begin`: a transaction is a closure, which rolls back where it throws.
-    next = storage.transactionSync(() => {
-      let inside = run.next();
-      while (!inside.done && inside.value !== "commit") inside = answer(inside.value);
-      return inside;
-    });
-    if (!next.done) next = run.next();
+    // A commit that fails goes back into the steps, which wait at their `commit`, to be named.
+    let last: IteratorResult<Step, string[]>;
+    try {
+      last = storage.transactionSync(() => {
+        let inside = run.next();
+        while (!inside.done && inside.value !== "commit") inside = answer(inside.value);
+        return inside;
+      });
+    } catch (e) {
+      next = run.throw(e);
+      continue;
+    }
+    next = last.done ? last : run.next();
   }
   return next.value;
 }
 
-/** Runs `list` on an app's own SQLite connection, as `runMigrations` does on a Durable Object, each migration between its own `begin` and `commit`. */
+/**
+ * Runs `list` on an app's own SQLite connection, as `runMigrations` does on a Durable Object, each
+ * migration between its own `begin` and `commit`. As reylo migrate runs one on SQLite (`run_once` in
+ * engine/migrate/src/commands.rs), foreign keys are off while it runs, and back on after, so that a
+ * rebuilt table's drop cascades to no row of the tables that reference it; the check before the
+ * commit holds every key instead.
+ */
 export async function runMigrationsOn(db: MigrationConnection, list: readonly Migration[]): Promise<string[]> {
   const run = steps(list, CONNECTION);
   const statement = async (sql: string) => (await db.prepare(sql)) as { all(...values: unknown[]): unknown; run(...values: unknown[]): unknown };
+  const rows = async (sql: string, values: unknown[] = []) => (await (await statement(sql)).all(...values)) as unknown[];
   let open = false;
+  let keys = false;
+  const restore = async () => {
+    if (keys) await db.exec("pragma foreign_keys = on");
+    keys = false;
+  };
   let next = run.next();
   try {
     while (!next.done) {
       const step = next.value;
-      let rows: unknown[] | undefined;
+      let answer: unknown[] | undefined;
       try {
         if (step === "begin") {
+          // Outside a transaction, where SQLite takes the pragma.
+          const [row] = (await rows("pragma foreign_keys")) as Record<string, unknown>[];
+          if (Number(row?.foreign_keys) === 1) {
+            await db.exec("pragma foreign_keys = off");
+            keys = true;
+          }
           await db.exec("begin immediate");
           open = true;
         } else if (step === "commit") {
           await db.exec("commit");
           open = false;
+          await restore();
         } else if ("exec" in step) await db.exec(step.exec);
-        else if ("all" in step) rows = (await (await statement(step.all)).all()) as unknown[];
+        else if ("all" in step) answer = await rows(step.all, step.values);
         else await (await statement(step.run)).run(...step.values);
       } catch (e) {
         next = run.throw(e);
         continue;
       }
-      next = run.next(rows);
+      next = run.next(answer);
     }
   } catch (e) {
     // A commit that failed, as on a deferred foreign key, leaves its transaction open: it rolls back
     // here. A rollback that fails had none to roll back, as after an error SQLite rolled back itself.
     if (open) await Promise.resolve().then(() => db.exec("rollback")).catch(() => {});
+    await restore();
     throw e;
   }
   return next.value;
@@ -215,5 +255,7 @@ export function migrate(arg?: MigrationStorage | MigrationConnection | MigrateOp
   }
   // A promise that rejects, never a throw, where the build-time half can't be loaded.
   if (isConnection(arg)) return Promise.resolve().then(projectMigrations).then((list) => runMigrationsOn(arg, list));
+  // Anything else but options, as a client with no exec or prepare, would deploy to the project's database instead.
+  if (arg !== undefined && (typeof arg !== "object" || arg === null || Object.keys(arg).some((key) => key !== "url"))) return Promise.reject(new TypeError("reylo: migrate takes a Durable Object's ctx.storage, an app's own SQLite connection with exec(sql) and prepare(sql), as Turso's @tursodatabase/database gives, or { url }"));
   return Promise.resolve(arg ?? {}).then((options) => buildTime().migrate(options));
 }

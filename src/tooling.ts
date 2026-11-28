@@ -10,7 +10,11 @@ import { embeddedModule, projectMigrations } from "./embedded-module.ts";
 import { migrate } from "./migrate-deploy.ts";
 import { analyze } from "./analyze-api.ts";
 
-/** The project's migrations, from the working directory, as `migrate()` deploys from it. */
-const migrations = () => projectMigrations(process.cwd());
+/** The project's migrations, from the working directory, as `migrate()` deploys from it; a project with none there is refused, since the app may have started in another directory. */
+async function migrations(): Promise<{ list?: { name: string; sql: string }[]; error?: string }> {
+  const { list, error } = await projectMigrations(process.cwd());
+  if (list === undefined && error === undefined) return { error: `no migrations directory in the project at ${process.cwd()}: start the app in the project's directory, with its migrations beside it` };
+  return error !== undefined ? { error } : { list: list ?? [] };
+}
 
 export default { analyze, migrate, migrations, sqlModule, embeddedModule, releaseConnections, mapperHandlers } satisfies Tooling;

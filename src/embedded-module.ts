@@ -18,7 +18,7 @@ import { dirname, join, relative } from "node:path";
 import { anyEngine } from "./engine.ts";
 import { resolveProject } from "./project.ts";
 import type { Migration } from "./migrate.ts";
-import { canonical, normalized } from "./migration-text.ts";
+import { canonical, normalized, transactionControl } from "./migration-text.ts";
 
 /** Each part after its length, the first 4 bytes of the SHA-256 in hex, as `digest` writes a lock's checksums (engine/migrate/src/lock.rs). */
 function digest(parts: string[]): string {
@@ -207,6 +207,11 @@ export async function projectMigrations(root: string): Promise<{ list?: Migratio
     names = migrations;
   }
   const list = names.map((name) => ({ name, sql: readFileSync(join(migrationsDir, name), "utf8") }));
+  // As a deploy refuses a migration that can't run atomically (`atomicity_problem` in engine/migrate/src/sql.rs), on SQLite, where the Durable Object and an app's own connection run them.
+  for (const m of list) {
+    const control = m.name === "init.sql" ? undefined : transactionControl(m.sql);
+    if (control) return { error: `Migration ${m.name} can't run atomically: it has its own ${control}, and Reylo runs each migration in a transaction of its own, so take it out`, watched: [...watched, ...names.map((n) => join(migrationsDir, n))] };
+  }
   return { list, watched: [...watched, ...names.map((n) => join(migrationsDir, n))] };
 }
 

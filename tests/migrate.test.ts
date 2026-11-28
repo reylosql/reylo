@@ -146,21 +146,54 @@ test("migrate(db): a migration that fails rolls back with its row and names itse
   const POSTS = { name: "20261107120000_posts.sql", sql: "create table posts (id integer primary key, user_id integer references users (id) deferrable initially deferred); insert into users (name) values ('ada'); insert into posts (user_id) values (1);" };
   const ORPHANS = { name: "20261108120000_orphans.sql", sql: "delete from users;" };
   const turso = await driver("@tursodatabase/database").connect(":memory:");
-  for (const db of [turso, new DatabaseSync(":memory:")] as MigrationConnection[]) {
+  const better = new (driver("better-sqlite3"))(":memory:");
+  for (const db of [turso, better, new DatabaseSync(":memory:")] as MigrationConnection[]) {
     await assert.rejects(runMigrationsOn(db, [USERS, broken]), /^Error: reylo: the migration 20261107120000_broken\.sql failed on this database, and rolled back: .*nowhere/);
     assert.deepEqual(await names(db), [USERS.name]);
     const columns = ((await (await (db.prepare("select name from pragma_table_info('users')") as any)).all()) as { name: string }[]).map((r) => r.name);
     assert.deepEqual(columns, ["id", "name"]);
     await db.exec("pragma foreign_keys = on");
     assert.deepEqual(await runMigrationsOn(db, [USERS, POSTS]), [POSTS.name]);
-    // SQLite's foreign_key_check finds the orphan; Turso's engine answers the check with no rows and fails the commit.
-    await assert.rejects(runMigrationsOn(db, [USERS, POSTS, ORPHANS]), /^Error: reylo: the migration 20261108120000_orphans\.sql failed on this database, and rolled back: .*(1 rows break a foreign key|FOREIGN KEY constraint failed)/);
+    // Turso's engine answers foreign_key_check with no rows before 0.9, so only SQLite's clients find the orphan.
+    if (db === turso) continue;
+    await assert.rejects(runMigrationsOn(db, [USERS, POSTS, ORPHANS]), /^Error: reylo: the migration 20261108120000_orphans\.sql failed on this database, and rolled back: 1 rows break a foreign key after this migration$/);
     assert.deepEqual(await names(db), [USERS.name, POSTS.name]);
     const users = (await (await (db.prepare("select count(*) as n from users") as any)).all()) as { n: number }[];
     assert.equal(Number(users[0]!.n), 1);
-    // The connection is out of the failed migration's transaction, and takes the next.
+    // The connection is out of the failed migration's transaction, takes the next, and has its foreign keys back on.
     assert.deepEqual(await runMigrationsOn(db, [USERS, POSTS, BIO]), [BIO.name]);
+    const keys = (await (await (db.prepare("pragma foreign_keys") as any)).all()) as { foreign_keys: number }[];
+    assert.equal(Number(keys[0]!.foreign_keys), 1);
   }
+});
+
+test("migrate(db) turns foreign keys off while a migration runs, so a rebuilt table's drop cascades to no row", async () => {
+  const PARENT = { name: "20261107120000_posts.sql", sql: "create table posts (id integer primary key, user_id integer references users (id) on delete cascade); insert into users (name) values ('ada'); insert into posts (user_id) values (1);" };
+  // SQLite's own recipe for a change alter table can't make: a new table, its rows copied, the old one dropped.
+  const REBUILD = { name: "20261108120000_rebuild.sql", sql: "create table users_new (id integer primary key, name text not null check (length(name) > 0)); insert into users_new select * from users; drop table users; alter table users_new rename to users;" };
+  for (const db of [new (driver("better-sqlite3"))(":memory:"), new DatabaseSync(":memory:")] as MigrationConnection[]) {
+    await db.exec("pragma foreign_keys = on");
+    assert.deepEqual(await runMigrationsOn(db, [USERS, PARENT, REBUILD]), [USERS.name, PARENT.name, REBUILD.name]);
+    const posts = (await (await (db.prepare("select count(*) as n from posts") as any)).all()) as { n: number }[];
+    assert.equal(Number(posts[0]!.n), 1);
+  }
+});
+
+test("migrate(db) takes a migration another start of the app ran after it read the history as run", async () => {
+  const db = new DatabaseSync(":memory:");
+  await runMigrationsOn(db, [USERS]);
+  // As a second process sees it: the history read before the first committed BIO, the row there by its turn.
+  let reads = 0;
+  const racing: MigrationConnection = {
+    exec: (sql: string) => db.exec(sql),
+    prepare(sql: string) {
+      const statement = db.prepare(sql);
+      if (!sql.startsWith("select name, sql from") || reads++) return statement;
+      return { all: () => { const rows = statement.all(); runMigrations(storage(db), [USERS, BIO]); return rows; }, run: statement.run.bind(statement) };
+    },
+  };
+  assert.deepEqual(await runMigrationsOn(racing, [USERS, BIO]), []);
+  assert.deepEqual(await names(db), [USERS.name, BIO.name]);
 });
 
 test("migrate(db) refuses a history the project's migrations don't continue, running nothing", async () => {
@@ -178,4 +211,10 @@ test("migrate(db) on Turso's engine runs its own SQL, a full-text index included
   await db.exec("insert into users (name) values ('kiwi venture'), ('other')");
   const found = (await (await db.prepare("select name from users where fts_match(name, 'kiwi')")).all()) as { name: string }[];
   assert.deepEqual(found.map((r) => r.name), ["kiwi venture"]);
+});
+
+test("migrate refuses a client it can't run migrations on, rather than deploying to the project's database", async () => {
+  // As @libsql/client's, which has execute() and no prepare().
+  const client = { execute: async () => ({ rows: [] }), close() {} };
+  await assert.rejects((migrate as (arg: unknown) => Promise<string[]>)(client), /^TypeError: reylo: migrate takes a Durable Object's ctx\.storage, an app's own SQLite connection/);
 });

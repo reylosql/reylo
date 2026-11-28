@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { canonical, normalized, sameMigration } from "../src/migration-text.ts";
+import { canonical, normalized, sameMigration, transactionControl } from "../src/migration-text.ts";
 
 // The port of `canonical` in engine/migrate/src/lock.rs: the Rust tests' cases, each read the same.
 test("comments and spacing are no edit, as the lock reads them", () => {
@@ -56,4 +56,20 @@ test("a lone carriage return and a dollar quote's tag read as Postgres reads the
   assert.ok(!sameMigration(sqliteDefault("one"), sqliteDefault("two")));
   assert.ok(!sameMigration("create table t ([a'b] text default 'x -- y')", "create table t ([a'b] text default 'x -- z')"));
   assert.equal(canonical("select data['key'],  arr[1] -- c\nfrom t"), "select data['key'], arr[1] from t");
+});
+
+// SQLite's statements that control the transaction, as `atomicity_problem` in engine/migrate/src/sql.rs finds them.
+test("a SQLite migration's own begin, commit, end, rollback, savepoint or release is found, outside quotes, comments and a trigger's body", () => {
+  assert.equal(transactionControl("update a set b = 1; commit; insert into c values (1);"), "commit");
+  assert.equal(transactionControl("BEGIN; create table x (a);"), "begin");
+  assert.equal(transactionControl("create table \"end\" (a); savepoint s;"), "savepoint");
+  assert.equal(transactionControl("create trigger t after insert on x begin select 1; end; end;"), "end");
+  for (const sql of [
+    "create trigger t after insert on x begin update y set a = case when 1 then 2 end; end; create table z (a);",
+    "create temp trigger t after insert on x begin select raise(rollback, 'no'); end;",
+    "create table x (a); -- commit\nselect 1;",
+    "/* rollback */ create table x (a);",
+    "insert into t values ('; commit;'), ('it''s; end');",
+    "select [begin; end] from t;",
+  ]) assert.equal(transactionControl(sql), undefined, sql);
 });

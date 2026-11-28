@@ -161,3 +161,56 @@ function quotedEnd(b: string[], start: number, q: string, backslash: boolean): n
 
 /** Whether two texts of a migration are the same migration, as the lock's checksum compares them. */
 export const sameMigration = (a: string, b: string): boolean => canonical(normalized(a)) === canonical(normalized(b));
+
+// The statements of SQLite's that end or open a transaction, which a migration can't hold of its own.
+const CONTROL = new Set(["BEGIN", "COMMIT", "END", "ROLLBACK", "SAVEPOINT", "RELEASE"]);
+
+/**
+ * The first statement of a SQLite migration that controls the transaction (`begin`, `commit`,
+ * `end`, `rollback`, `savepoint`, `release`), lowercase, as `atomicity_problem` refuses one
+ * (engine/migrate/src/sql.rs), or none. Each migration runs in a transaction of its own, so one that
+ * commits partway would leave what ran before its commit in place, with no row in the history to say
+ * so. A trigger's body, from its `begin` to the `end` that closes it, is one statement.
+ */
+export function transactionControl(sql: string): string | undefined {
+  const text = canonical(sql);
+  let words: string[] = [];
+  let trigger = false;
+  let depth = 0;
+  let k = 0;
+  while (k < text.length) {
+    const c = text[k]!;
+    if (c === "'" || c === '"' || c === "`" || c === "[") {
+      const close = c === "[" ? "]" : c;
+      // A quote doubled inside its own quotes is one character of the text.
+      let end = k + 1;
+      for (; end < text.length; end++) {
+        if (text[end] !== close) continue;
+        if (close !== "]" && text[end + 1] === close) end++;
+        else break;
+      }
+      k = end + 1;
+      words.push("");
+      continue;
+    }
+    if (/[A-Za-z_]/.test(c)) {
+      let end = k;
+      while (end < text.length && /[A-Za-z0-9_$]/.test(text[end]!)) end++;
+      const word = text.slice(k, end).toUpperCase();
+      k = end;
+      if (words.length === 0 && CONTROL.has(word)) return word.toLowerCase();
+      words.push(word);
+      if (word === "TRIGGER" && words[0] === "CREATE" && words.length <= 3) trigger = true;
+      if (trigger && (word === "BEGIN" || word === "CASE")) depth++;
+      else if (trigger && word === "END") depth--;
+      continue;
+    }
+    if (c === ";" && depth <= 0) {
+      words = [];
+      trigger = false;
+      depth = 0;
+    }
+    k++;
+  }
+  return undefined;
+}
