@@ -641,7 +641,7 @@ test("on a server, a URL that fails reads that server's own entry and no other's
     assert.ok(bare.ok);
     assert.deepEqual([bare.source, bare.entry], ["cache", typed.entry]);
     assert.match(bare.unverified ?? "", /^no database URL is set; building from reylo\/\.cache\/, analyzed \d{4}-\d\d-\d\d$/);
-    // A build step prints the line once a run, however many modules it builds, and the type check's hover carries it.
+    // A build step prints the line once a run, however many modules it builds, and the type check's hover carries it. The process's own PG variables, as a CI runner may set, are named after the file.
     const warned: string[] = [];
     t.mock.method(console, "warn", (line: string) => void warned.push(line));
     writeFileSync(join(root, ".env"), `DATABASE_URL=${through.href}\n`);
@@ -654,13 +654,13 @@ test("on a server, a URL that fails reads that server's own entry and no other's
       await sqlModule(join(root, "b.sql"), statement);
       const declared = (await mapper.transform!({ fileName: join(root, "a.sql"), content: statement, projectHandle })) as { text: string } & Reported;
       assert.deepEqual(reportedDiagnostics(declared), []);
-      assert.match(declared.text, /\n \* reylo: cannot connect to the database at 127\.0\.0\.1:\d+\/reylo_offline_\d+ \(DATABASE_URL in \.env\): .+; building from reylo\/\.cache\/, analyzed \d{4}-\d\d-\d\d\n \*\/\ndeclare const query: /);
+      assert.match(declared.text, /\n \* reylo: cannot connect to the database at 127\.0\.0\.1:\d+\/reylo_offline_\d+ \(DATABASE_URL in \.env(?:, PG[A-Z]+ in the environment)*\): .+; building from reylo\/\.cache\/, analyzed \d{4}-\d\d-\d\d\n \*\/\ndeclare const query: /);
     } finally {
       await mapper.closeProject!({ projectHandle });
       for (const session of Session.opened()) await session.close();
     }
     assert.equal(warned.length, 1);
-    assert.match(warned[0]!, /^reylo: cannot connect to the database at 127\.0\.0\.1:\d+\/reylo_offline_\d+ \(DATABASE_URL in \.env\): .+; building from reylo\/\.cache\/, analyzed \d{4}-\d\d-\d\d$/);
+    assert.match(warned[0]!, /^reylo: cannot connect to the database at 127\.0\.0\.1:\d+\/reylo_offline_\d+ \(DATABASE_URL in \.env(?:, PG[A-Z]+ in the environment)*\): .+; building from reylo\/\.cache\/, analyzed \d{4}-\d\d-\d\d$/);
   } finally {
     proxy.close();
     await drop();
