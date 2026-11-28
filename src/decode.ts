@@ -190,17 +190,23 @@ async function fieldDecoders(fields: Field[], columns: Columns | undefined, key:
   const declared = declaredColumn(fields, columns, rename);
   const created = fields.map((f, i) => [f, i] as const).filter(([f]) => f.oid >= FIRST_USER_OID);
   const known = learnedOf(key);
-  for (const [f, i] of created) {
-    const column = declared(f, i);
-    if (column && !known.has(f.oid)) known.set(f.oid, { kind: column[1], delim: column[2] ?? "," });
+  // Where the result has the module's columns, each created type's kind is learned for the client;
+  // a kind matched by name after a migration holds for this result alone, so that a wrong match
+  // never reaches another query.
+  const positional = columns !== undefined && columns.length === fields.length;
+  if (positional) {
+    for (const [f, i] of created) {
+      const column = declared(f, i);
+      if (column && !known.has(f.oid)) known.set(f.oid, { kind: column[1], delim: column[2] ?? "," });
+    }
   }
   // A created type no column of the module's declares (one a migration added under `select *`), or
   // any for a query defined by hand with no columns: the catalog says, where `defineQuery` installed it.
-  const unmet = created.filter(([f]) => !known.has(f.oid)).map(([f]) => f.oid);
+  const unmet = created.filter(([f, i]) => !known.has(f.oid) && (positional || !declared(f, i))).map(([f]) => f.oid);
   if (unmet.length) await catalog?.(key, unmet, load);
   return fields.map((f, i) => {
     const column = declared(f, i);
-    if (column && byModule(column[1])) return textDecoder(column[1], column[2]);
+    if (column && (byModule(column[1]) || (f.oid >= FIRST_USER_OID && !known.has(f.oid)))) return textDecoder(column[1], column[2]);
     const b = builtinDecoder(f.oid);
     if (b) return b;
     const k = known.get(f.oid) ?? { kind: "text", delim: "," };
@@ -223,20 +229,11 @@ function declaredColumn(fields: readonly Field[], columns: Columns | undefined, 
   if (columns.length === fields.length) return (_f, i) => columns[i];
   const byName = new Map(lastOfEach(columns).map((c) => [rename ? rename(c[0]) : c[0], c] as const));
   // A name more than one field has (a column a migration added under a name the statement gives
-  // another, or one a renaming makes the same): a field of a built-in type whose kind is not the
-  // declared one is not the declaration's, and the one field left, if one is, is. Where more are
-  // left, as two types the database created are, none takes a declared kind, and each is read by
-  // its type, or as its text.
-  // Postgres gives an array of every rank one oid, so an array's kind is compared without its rank.
-  const rankless = (kind: Kind) => kind.replace(/(?:\[\])+$/, "[]");
-  const fits = (f: Field, c: Columns[number]) => !(SCALAR_OIDS[f.oid] !== undefined || ARRAY_OIDS.has(f.oid)) || rankless(builtin(f.oid)?.kind ?? "") === rankless(c[1]);
-  const chosen = new Map<string, number | null>();
-  fields.forEach((f, i) => {
-    const c = byName.get(f.name);
-    if (c === undefined || !fits(f, c)) return;
-    chosen.set(f.name, chosen.has(f.name) ? null : i);
-  });
-  return (f, i) => (chosen.get(f.name) === i ? byName.get(f.name) : undefined);
+  // another, or one a renaming makes the same) says nothing of which field a declaration is: none of
+  // them takes a declared kind, and each is read by its type, or as its text, never by a guess.
+  const count = new Map<string, number>();
+  for (const f of fields) count.set(f.name, (count.get(f.name) ?? 0) + 1);
+  return (f) => (count.get(f.name) === 1 ? byName.get(f.name) : undefined);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -315,33 +312,36 @@ async function pgFamily(key: object, run: (types: object) => Promise<PgResult>, 
     }
   }
   if (!types.sawPending()) return rows;
-  // Learned from the module's columns where the result has their fields, else from the catalog.
-  if (result.fields && !Array.isArray(result)) await fieldDecoders(result.fields.map((f) => ({ name: f.name, oid: f.dataTypeID })), columns, key, load);
-  const known = learnedOf(key);
-  // A result with no fields (a pg-promise object's query() hands back the rows alone): each value
-  // by the module's column of its name.
-  const byName = new Map(lastOfEach(columns ?? []).map((c) => [c[0], c] as const));
-  const oids = new Set<number>();
-  for (const row of rows) {
-    for (const name in row) {
-      const v = row[name];
-      if (!(v instanceof Pending) || known.has(v.oid)) continue;
-      const column = byName.get(name);
-      if (column) known.set(v.oid, { kind: column[1], delim: column[2] ?? "," });
-      else oids.add(v.oid);
+  // Each field's decoder, by the module's columns (`fieldDecoders`), for the last field of each name,
+  // the one a row holds. A result with no fields (a pg-promise object's query() hands back the rows
+  // alone) reads each value by the module's column of its name, for this result alone.
+  const byField = new Map<string, Decoder>();
+  if (result.fields && !Array.isArray(result)) {
+    const fields = result.fields.map((f) => ({ name: f.name, oid: f.dataTypeID }));
+    const decoders = await fieldDecoders(fields, columns, key, load);
+    fields.forEach((f, i) => byField.set(f.name, decoders[i]!));
+  } else {
+    const known = learnedOf(key);
+    const byName = new Map(lastOfEach(columns ?? []).map((c) => [c[0], c] as const));
+    const unmet = new Set<number>();
+    for (const row of rows) for (const name in row) if (row[name] instanceof Pending && !known.has((row[name] as Pending).oid) && !byName.has(name)) unmet.add((row[name] as Pending).oid);
+    if (unmet.size) await catalog?.(key, unmet, load);
+    for (const row of rows) {
+      for (const name in row) {
+        const v = row[name];
+        if (!(v instanceof Pending) || byField.has(name)) continue;
+        const k = known.get(v.oid);
+        const column = byName.get(name);
+        byField.set(name, k ? textDecoder(k.kind, k.delim) : column ? textDecoder(column[1], column[2]) : textDecoder("text"));
+      }
     }
   }
-  if (oids.size) await catalog?.(key, oids, load);
-  const decoders = new Map<number, Decoder>();
-  const decoderOf = (oid: number) => {
-    let d = decoders.get(oid);
-    if (d === undefined) decoders.set(oid, (d = textDecoder(known.get(oid)?.kind ?? "text", known.get(oid)?.delim)));
-    return d;
-  };
+  // A key no field has (a pg-promise `receive` that renamed the row, refused after): by its type, or as its text.
+  const known = learnedOf(key);
   for (const row of rows) {
     for (const name in row) {
       const v = row[name];
-      if (v instanceof Pending) row[name] = decoderOf(v.oid)(v.text);
+      if (v instanceof Pending) row[name] = (byField.get(name) ?? textDecoder(known.get(v.oid)?.kind ?? "text", known.get(v.oid)?.delim))(v.text);
     }
   }
   return rows;

@@ -23,6 +23,8 @@ test("postgres: after a migration adds a column under select *, a created type t
     return (await import(pathToFileURL(join(root, `${name}.mjs`)).href)).default;
   };
   const items = await built("items", "select * from items order by id");
+  // A plain enum, which a later query on a client reads after a drifted one.
+  const mood = await built("mood", "select 'sad'::mood as m");
   // A column the migration adds under a name a later column of the statement holds: only the field the row keeps is matched by name.
   const shadowed = await built("shadowed", "select items.id, array['happy'::mood] as moods, 'ok'::text as label from items");
   const postgres = driver("postgres");
@@ -65,8 +67,20 @@ test("postgres: after a migration adds a column under select *, a created type t
     } finally {
       await camel.end();
     }
-    // The statement's alias still wins in the row, and the column a migration adds under its name is a
-    // built-in type, which the declared kind doesn't fit: the alias keeps its kind. On a fresh client.
+    // The declared column retyped, and a column added under the name the renaming gives it: the one
+    // field of that name is not the declaration's, and what it is read as teaches the client nothing.
+    await admin.unsafe(`create table retyped (id int primary key, mood_list mood[]); insert into retyped values (1, '{sad}')`);
+    const retyped = await built("retyped", "select * from retyped");
+    await admin.unsafe(`alter table retyped drop column mood_list; alter table retyped add column mood_list int; alter table retyped add column "moodList" mood; update retyped set mood_list = 1, "moodList" = 'sad'`);
+    const camelRetyped = postgres(own.url, { max: 1, transform: postgres.camel });
+    try {
+      assert.deepEqual(await retyped.run(camelRetyped), [{ id: 1, moodList: "sad" }]);
+      assert.deepEqual(await mood.run(camelRetyped), { m: "sad" });
+    } finally {
+      await camelRetyped.end();
+    }
+    // The statement's alias still wins in the row, beside a column a migration adds under its name:
+    // nothing says which field the declaration is, so the alias is read as its text, not by a guess.
     await admin.unsafe(`create table tagged (id int primary key); insert into tagged values (1)`);
     const aliased = await built("aliased", "select tagged.*, array['sad'::mood] as tags from tagged");
     await admin.unsafe(`alter table tagged add column tags int`);
@@ -74,7 +88,7 @@ test("postgres: after a migration adds a column under select *, a created type t
     const freshAliasPg = new pg.Client({ connectionString: own.url });
     await freshAliasPg.connect();
     try {
-      for (const db of [freshAlias, freshAliasPg]) assert.deepEqual(await aliased.run(db), [{ id: 1, tags: ["sad"] }]);
+      for (const db of [freshAlias, freshAliasPg]) assert.deepEqual(await aliased.run(db), [{ id: 1, tags: "{sad}" }]);
     } finally {
       await freshAlias.end();
       await freshAliasPg.end();
@@ -84,7 +98,6 @@ test("postgres: after a migration adds a column under select *, a created type t
     // client one for the enum.
     await admin.unsafe(`create table things (id int primary key); insert into things values (1)`);
     const ranked = await built("ranked", "select array[[1,2],[3,4]] as tags, things.* from things");
-    const mood = await built("mood", "select 'sad'::mood as m");
     await admin.unsafe(`alter table things add column tags mood; update things set tags = 'sad'`);
     const freshRank = postgres(own.url, { max: 1 });
     try {
