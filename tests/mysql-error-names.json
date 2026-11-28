@@ -1,0 +1,111 @@
+[
+  {
+    "errno": 1062,
+    "message": "Duplicate entry 'a' for key 't.email'",
+    "names": {
+      "key": "t.email"
+    }
+  },
+  {
+    "errno": 1062,
+    "message": "Duplicate entry 'x' for key 'y' for key 't.email'",
+    "names": {
+      "key": "t.email"
+    }
+  },
+  {
+    "errno": 1452,
+    "message": "Cannot add or update a child row: a foreign key constraint fails (`db`.`t`, CONSTRAINT `t_pid` FOREIGN KEY (`pid`) REFERENCES `parent` (`id`))",
+    "names": {
+      "table": "t",
+      "constraint": "t_pid"
+    }
+  },
+  {
+    "errno": 3819,
+    "message": "Check constraint 'n_positive' is violated.",
+    "names": {
+      "constraint": "n_positive"
+    }
+  },
+  {
+    "errno": 1048,
+    "message": "Column 'email' cannot be null",
+    "names": {
+      "column": "email"
+    }
+  },
+  {
+    "errno": 1364,
+    "message": "Field 'email' doesn't have a default value",
+    "names": {
+      "column": "email"
+    }
+  },
+  {
+    "errno": 1406,
+    "message": "Data too long for column 'email' at row 1",
+    "names": {
+      "column": "email"
+    }
+  },
+  {
+    "errno": 1406,
+    "message": "Data too long for column 'a for column 'b' at row 1",
+    "names": {
+      "column": "a for column 'b"
+    }
+  },
+  {
+    "errno": 1406,
+    "message": "Data too long for column 'a' at row 2' at row 1",
+    "names": {
+      "column": "a' at row 2"
+    }
+  },
+  {
+    "errno": 1265,
+    "message": "Data truncated for column 'kind' at row 3",
+    "names": {
+      "column": "kind"
+    }
+  },
+  {
+    "errno": 1264,
+    "message": "Out of range value for column 'n' at row 1",
+    "names": {
+      "column": "n"
+    }
+  },
+  {
+    "errno": 1264,
+    "message": "Out of range value for column '(null)' at row 1",
+    "names": {}
+  },
+  {
+    "errno": 1366,
+    "message": "Incorrect integer value: 'x' for column 'n' at row 1",
+    "names": {
+      "column": "n"
+    }
+  },
+  {
+    "errno": 1366,
+    "message": "Incorrect integer value: 'x' for column 'zz' for column 'n' at row 1",
+    "names": {
+      "column": "n"
+    }
+  },
+  {
+    "errno": 1292,
+    "message": "Incorrect date value: '2020-13-45' for column 'day' at row 1",
+    "names": {
+      "column": "day"
+    }
+  },
+  {
+    "errno": 1292,
+    "message": "Truncated incorrect CHAR(2) value: 'toolong'",
+    "names": {}
+  }
+]
