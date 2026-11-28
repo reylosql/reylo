@@ -8,7 +8,7 @@
 //! the two, since the server's rendering of an expression is not always one it reads back to itself.
 
 use super::{Alterer, Change, Kind, Object, Schema, TypeClass};
-use crate::catalog::{not_extension, not_history, not_platform, not_platform_schema, pg_not_history, pg_not_history_schema, project_extension, project_relation, PG_USER_NS};
+use crate::catalog::{not_extension, not_platform, not_platform_schema, pg_not_history, pg_not_history_schema, pg_not_kept_out, project_extension, project_relation, PG_USER_NS};
 use crate::db::{Db, Row};
 use crate::{Dialect, Error};
 use regex::Regex;
@@ -299,7 +299,7 @@ async fn read_objects(db: &mut Db, platform: Option<&[String]>) -> Result<Schema
     // The history tables, and what comes with them, are left out: `c` or `t` the `pg_class` row. A
     // table of the platform's is read whatever its name, a history table's (`auth.schema_migrations`).
     let kept = |condition: String| if platform.is_some() { "true".to_string() } else { condition };
-    let (kept_c, kept_t, kept_rel) = (kept(pg_not_history("c")), kept(pg_not_history("t")), kept(not_history("c.relname")));
+    let (kept_c, kept_t, kept_rel) = (kept(pg_not_history("c")), kept(pg_not_history("t")), kept(pg_not_kept_out("c.relname")));
     let pg_not_history_schema = |n: &str| kept(pg_not_history_schema(n));
     // A trigger's function, `f`: in the platform's schemas, where they are read.
     let trigger_function = match &named {
@@ -1615,9 +1615,10 @@ async fn read_objects(db: &mut Db, platform: Option<&[String]>) -> Result<Schema
         .rows(&format!(
             "select tg.oid, format('%I', tg.tgname) as name, format('%I.%I', n.nspname, c.relname) as rel, c.oid as reloid, pg_get_triggerdef(tg.oid, false) as def, tg.tgenabled as enabled
             from pg_trigger tg join pg_class c on c.oid = tg.tgrelid join pg_namespace n on n.oid = c.relnamespace join pg_proc f on f.oid = tg.tgfoid
-            where not tg.tgisinternal and tg.tgparentid = 0 and {ns} and {} and {} and {trigger_function} and {kept_rel}",
+            where not tg.tgisinternal and tg.tgparentid = 0 and {ns} and {} and {} and {trigger_function} and {kept_rel} and not {}",
             not_extension("pg_class", "c"),
-            not_platform("f.proowner")
+            not_platform("f.proowner"),
+            crate::catalog::pg_tool_trigger("tg")
         ))
         .await?
     {
@@ -1650,8 +1651,9 @@ async fn read_objects(db: &mut Db, platform: Option<&[String]>) -> Result<Schema
             "select format('%I', tg.tgname) as name, format('%I.%I', n.nspname, c.relname) as rel, c.oid as reloid, tg.tgenabled as enabled, tg.tgparentid as parent,
               (select p.tgenabled from pg_trigger p where p.oid = tg.tgparentid) as parent_enabled
             from pg_trigger tg join pg_class c on c.oid = tg.tgrelid join pg_namespace n on n.oid = c.relnamespace
-            where tg.tgparentid <> 0 and tg.tgenabled <> (select p.tgenabled from pg_trigger p where p.oid = tg.tgparentid) and {ns} and {} and {kept_rel}",
-            not_extension("pg_class", "c")
+            where tg.tgparentid <> 0 and tg.tgenabled <> (select p.tgenabled from pg_trigger p where p.oid = tg.tgparentid) and {ns} and {} and {kept_rel} and not {}",
+            not_extension("pg_class", "c"),
+            crate::catalog::pg_tool_trigger("tg")
         ))
         .await?
     {

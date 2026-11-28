@@ -9964,6 +9964,82 @@ async fn init_leaves_out_cloudflares_own_tables() {
     assert_eq!(p.rows("select * from users").await.len(), 0);
 }
 
+/// What another tool keeps in a database, beside the project's own tables, is not the project's:
+/// init leaves it out, a comparison never sees it (another database that holds it too matches
+/// init.sql), and a wipe leaves its rows. Each of `kept` is a table of the project's named or made
+/// like a tool's, which stays.
+async fn leaves_out_other_tools_objects(mut p: P, tools: &str, app: &str, gone: &str, kept: &[&str], tool_rows: &str) {
+    p.exec(&format!("{app}{tools}")).await;
+    assert_eq!(p.run(async |o, log| reylo_migrate::init(o, &[], log).await).await, 0, "{}", p.peek());
+    p.output();
+    let schema = std::fs::read_to_string(p.dir.join("schema.sql")).unwrap();
+    assert!(!has(&schema, gone), "{schema}");
+    for table in kept {
+        assert!(has(&schema, &format!(r"(?i)create table [^\n]*{table}")), "{table}: {schema}");
+    }
+    assert_eq!(std::fs::read_to_string(p.dir.join("migrations/init.sql")).unwrap(), schema);
+    assert_eq!(p.dry_run().await, 0, "{}", p.peek());
+    let q = P::new(p.d).await.unwrap();
+    q.exec(&format!("{app}{tools}")).await;
+    let url = std::mem::replace(&mut p.url, q.url.clone());
+    assert_eq!(p.history_push().await, 0, "{}", p.peek());
+    assert_eq!(q.history().await, ["init.sql"]);
+    assert_eq!(p.dry_run().await, 0, "{}", p.peek());
+    p.url = url;
+    assert_eq!(p.run(async |o, log| reylo_migrate::db_wipe(o, false, log).await).await, 0, "{}", p.peek());
+    assert_eq!(p.rows(tool_rows).await.len(), 1);
+}
+
+/// On Postgres: Hasura's schema and its trigger on the project's table, AWS DMS's DDL capture
+/// (its table, function and event trigger), Bucardo's, a Slony cluster's and Zero's schemas, and
+/// Estuary's watermarks.
+#[tokio::test(flavor = "current_thread")]
+async fn init_leaves_out_other_tools_objects_on_postgres() {
+    let Some(p) = P::new(Dialect::Postgres).await else { return };
+    let url = p.url.clone();
+    let tools = r#"
+        create schema hdb_catalog; create table hdb_catalog.event_log (id text primary key);
+        create function hdb_catalog.notify_hasura_new_order_insert() returns trigger language plpgsql as $$begin return new; end$$;
+        create trigger "notify_hasura_new_order_INSERT" after insert on orders for each row execute function hdb_catalog.notify_hasura_new_order_insert();
+        create table awsdms_ddl_audit (c_key bigserial primary key, c_time timestamp, c_user varchar(64), c_txn varchar(16), c_tag varchar(24), c_oid integer, c_name varchar(64), c_schema varchar(64), c_ddlqry text);
+        insert into awsdms_ddl_audit (c_tag) values ('CREATE TABLE');
+        create function awsdms_intercept_ddl() returns event_trigger language plpgsql as $$begin end$$;
+        create event trigger awsdms_intercept_ddl on ddl_command_end execute function awsdms_intercept_ddl();
+        create schema bucardo; create table bucardo.bucardo_delta_names (sync text, tablename text);
+        create schema "_main"; create table "_main".sl_node (no_id integer primary key); create table "_main".sl_log_1 (log_txid bigint);
+        create schema zero; create table zero.permissions (permissions json); create function zero.set_permissions_hash() returns trigger language plpgsql as $$begin return new; end$$;
+        create schema zero_0; create table zero_0."shardConfig" ("lock" boolean primary key); create table zero_0.replicas (slot text primary key);
+        create schema "zero_0/cdc"; create table "zero_0/cdc"."changeLog" (watermark text);
+        create table flow_watermarks (slot text primary key, watermark text);
+    "#;
+    let app = "create table orders (id integer primary key); create table health_check (id integer primary key); create table watermarks (slot text primary key, watermark text);
+        create schema reporting; create table reporting.permissions (id integer primary key);";
+    leaves_out_other_tools_objects(p, tools, app, "(?i)hdb_|hasura|awsdms|bucardo|_main|sl_node|zero|shardConfig|flow_watermarks", &["orders", "health_check", "watermarks", "reporting.permissions"], "select * from awsdms_ddl_audit").await;
+    forget(&url).await;
+}
+
+/// On MySQL: the tables PlanetScale's Vitess keeps after a schema change, in its current and older
+/// forms, gh-ost's changelog and checkpoint, and pt-online-schema-change's triggers on the table it
+/// copied. The copy itself, and a table named like another copy, are the project's.
+#[tokio::test(flavor = "current_thread")]
+async fn init_leaves_out_other_tools_objects_on_mysql() {
+    let Some(p) = P::new(Dialect::Mysql).await else { return };
+    let tools = "
+        create table `_vt_hld_6ace8bcef73211ea87e9f875a4d24e90_20200915120410_` (id integer primary key);
+        create table `_vt_HOLD_6ace8bcef73211ea87e9f875a4d24e90_20200915120410` (id integer primary key);
+        create table `_6ace8bce_f732_11ea_87e9_f875a4d24e90_20200915120410_vrepl` (id integer primary key);
+        create view `_vt_hld_7bdf9cdf084322fb98fa0986b5e35f01_20200915120410_` as select id from orders;
+        create table `_orders_ghc` (id bigint unsigned auto_increment, last_update timestamp not null default current_timestamp on update current_timestamp, hint varchar(64) charset ascii not null, value varchar(4096) charset ascii not null, primary key (id), unique key hint_uidx (hint)) auto_increment=256 comment='gh-ost changelog';
+        insert into `_orders_ghc` (hint, value) values ('heartbeat', 'now');
+        create table `_orders_ghk` (gh_ost_chk_id bigint auto_increment primary key, gh_ost_chk_timestamp bigint);
+        create table `_orders_new` (id integer primary key);
+        create trigger `pt_osc_app_orders_ins` after insert on orders for each row replace into `_orders_new` (id) values (new.id);
+        create trigger `pt_osc_app_orders_del` after delete on orders for each row delete ignore from `_orders_new` where id = old.id;
+    ";
+    let app = "create table orders (id integer primary key); create table `_audit_old` (id integer primary key); create table `_vt_notes` (id integer primary key);";
+    leaves_out_other_tools_objects(p, tools, app, "(?i)_vt_hld|_vt_HOLD|_vrepl|_ghc|_ghk|pt_osc", &["orders", "_orders_new", "_audit_old", "_vt_notes"], "select * from `_orders_ghc`").await;
+}
+
 /// Outside a file of Cloudflare's runtime, which alone refuses `_cf_` names, a table named so is the
 /// project's, as is one named as Cloudflare's or Wrangler's own but defined otherwise. Litestream's
 /// tables, which it makes in every database it replicates, are not.

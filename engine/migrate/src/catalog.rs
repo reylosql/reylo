@@ -72,23 +72,164 @@ pub(crate) fn not_history(column: &str) -> String {
     format!("lower({column}) not in ({})", history_names())
 }
 
+/// The tables another tool keeps in a MySQL database, as a query of their names in the connected one:
+/// the tables and views Vitess (PlanetScale) renames or makes as it changes a schema and keeps for
+/// days after (`_vt_hld_…_` and the other states of its table lifecycle, `_vt_vrp_…_` for a change it
+/// copies, and the forms it used before version 20), each named by a UUID and a timestamp in a frame
+/// no application's name takes; and gh-ost's changelog, checkpoint and cut-over sentry, each by its
+/// name and its own definition. A copy of an application's table a tool leaves (gh-ost's `_<t>_del`,
+/// pt-online-schema-change's `_<t>_old`) is told by its name alone, which an application may take, so
+/// it is read as any other.
+const MYSQL_TOOL_TABLES: &str = "select tt.table_name from information_schema.tables tt where tt.table_schema = database() and (
+  regexp_like(tt.table_name, '^_vt_(hld|prg|evc|drp|vrp)_[0-9a-f]{32}_[0-9]{14}_$', 'c')
+  or regexp_like(tt.table_name, '^_vt_(HOLD|PURGE|EVAC|DROP)_[0-9a-f]{32}_[0-9]{14}$', 'c')
+  or regexp_like(tt.table_name, '^_[0-9a-f]{8}_[0-9a-f]{4}_[0-9a-f]{4}_[0-9a-f]{4}_[0-9a-f]{12}_[0-9]{14}_(gho|ghc|del|new|vrepl)$', 'c')
+  or tt.table_name like '!_%!_ghc' escape '!' and tt.table_comment = 'gh-ost changelog'
+  or tt.table_name like '!_%!_del' escape '!' and tt.table_comment = 'ghost-cut-over-sentry'
+  or tt.table_name like '!_%!_ghk' escape '!' and exists (select 1 from information_schema.columns tk where tk.table_schema = tt.table_schema and tk.table_name = tt.table_name and tk.ordinal_position = 1 and tk.column_name = 'gh_ost_chk_id'))";
+
+/// A condition on a column of MySQL table names that holds for every table of the project's: no
+/// history table ([`not_history`]) and none of [`MYSQL_TOOL_TABLES`]. Every catalog, diff, dump and
+/// wipe of a MySQL database reads its tables through this one condition.
+pub(crate) fn mysql_project(column: &str) -> String {
+    format!("{} and {column} not in ({MYSQL_TOOL_TABLES})", not_history(column))
+}
+
+/// A condition on an `information_schema.triggers` row that holds for every trigger of the project's:
+/// on a table of its own ([`mysql_project`]), and none an online schema change left on the table it
+/// copied, which writes to that copy: pt-online-schema-change's `pt_osc_<database>_<table>_ins`,
+/// `_upd` and `_del` (`rt_pt_osc_…` reversed), and LHM's `lhmt_ins_<table>` and the like, each told by
+/// its name and what its body writes.
+pub(crate) fn mysql_project_trigger() -> String {
+    format!(
+        "{} and not (regexp_like(trigger_name, '^(rt_)?pt_osc_.+_(ins|upd|del)$', 'c') and (upper(action_statement) like '%DELETE IGNORE FROM%' or upper(action_statement) like '%REPLACE INTO%'))
+          and not (regexp_like(trigger_name, '^lhmt_(ins|upd|del)_.+$', 'c') and lower(action_statement) like '%lhmn!_%' escape '!')",
+        mysql_project("event_object_table")
+    )
+}
+
 /// Whether `name` is a history table's, Reylo's own or another tool's, in any case.
 pub(crate) fn is_history(name: &str) -> bool {
     [HISTORY_TABLE].iter().chain(OTHER_HISTORY_TABLES).any(|t| t.eq_ignore_ascii_case(name))
 }
 
-/// Whether the `pg_class` row `c` is no history table and comes with none: a history table's
-/// indexes, its sequences (`serial` or identity) and its TOAST table go with it.
+/// The tables a tool other than a migration tool makes in a Postgres database it works on, in any
+/// schema, each known by a name no table of an application's takes, and left out as a history table
+/// is: AWS DMS's, which it never removes (the DDL capture's and the heartbeat on a source, and its
+/// control tables on a target), and Qlik Replicate's, from which DMS came.
+pub const PG_TOOL_TABLES: &[&str] = &[
+    "awsdms_ddl_audit",
+    "awsdms_heartbeat",
+    "awsdms_apply_exceptions",
+    "awsdms_status",
+    "awsdms_suspended_tables",
+    "awsdms_history",
+    "awsdms_validation_failures_v1",
+    "awsdms_validation_failures_v2",
+    "awsdms_txn_state",
+    "attrep_ddl_audit",
+    "attrep_wal_heartbeat",
+];
+
+/// Every name [`pg_not_history`] leaves out, in lowercase as a SQL list: the history tables' and
+/// [`PG_TOOL_TABLES`].
+fn pg_kept_out_names() -> String {
+    [HISTORY_TABLE].iter().chain(OTHER_HISTORY_TABLES).chain(PG_TOOL_TABLES).map(|t| format!("'{}'", t.to_ascii_lowercase())).collect::<Vec<_>>().join(", ")
+}
+
+/// A condition on a column of Postgres table names that holds for every name but those
+/// [`pg_not_history`] leaves out.
+pub(crate) fn pg_not_kept_out(column: &str) -> String {
+    format!("lower({column}) not in ({})", pg_kept_out_names())
+}
+
+/// Whether the `pg_class` row `c` is no history table, no table of another tool's, and comes with
+/// none: such a table's indexes, its sequences (`serial` or identity) and its TOAST table go with it.
+/// Another tool's is one of [`PG_TOOL_TABLES`], or one whose definition is the tool's: Estuary's
+/// watermarks, and the health check Neon keeps in a database beside its `neon_migration` schema.
 pub(crate) fn pg_not_history(c: &str) -> String {
     format!(
-        "({} and not exists (select 1 from pg_depend hd join pg_class ht on ht.oid = hd.refobjid where hd.classid = 'pg_class'::regclass and hd.objid = {c}.oid and hd.refclassid = 'pg_class'::regclass and hd.deptype in ('a', 'i') and lower(ht.relname) in ({})))",
-        not_history(&format!("{c}.relname")),
-        history_names()
+        "({} and not exists (select 1 from pg_depend hd join pg_class ht on ht.oid = hd.refobjid where hd.classid = 'pg_class'::regclass and hd.objid = {c}.oid and hd.refclassid = 'pg_class'::regclass and hd.deptype in ('a', 'i') and (lower(ht.relname) in ({}) or {}))
+          and not {})",
+        pg_not_kept_out(&format!("{c}.relname")),
+        pg_kept_out_names(),
+        pg_tool_table("ht"),
+        pg_tool_table(c)
+    )
+}
+
+/// Whether the `pg_class` row `c` is a table another tool defines as it makes it, which no name
+/// alone tells apart from an application's: Estuary's `flow_watermarks`, and Neon's `health_check`
+/// in `public` where Neon's `neon_migration` schema is beside it.
+fn pg_tool_table(c: &str) -> String {
+    let columns = format!("(select string_agg(a.attname || ' ' || format_type(a.atttypid, a.atttypmod), ', ' order by a.attnum) from pg_attribute a where a.attrelid = {c}.oid and a.attnum > 0 and not a.attisdropped)");
+    format!(
+        "({c}.relkind = 'r' and ({c}.relname = 'flow_watermarks' and {columns} = 'slot text, watermark text'
+          or {c}.relname = 'health_check' and {c}.relnamespace = 'public'::regnamespace and {columns} = 'id integer, updated_at timestamp with time zone' and exists (select 1 from pg_namespace tm where tm.nspname = 'neon_migration')))"
+    )
+}
+
+/// The schemas another tool keeps for itself in a Postgres database, as a condition on the schema's
+/// name, `n.nspname`, which [`PG_USER_NS`] leaves out with all they hold: Hasura's `hdb_catalog` (and
+/// `hdb_views`, which Hasura 1 kept), Neon's `neon_migration` and the `neon` schema of its extension,
+/// Bucardo's `bucardo`, a Slony cluster's `_<cluster>`, and Zero's: its app's schema, each shard's
+/// `<app>_<n>`, and the shard's `/cdc` and `/cvr`. Each but Hasura's is told by what it holds, since
+/// a project may name a schema of its own so.
+macro_rules! pg_tool_schema {
+    () => {
+        "(n.nspname in ('hdb_catalog', 'hdb_views')
+          or n.nspname = 'neon_migration' and exists (select 1 from pg_class tc join pg_namespace ts on ts.oid = tc.relnamespace where ts.nspname = n.nspname and tc.relname = 'migration_id')
+          or n.nspname = 'neon' and exists (select 1 from pg_extension tx join pg_namespace ts on ts.oid = tx.extnamespace where ts.nspname = n.nspname and tx.extname = 'neon')
+          or n.nspname = 'bucardo' and exists (select 1 from pg_class tc join pg_namespace ts on ts.oid = tc.relnamespace where ts.nspname = n.nspname and tc.relname = 'bucardo_delta_names')
+          or exists (select 1 from pg_class tc join pg_namespace ts on ts.oid = tc.relnamespace where ts.nspname = n.nspname and tc.relname = 'sl_node')
+            and exists (select 1 from pg_class tc join pg_namespace ts on ts.oid = tc.relnamespace where ts.nspname = n.nspname and tc.relname = 'sl_log_1')
+          or exists (select 1 from pg_class tc join pg_namespace ts on ts.oid = tc.relnamespace where ts.nspname = n.nspname and tc.relname = 'shardConfig')
+            and exists (select 1 from pg_class tc join pg_namespace ts on ts.oid = tc.relnamespace where ts.nspname = n.nspname and tc.relname = 'replicas')
+          or exists (select 1 from pg_class tc join pg_namespace ts on ts.oid = tc.relnamespace where tc.relname = 'shardConfig' and n.nspname in (ts.nspname || '/cdc', ts.nspname || '/cvr'))
+          or exists (select 1 from pg_class tc join pg_namespace ts on ts.oid = tc.relnamespace where ts.nspname = n.nspname and tc.relname = 'permissions')
+            and exists (select 1 from pg_proc tp join pg_namespace ts on ts.oid = tp.pronamespace where ts.nspname = n.nspname and tp.proname = 'set_permissions_hash'))"
+    };
+}
+
+/// Whether the schema named by `nspname`, an expression, is another tool's ([`pg_tool_schema`]).
+fn pg_tool_schema(nspname: &str) -> String {
+    pg_tool_schema!().replace("n.nspname", nspname)
+}
+
+/// Whether the trigger `tg` (a `pg_trigger` row), on a table of the project's, is another tool's: one
+/// that runs a function in another tool's schema (Hasura's `notify_hasura_…`, Bucardo's, a Slony
+/// cluster's), or Londiste's `_londiste_…`, which runs a function of PgQ's extension.
+pub(crate) fn pg_tool_trigger(tg: &str) -> String {
+    format!(
+        "exists (select 1 from pg_proc tp join pg_namespace tf on tf.oid = tp.pronamespace where tp.oid = {tg}.tgfoid and ({}
+           or {tg}.tgname like '\\_londiste\\_%' and exists (select 1 from pg_depend te join pg_extension tx on tx.oid = te.refobjid where te.classid = 'pg_proc'::regclass and te.objid = tp.oid and te.deptype = 'e' and tx.extname = 'pgq')))",
+        pg_tool_schema("tf.nspname")
+    )
+}
+
+/// The event-trigger functions AWS DMS and Qlik Replicate make, each of its own name, in the schema
+/// the task names (`public` by default), to capture DDL; neither removes them.
+const PG_TOOL_DDL_FUNCTIONS: &str = "('awsdms_intercept_ddl', 'attrep_intercept_ddl')";
+
+/// Whether the routine `p` (a `pg_proc` row) is another tool's: one of [`PG_TOOL_DDL_FUNCTIONS`],
+/// returning `event_trigger`.
+pub(crate) fn pg_tool_function(p: &str) -> String {
+    format!("({p}.proname in {PG_TOOL_DDL_FUNCTIONS} and {p}.prorettype = 'event_trigger'::regtype)")
+}
+
+/// Whether the event trigger `et` (a `pg_event_trigger` row) is another tool's: one that runs a
+/// function in another tool's schema (Zero's `<app>_ddl_start_<n>` and `_end_<n>`), or one of
+/// [`PG_TOOL_DDL_FUNCTIONS`] under its own name.
+pub(crate) fn pg_tool_event_trigger(et: &str) -> String {
+    format!(
+        "exists (select 1 from pg_proc tp join pg_namespace tf on tf.oid = tp.pronamespace where tp.oid = {et}.evtfoid and ({} or {et}.evtname = tp.proname and {}))",
+        pg_tool_schema("tf.nspname"),
+        pg_tool_function("tp")
     )
 }
 
 /// Whether the schema `n` (a `pg_namespace` row) is no history table's own: one, `public` aside,
-/// that holds a history table and nothing else of its own (Drizzle Kit's `drizzle`, Atlas's
+/// that holds a history table or another tool's ([`pg_not_history`]) and nothing else of its own (Drizzle Kit's `drizzle`, Atlas's
 /// `atlas_schema_revisions`) is left out with it. What comes with another object (a table's row type,
 /// index or sequence) or an extension made is not the schema's own.
 pub(crate) fn pg_not_history_schema(n: &str) -> String {
@@ -99,7 +240,7 @@ pub(crate) fn pg_not_history_schema(n: &str) -> String {
             and not (hd.classid = 'pg_class'::regclass and hd.objid in (select hc.oid from pg_class hc where lower(hc.relname) in ({names}))))
           and not exists (select 1 from pg_class hc where hc.relnamespace = {n}.oid and hc.relkind in ('r', 'p', 'v', 'm', 'f', 'S', 'c') and {}))",
         pg_not_history("hc"),
-        names = history_names()
+        names = pg_kept_out_names()
     )
 }
 
@@ -452,7 +593,7 @@ pub async fn user_schemas(db: &mut Db) -> Result<Vec<String>, Error> {
     Ok(rows.iter().map(|r| r.text("name").to_string()).collect())
 }
 
-pub(crate) const PG_USER_NS: &str = r"n.nspname not in ('pg_catalog', 'information_schema') and n.nspname not like 'pg\_toast%' and n.nspname not like 'pg\_temp%'";
+pub(crate) const PG_USER_NS: &str = concat!(r"n.nspname not in ('pg_catalog', 'information_schema') and n.nspname not like 'pg\_toast%' and n.nspname not like 'pg\_temp%' and not ", pg_tool_schema!());
 
 /// [`PG_USER_NS`] of the schema `nspname` names, an expression: a temporary schema's objects are its
 /// session's, and gone when it ends, so no fingerprint a run stores may hold them.
@@ -688,8 +829,16 @@ pub(crate) fn in_project_schema(n: &str) -> String {
     format!("({n}.nspname <> 'pg_catalog' and {})", not_platform_owned_schema(n))
 }
 
+/// Whether the object `alias` of the catalog `catalog` is no extension's member, and, for a routine or
+/// an event trigger, no other tool's ([`pg_tool_function`], [`pg_tool_event_trigger`]): every read of
+/// either goes through this.
 pub(crate) fn not_extension(catalog: &str, alias: &str) -> String {
-    format!("not exists (select 1 from pg_depend e where e.classid = '{catalog}'::regclass and e.objid = {alias}.oid and e.deptype = 'e')")
+    let tool = match catalog {
+        "pg_proc" => format!(" and not {}", pg_tool_function(alias)),
+        "pg_event_trigger" => format!(" and not {}", pg_tool_event_trigger(alias)),
+        _ => String::new(),
+    };
+    format!("not exists (select 1 from pg_depend e where e.classid = '{catalog}'::regclass and e.objid = {alias}.oid and e.deptype = 'e'){tool}")
 }
 
 /// What an extension made that has privileges (its routines, relations, schemas, types,
@@ -1335,10 +1484,11 @@ async fn postgres_lines(db: &mut Db) -> Result<Vec<String>, Error> {
         .rows(&format!(
             "select pg_get_triggerdef(tg.oid, false) as def, tg.tgenabled as enabled
             from pg_trigger tg join pg_class c on c.oid = tg.tgrelid join pg_namespace n on n.oid = c.relnamespace join pg_proc f on f.oid = tg.tgfoid
-            where not tg.tgisinternal and {ns} and {} and {} and {}",
+            where not tg.tgisinternal and {ns} and {} and {} and {} and not {}",
             not_extension("pg_class", "c"),
             not_platform("f.proowner"),
-            not_history("c.relname")
+            pg_not_kept_out("c.relname"),
+            pg_tool_trigger("tg")
         ))
         .await?
     {
@@ -1352,7 +1502,7 @@ async fn postgres_lines(db: &mut Db) -> Result<Vec<String>, Error> {
               (select string_agg(case when r = 0 then 'PUBLIC' else pg_get_userbyid(r) end, ',' order by 1) from unnest(p.polroles) r) as roles,
               pg_get_expr(p.polqual, p.polrelid) as qual, pg_get_expr(p.polwithcheck, p.polrelid) as check
             from pg_policy p join pg_class c on c.oid = p.polrelid join pg_namespace n on n.oid = c.relnamespace where {ns} and {} and {}",
-            not_history("c.relname"),
+            pg_not_kept_out("c.relname"),
             // One on an extension's table is the extension's, as pg_dump has it (pg_cron's on `cron.job`).
             not_extension("pg_class", "c")
         ))
@@ -1384,7 +1534,7 @@ async fn postgres_lines(db: &mut Db) -> Result<Vec<String>, Error> {
             project_relation("c", "n"),
             not_extension("pg_class", "c"),
             not_extension("pg_rewrite", "r"),
-            not_history("c.relname"),
+            pg_not_kept_out("c.relname"),
             format!("({} or {})", not_platform("s.stxowner"), not_platform_schema("n"))
         ))
         .await?
@@ -1413,7 +1563,7 @@ async fn postgres_lines(db: &mut Db) -> Result<Vec<String>, Error> {
             union all select 'statistics ' || format('%I.%I', n.nspname, sx.stxname), null, obj_description(sx.oid, 'pg_statistic_ext'), null
             from pg_statistic_ext sx join pg_namespace n on n.oid = sx.stxnamespace where {ns} and {kept_sx}
             union all select 'trigger ' || format('%I', tg.tgname) || ' on ' || format('%I.%I', n.nspname, c.relname), null, obj_description(tg.oid, 'pg_trigger'), null
-            from pg_trigger tg join pg_class c on c.oid = tg.tgrelid join pg_namespace n on n.oid = c.relnamespace where not tg.tgisinternal and {ns} and {}
+            from pg_trigger tg join pg_class c on c.oid = tg.tgrelid join pg_namespace n on n.oid = c.relnamespace where not tg.tgisinternal and {ns} and {} and not {}
             union all select 'policy ' || format('%I', po.polname) || ' on ' || format('%I.%I', n.nspname, c.relname), null, obj_description(po.oid, 'pg_policy'), null
             from pg_policy po join pg_class c on c.oid = po.polrelid join pg_namespace n on n.oid = c.relnamespace where {ns} and {} and {}
             union all select 'collation ' || format('%I.%I', n.nspname, co.collname), null, obj_description(co.oid, 'pg_collation'), null
@@ -1445,11 +1595,12 @@ async fn postgres_lines(db: &mut Db) -> Result<Vec<String>, Error> {
             pg_not_history("c"),
             pg_user_ns("coalesce(cn.nspname, tn.nspname)"),
             pg_not_history("cc"),
-            not_history("c.relname"),
-            not_history("c.relname"),
+            pg_not_kept_out("c.relname"),
+            pg_tool_trigger("tg"),
+            pg_not_kept_out("c.relname"),
             not_extension("pg_class", "c"),
             not_extension("pg_collation", "co"),
-            not_history("c.relname"),
+            pg_not_kept_out("c.relname"),
             not_extension("pg_event_trigger", "et"),
             acl("w.fdwacl", "w.fdwowner", 'F'),
             not_extension("pg_foreign_data_wrapper", "w"),
@@ -1815,7 +1966,7 @@ pub(crate) fn owned_objects() -> String {
 async fn mysql(db: &mut Db) -> Result<Vec<String>, Error> {
     let name = db.rows("select database() as name").await?.first().map(|r| r.text("name").to_string()).unwrap_or_default();
     let strip = |s: &str| s.replace(&format!("`{name}`."), "").replace(&format!("{name}."), "");
-    let kept = not_history("table_name");
+    let kept = mysql_project("table_name");
     let mut lines = Vec::new();
 
     for r in db
@@ -1906,7 +2057,7 @@ async fn mysql(db: &mut Db) -> Result<Vec<String>, Error> {
             from information_schema.key_column_usage k join information_schema.referential_constraints rc
               on rc.constraint_schema = k.constraint_schema and rc.constraint_name = k.constraint_name and rc.table_name = k.table_name
             where k.table_schema = database() and k.referenced_table_name is not null and {} order by k.table_name, k.constraint_name, k.ordinal_position",
-            not_history("k.table_name")
+            mysql_project("k.table_name")
         ))
         .await?
     {
@@ -1924,7 +2075,7 @@ async fn mysql(db: &mut Db) -> Result<Vec<String>, Error> {
             from information_schema.table_constraints tc join information_schema.check_constraints cc
               on cc.constraint_schema = tc.constraint_schema and cc.constraint_name = tc.constraint_name
             where tc.table_schema = database() and tc.constraint_type = 'CHECK' and {}",
-            not_history("tc.table_name")
+            mysql_project("tc.table_name")
         ))
         .await?
     {
@@ -2002,7 +2153,7 @@ async fn mysql(db: &mut Db) -> Result<Vec<String>, Error> {
         .rows(&format!(
             "select trigger_name as n, event_manipulation as ev, event_object_table as t, action_statement as body, action_timing as timing, action_order as ord
             from information_schema.triggers where trigger_schema = database() and {}",
-            not_history("event_object_table")
+            mysql_project_trigger()
         ))
         .await?
     {
@@ -2360,7 +2511,7 @@ async fn mysql_views(db: &mut Db, strip: &(dyn Fn(&str) -> String + Sync)) -> Re
     // A view's algorithm is in its own statement alone.
     static ALGORITHM: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new(r"^CREATE ALGORITHM=(\w+)").expect("a valid pattern"));
     let mut lines = Vec::new();
-    for r in db.rows("select table_name as n, view_definition as def, check_option as opt, security_type as sec from information_schema.views where table_schema = database()").await? {
+    for r in db.rows(&format!("select table_name as n, view_definition as def, check_option as opt, security_type as sec from information_schema.views where table_schema = database() and {}", mysql_project("table_name"))).await? {
         let text = db.rows(&format!("show create view `{}`", r.text("n").replace('`', "``"))).await?.first().map(|v| v.text("Create View").to_string()).unwrap_or_default();
         let algorithm = ALGORITHM.captures(&text).map(|c| c[1].to_string()).unwrap_or_default();
         let body = view_body(&text).unwrap_or_else(|| r.text("def").to_string());
