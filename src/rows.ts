@@ -123,6 +123,9 @@ function jsonMember(f: RowField, v: unknown, dialect: Dialect, fail: (message: s
   return dialect !== "postgres" && f.type.kind === "json" ? new Raw(writeJson(v, dialect, fail)!) : v;
 }
 
+/** What a thrown value says: an error's message, anything else as its text. */
+const thrown = (e: unknown) => (e instanceof Error ? e.message : String(e));
+
 /**
  * An element of a jsonb[] member as the JSON text the database receives, written once by Reylo's
  * writer at its index, as JSON.stringify writes it there (its toJSON() read once, with that key),
@@ -137,7 +140,7 @@ function jsonElement(v: unknown, index: number, written: string, fail: (message:
     text = writeJson({ [key]: v }, "postgres", (message) => fail(`is ${message}`));
   } catch (e) {
     if (e instanceof ParameterError) throw e;
-    return fail(`is ${of}, which holds a JSON value: ${(e as Error).message}.`);
+    return fail(`is ${of}, which holds a JSON value: ${thrown(e)}.`);
   }
   // `{}` where it writes no value at all, as for a toJSON() that returns undefined: a member holds JSON, never nothing.
   if (text === undefined || text === "{}") return fail(`is ${of}, which holds a JSON value; got ${describe(v)}.`);
@@ -166,7 +169,7 @@ function check(type: EngineType, written: string, v: unknown, dialect: Dialect, 
       try {
         if (typeof v !== "bigint" && JSON.stringify(v, (_key, x: unknown) => (typeof x === "bigint" ? 0 : x)) === undefined) fail(`is ${written}, which holds a JSON value; got ${describe(v)}.`);
       } catch (e) {
-        fail(`is ${written}, which holds a JSON value: ${(e as Error).message}.`);
+        fail(`is ${written}, which holds a JSON value: ${thrown(e)}.`);
       }
       return v;
     case "enum":

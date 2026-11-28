@@ -211,6 +211,7 @@ test("a jsonb[] member's element is any JSON but an array, which Postgres would 
   // One that writes no JSON value, or whose toJSON() throws, is refused with its place.
   assert.throws(() => bound([{ toJSON: () => undefined }]), /"docs" element 1 is jsonb, which holds a JSON value; got/);
   assert.throws(() => bound([{ toJSON: () => { throw new Error("nope"); } }]), /"docs" element 1 is jsonb, which holds a JSON value: nope\./);
+  assert.throws(() => bound([{ toJSON: () => { throw null; } }]), /"docs" element 1 is jsonb, which holds a JSON value: null\./);
   // Reylo's own writer keeps a number past 2^53 exact and refuses NaN.
   assert.equal(bound([{ big: 9007199254740993n }]), '[{"docs":[{"big":9007199254740993}]}]');
   assert.throws(() => bound([{ n: NaN }]), /"docs" element 1 is .*NaN/);
