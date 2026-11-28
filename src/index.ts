@@ -8,7 +8,7 @@ import { standardQuery, type StandardQueryV1 } from "./standard-query.ts";
 import type { Structured } from "./rows.ts";
 import type { RowBuilder } from "./row.ts";
 import type { Checks } from "./checks.ts";
-import { allReaders, DecodeError, numbersInJson, READ_KINDS, withKinds, installPostgresTypes, installReaders, ParameterError, scalarKinds, type Columns, type JsonNumbers, type PostgresTypes, type Readers } from "./values.ts";
+import { allReaders, DecodeError, numbersInJson, READ_KINDS, withKinds, writeJson, installPostgresTypes, installReaders, ParameterError, scalarKinds, type Columns, type JsonNumbers, type PostgresTypes, type Readers } from "./values.ts";
 import { postgresTypes } from "./postgres-types.ts";
 import { codecRuntime } from "./codecs.ts";
 import type { QueryError } from "./query-error.ts";
@@ -187,6 +187,8 @@ export type QueryDefinition = {
   readers?: Readers;
   /** The reading of the numbers inside a JSON column's document, `nonFinite`'s plans: a build step passes it where a column has one. A query defined with `defineQuery` has it. */
   jsonNumbers?: typeof numbersInJson;
+  /** The writer of a JSON parameter's text: a build step passes it where a parameter is JSON. A query defined with `defineQuery` has it. */
+  jsonWriter?: typeof writeJson;
   /** The drivers the statement runs on, in the order they are tried: a build step passes the ones its project installs, so that an app bundles those drivers' code and no other. A query defined with `defineQuery` runs on every one. */
   drivers?: readonly DriverClient<any, any>[];
   /** Each structured parameter in a MySQL insert, with the lists of `text` the run time writes again for the keys a call carries (a Postgres or SQLite insert copies its defaults instead). */
@@ -241,7 +243,7 @@ export function defineQuery<Params, Row, C extends Cardinality, D extends Dialec
   const postgres = def.dialect === "postgres" ? { postgresTypes: def.postgresTypes ?? postgresTypes, readers: def.readers ?? allReaders } : {};
   if (def.dialect === "postgres") installReaders(postgres.readers!);
   const inputs = withKinds(def.inputs, def.dialect);
-  return define(RUNTIMES[def.dialect] as Runtime<D>, { ...def, ...(inputs ? { inputs } : {}), codecRuntime: def.codecRuntime ?? codecRuntime, jsonNumbers: def.jsonNumbers ?? numbersInJson, ...(drivers ? { drivers } : {}), ...postgres });
+  return define(RUNTIMES[def.dialect] as Runtime<D>, { ...def, ...(inputs ? { inputs } : {}), codecRuntime: def.codecRuntime ?? codecRuntime, jsonNumbers: def.jsonNumbers ?? numbersInJson, jsonWriter: def.jsonWriter ?? writeJson, ...(drivers ? { drivers } : {}), ...postgres });
 }
 
 /** A Postgres query, as a module a build step writes defines one (`defineQuery`). */
@@ -299,6 +301,7 @@ function define<Params, Row, C extends Cardinality, D extends Dialect>(runtime: 
     checks: def.checks,
     drivers: def.drivers,
     jsonNumbers: def.jsonNumbers,
+    jsonWriter: def.jsonWriter,
   };
   const query: Query<Params, Row, C, D> = {
     dialect,

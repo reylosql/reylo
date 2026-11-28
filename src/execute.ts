@@ -10,7 +10,7 @@
 // the databases its queries are written for.
 
 import type { QueryError } from "./query-error.ts";
-import { describe, given, isLevel, ParameterError, wholeArrayKind, type numbersInJson, rowMasks, vectorText, writeJson, zoned, type Columns, type JsonNumbers, type Kind } from "./values.ts";
+import { describe, given, isLevel, ParameterError, wholeArrayKind, type numbersInJson, type writeJson, rowMasks, vectorText, zoned, type Columns, type JsonNumbers, type Kind } from "./values.ts";
 import { schemaOf, type EngineType } from "./engine-type.ts";
 import { withSqlcommenter } from "./sqlcommenter.ts";
 import type { JsonSchema } from "./engine-type.ts";
@@ -206,6 +206,8 @@ export type QueryModule<D extends Dialect = Dialect> = {
   readonly nonFinite?: readonly (JsonNumbers | null)[] | undefined;
   /** The reading of `nonFinite`'s plans (src/values.ts, `numbersInJson`), which a build step passes where a column has one. */
   readonly jsonNumbers?: typeof numbersInJson | undefined;
+  /** The writer of a JSON parameter's text (src/values.ts, `writeJson`), which a build step passes where a parameter is JSON. */
+  readonly jsonWriter?: typeof writeJson | undefined;
   /** Each row as an object of the columns' names, one shape for every row (src/row.ts): every build step puts it in the module, beside `columns`. */
   readonly row?: RowBuilder | undefined;
   /** The result key: output columns, by name, that identify each row of the result, where the analysis proves one. */
@@ -646,7 +648,7 @@ function statement(query: QueryModule, params: ParamsInput, run = true) {
   });
   // Every MySQL and SQLite driver binds JSON text as text, which the database reads as JSON (a
   // structured parameter's is written already).
-  if (query.dialect !== "postgres") bound.values = bound.values.map((v, i) => (isJsonValue(query, bound.names[i]!, v) && query.inputs?.[bound.names[i]!]?.members === undefined ? jsonText(v, query.dialect, bound.names[i]!) : v));
+  if (query.dialect !== "postgres") bound.values = bound.values.map((v, i) => (isJsonValue(query, bound.names[i]!, v) && query.inputs?.[bound.names[i]!]?.members === undefined ? jsonText(query, v, bound.names[i]!) : v));
   // SQLite holds an INTEGER in 64 bits, so a BigInt outside them has no exact form there.
   // better-sqlite3, node:sqlite, libSQL, Turso's engine and SQLite Wasm refuse one, but bun:sqlite
   // and Bun.sql keep its low 64 bits where the statement reads numbers (2^63 was stored as -2^63,
@@ -750,8 +752,8 @@ export function rawStatement(query: QueryModule, params: unknown): { text: strin
 export function postgresText(query: QueryModule, name: string, v: unknown): string | null {
   if (v == null) return null;
   const t = query.inputs?.[name]?.type;
-  if (isJsonValue(query, name, v)) return jsonText(v, "postgres", name) ?? null;
-  if (Array.isArray(v) && t?.kind === "array") return arrayLiteral(t.element.type.kind === "json" ? jsonElements(v, name) : v, query.inputs?.[name]?.delimiter);
+  if (isJsonValue(query, name, v)) return jsonText(query, v, name) ?? null;
+  if (Array.isArray(v) && t?.kind === "array") return arrayLiteral(t.element.type.kind === "json" ? jsonElements(query, v, name) : v, query.inputs?.[name]?.delimiter);
   if (Array.isArray(v)) return arrayLiteral(v);
   if (v instanceof Uint8Array) return asByteaHex(v) as string;
   if (typeof v === "boolean") return v ? "t" : "f";
@@ -761,8 +763,8 @@ export function postgresText(query: QueryModule, name: string, v: unknown): stri
 }
 
 /** A `json[]` or `jsonb[]` parameter's elements, each as its JSON text (`jsonText`) or NULL. */
-export function jsonElements(array: readonly unknown[], name: string): unknown[] {
-  return array.map((e, i) => (e == null ? e : jsonText(e, "postgres", name, `[${i}]`)));
+export function jsonElements(query: QueryModule, array: readonly unknown[], name: string): unknown[] {
+  return array.map((e, i) => (e == null ? e : jsonText(query, e, name, `[${i}]`)));
 }
 
 /** The checks a parameter needs (src/checks.ts): every build step passes them where its statement has such a parameter. */
@@ -828,15 +830,21 @@ const JSON_NULL: unique symbol = Symbol("JSON null");
 export const jsonValue = (v: unknown) => (v === JSON_NULL ? null : v);
 
 /** A JSON parameter's value as the JSON text a driver binds (src/values.ts, `writeJson`), refusing a number the database's JSON holds none for. */
-export const jsonText = (v: unknown, dialect: Dialect, name: string, at = "") =>
-  writeJson(
+export const jsonText = (query: QueryModule, v: unknown, name: string, at = "") =>
+  jsonWriterOf(query)(
     jsonValue(v),
-    dialect,
+    query.dialect,
     (message) => {
       throw new ParameterError(`Parameter "${name}" ${message}`);
     },
     at,
   );
+
+/** The writer of a JSON parameter's text (src/values.ts, `writeJson`), which every build step passes where a parameter is JSON. */
+function jsonWriterOf(query: QueryModule): typeof writeJson {
+  if (query.jsonWriter) return query.jsonWriter;
+  throw new TypeError(`${query.source ? `${query.source}: ` : ""}This statement takes a JSON parameter, whose text Reylo writes with jsonWriter, which a module a build step writes passes: build a module an earlier reylo wrote again (reylo generate typescript writes the files it wrote). A query defined by hand passes it with defineQuery.`);
+}
 
 // A date or time value's type says whether it has a zone (src/render.ts),
 // and a value that would be read in a zone nobody chose is refused before the

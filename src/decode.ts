@@ -995,7 +995,7 @@ async function runPostgres(c: Client, query: QueryModule<"postgres">, { text, va
   // left the connection out of step. Each element of a `jsonb[]` is a JSON value.
   const bound = values.map((v, i) => {
     const t = type(i);
-    return Array.isArray(v) && t?.kind === "array" && !isJsonValue(query, names[i]!, v) ? arrayLiteral(t.element.type.kind === "json" ? jsonElements(v, names[i]!) : v, query.inputs?.[names[i]!]?.delimiter) : v;
+    return Array.isArray(v) && t?.kind === "array" && !isJsonValue(query, names[i]!, v) ? arrayLiteral(t.element.type.kind === "json" ? jsonElements(query, v, names[i]!) : v, query.inputs?.[names[i]!]?.delimiter) : v;
   });
   const prepared: Prepared = { query, text, marks, names, values: bound };
   for (const driver of driversOf(query)) {
@@ -1009,7 +1009,7 @@ async function runPostgres(c: Client, query: QueryModule<"postgres">, { text, va
  * The values with each JSON parameter's as its JSON text. A JSON parameter goes to pg's family,
  * PGlite and Neon as its JSON text, and to postgres.js as its JSON text declared `unknown`.
  */
-const withJson = ({ query, names, values }: Prepared) => values.map((v, i) => (isJsonValue(query, names[i]!, v) ? jsonText(v, "postgres", names[i]!) : v));
+const withJson = ({ query, names, values }: Prepared) => values.map((v, i) => (isJsonValue(query, names[i]!, v) ? jsonText(query, v, names[i]!) : v));
 
 /**
  * Effect SQL's Postgres client (src/effect.ts), which binds a string as an untyped text parameter,
@@ -1115,7 +1115,7 @@ export const bunPostgresDriver: PostgresDriver = {
     if (typeof c.query === "function" || typeof c.unsafe !== "function" || typeof c.commitDistributed !== "function") return undefined;
     const raw = (JSON as { rawJSON?: (text: string) => unknown }).rawJSON;
     const bunJson = (v: unknown, i: number) => {
-      const written = jsonText(v, "postgres", names[i]!);
+      const written = jsonText(query, v, names[i]!);
       if (c.options?.prepare === false || written === undefined) return written;
       const value: unknown = JSON.parse(written, (_key, x: unknown, context?: { source?: string }) => (raw === undefined ? x : (typeof x === "number" || typeof x === "string") && context?.source !== undefined ? raw(context.source) : typeof x === "number" ? raw(Object.is(x, -0) ? "-0" : String(x)) : x));
       return { toJSON: () => value };

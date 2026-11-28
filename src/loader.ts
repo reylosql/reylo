@@ -161,6 +161,11 @@ function moduleNonFinite({ analysis, dialect, allowNestedArrays }: ModuleInput):
   return dialect === "clickhouse" ? [] : (dialect === "postgres" && allowNestedArrays ? analysisWithNestedArrays(analysis) : analysis).columns.map((c) => jsonNumbers(c.type, false, dialect) ?? null);
 }
 
+/** Whether a parameter is JSON, a JSON array's elements or a structured parameter's, whose text the run time writes (src/values.ts, `writeJson`). */
+function writesJson({ analysis }: ModuleInput): boolean {
+  return analysis.params.some((p) => p.members !== undefined || p.type.kind === "json" || (p.type.kind === "array" && p.type.element.type.kind === "json"));
+}
+
 /** The text of a statement's module: its imports, its exports, and the definition of its query, field by field. */
 export function moduleCode(m: ModuleInput): string {
   const { pieces, imports } = moduleImports(m);
@@ -225,7 +230,7 @@ export function moduleImports(m: ModuleInput): { checked: boolean; coded: boolea
   const kinds = new Set<string>();
   if (m.dialect === "postgres") for (const c of analysis.columns) scalarKinds(kind(c.type), kinds);
   const readers = [...kinds].filter((k) => Object.hasOwn(READER_EXPORTS, k)).sort().map((k) => [k, READER_EXPORTS[k]!] as const);
-  const pieces = [...(checked ? ["checks"] : []), ...(coded ? ["codecRuntime"] : []), ...(typed ? ["postgresTypes"] : []), ...new Set(readers.map(([, piece]) => piece)), ...(moduleNonFinite(m).some((at) => at !== null) ? ["jsonNumbers"] : []), ...(m.drivers ?? [])];
+  const pieces = [...(checked ? ["checks"] : []), ...(coded ? ["codecRuntime"] : []), ...(typed ? ["postgresTypes"] : []), ...new Set(readers.map(([, piece]) => piece)), ...(moduleNonFinite(m).some((at) => at !== null) ? ["jsonNumbers"] : []), ...(writesJson(m) ? ["jsonWriter"] : []), ...(m.drivers ?? [])];
   return { checked, coded, typed, readers, pieces, imports };
 }
 
@@ -285,6 +290,7 @@ export function moduleDefinition(m: ModuleInput, names: { raw: string; sql: stri
     ["row", columns.length ? rowSource(columns.map(([name]) => name as string)) : undefined],
     ["nonFinite", nonFinite.some((at) => at !== null) ? literal(nonFinite) : undefined],
     ["jsonNumbers", nonFinite.some((at) => at !== null) ? names.piece("jsonNumbers") : undefined],
+    ["jsonWriter", writesJson(m) ? names.piece("jsonWriter") : undefined],
     ["key", analysis.key && JSON.stringify(analysis.key)],
     ["ordered", analysis.ordered ? "true" : undefined],
     ["structured", structured.length ? literal(structured) : undefined],
