@@ -171,14 +171,14 @@ fn holds_whole_arrays(t: &Value) -> bool {
     named(t) && named(&t["element"]["type"]) && label(&t["element"]["type"]) != label(t)
 }
 
-/// The type with each Postgres array marked to nest; a parameter's array of whole arrays, or of
-/// JSON, keeps one level outside them, which it writes each element of whole (src/engine-type.ts, `markNesting`).
+/// The type with each Postgres array marked to nest; an array of JSON never nests, and a parameter's
+/// array of whole arrays keeps one level outside them, which it writes each element of whole (src/engine-type.ts, `markNesting`).
 fn mark_nesting(t: &Value, parameter: bool) -> Value {
     let mut out = t.clone();
     match kind(t) {
         "array" => {
             out["element"]["type"] = mark_nesting(&t["element"]["type"], parameter);
-            if postgres_array(t) && !(parameter && (holds_whole_arrays(t) || kind(&t["element"]["type"]) == "json")) {
+            if postgres_array(t) && kind(&t["element"]["type"]) != "json" && !(parameter && holds_whole_arrays(t)) {
                 out[NESTS] = Value::Bool(true);
             }
         }
@@ -1044,7 +1044,9 @@ fn render_param_type(t: &Value, dialect: &str, in_row: bool, members: Option<&Va
             let fields: Vec<String> = items(&record["fields"])
                 .iter()
                 .map(|f| {
-                    let ty = render_param_type(&f["type"], dialect, true, None, codecs);
+                    // A JSON array inside a member is read as one more dimension, so a jsonb[] member's element is any JSON but an array (src/rows.ts).
+                    let json_array = dialect == "postgres" && column_kind(&f["type"], dialect) == "json[]" && self::kind(&f["type"]["element"]["type"]) == "json";
+                    let ty = if json_array { format!("(Exclude<{}, readonly unknown[]> | null)[]", render_param_type(&f["type"]["element"]["type"], dialect, true, None, codecs)) } else { render_param_type(&f["type"], dialect, true, None, codecs) };
                     format!("{}{}: {}", ident(f["name"].as_str().unwrap_or_default()), if is_true(&f["optional"]) { "?" } else { "" }, if is_true(&f["nullable"]) { or_null(&ty) } else { ty })
                 })
                 .collect();
@@ -1663,6 +1665,9 @@ mod tests {
         // A JSON element may be an array itself, which a parameter writes whole.
         let docs = analysis(json!([]), json!([{ "name": "docs", "type": { "kind": "array", "label": "_jsonb", "element": { "type": { "kind": "json", "label": "jsonb" } } } }]), "none");
         assert_eq!(printed(&docs, "postgres", &Value::Null, true).text(), printed(&docs, "postgres", &Value::Null, false).text());
+        // A column of it too, which `.run()` holds to one dimension under the flag.
+        let column = analysis(json!([{ "name": "docs", "type": { "kind": "array", "label": "_jsonb", "element": { "nullable": true, "type": { "kind": "json", "label": "jsonb" } } } }]), json!([]), "many");
+        assert_eq!(printed(&column, "postgres", &Value::Null, true).text(), printed(&column, "postgres", &Value::Null, false).text());
     }
 
     #[test]

@@ -1823,6 +1823,34 @@ pub(crate) fn owned_objects() -> String {
 // carry it (a view's body names its tables with their database).
 
 async fn mysql(db: &mut Db) -> Result<Vec<String>, Error> {
+    // SHOW CREATE TABLE and SHOW CREATE VIEW quote names by the session's settings, in double quotes
+    // under ANSI_QUOTES and not at all where sql_quote_show_create is off, so the schema is read
+    // without the one and with the other, and the session's own are put back on every path.
+    let session = db.rows("select @@session.sql_mode as mode, @@session.sql_quote_show_create as quote").await?;
+    let (mode, quote) = session.first().map(|r| (r.text("mode").to_string(), r.flag("quote"))).unwrap_or_default();
+    let plain: Vec<&str> = mode.split(',').filter(|m| !m.is_empty() && !matches!(*m, "ANSI_QUOTES" | "ANSI")).collect();
+    let unquoted = plain.len() != mode.split(',').filter(|m| !m.is_empty()).count();
+    let mut set = Ok(());
+    if unquoted {
+        set = db.exec(&format!("set session sql_mode = {}", literal(&plain.join(",")))).await;
+    }
+    if set.is_ok() && !quote {
+        set = db.exec("set session sql_quote_show_create = 1").await;
+    }
+    let read = match set {
+        Ok(()) => mysql_lines(db).await,
+        Err(e) => Err(e),
+    };
+    let mode = if unquoted { db.exec(&format!("set session sql_mode = {}", literal(&mode))).await } else { Ok(()) };
+    let quote = if quote { Ok(()) } else { db.exec("set session sql_quote_show_create = 0").await };
+    let lines = read?;
+    mode?;
+    quote?;
+    Ok(lines)
+}
+
+/// The catalog lines of a MySQL schema, read in a session whose quoting [`mysql`] has set.
+async fn mysql_lines(db: &mut Db) -> Result<Vec<String>, Error> {
     let name = db.rows("select database() as name").await?.first().map(|r| r.text("name").to_string()).unwrap_or_default();
     let strip = |s: &str| s.replace(&format!("`{name}`."), "").replace(&format!("{name}."), "");
     let kept = not_history("table_name");
@@ -1947,24 +1975,8 @@ async fn mysql(db: &mut Db) -> Result<Vec<String>, Error> {
     // table's. Whether an object runs as its definer or its invoker is read.
     // A view's body is read as its own statement writes it, which MySQL writes alike however the
     // view was written: `view_definition` keeps a comma join as `from a join b`, where the same view
-    // made from its statement reads `from (a join b)`. The statement quotes names by the session's
-    // settings, so it is read without ANSI_QUOTES and with sql_quote_show_create on.
-    let session = db.rows("select @@session.sql_mode as mode, @@session.sql_quote_show_create as quote").await?;
-    let (mode, quote) = session.first().map(|r| (r.text("mode").to_string(), r.flag("quote"))).unwrap_or_default();
-    let plain: Vec<&str> = mode.split(',').filter(|m| !m.is_empty() && !matches!(*m, "ANSI_QUOTES" | "ANSI")).collect();
-    let unquoted = plain.len() != mode.split(',').filter(|m| !m.is_empty()).count();
-    if unquoted {
-        db.exec(&format!("set session sql_mode = {}", literal(&plain.join(",")))).await?;
-    }
-    if !quote {
-        db.exec("set session sql_quote_show_create = 1").await?;
-    }
-    let views = mysql_views(db, &strip).await;
-    let mode = if unquoted { db.exec(&format!("set session sql_mode = {}", literal(&mode))).await } else { Ok(()) };
-    let quote = if quote { Ok(()) } else { db.exec("set session sql_quote_show_create = 0").await };
-    lines.extend(views?);
-    mode?;
-    quote?;
+    // made from its statement reads `from (a join b)`.
+    lines.extend(mysql_views(db, &strip).await?);
 
     // Each routine's parameters are read in a query of their own and joined here, not in a
     // subquery correlated with the routines: Vitess, which PlanetScale's MySQL runs behind, plans

@@ -12,7 +12,7 @@ Turso Cloud runs libSQL, a fork of SQLite, so everything on the [SQLite](/docs/s
 | Dialect | SQLite |
 | The type check reads | A local SQLite file with your schema, never a `libsql://` URL |
 | Turso Cloud | `@libsql/client`, with `.run()` |
-| Turso's own engine | `@tursodatabase/database`, with `.run()`, and `.runSync()` on its compat `Database` |
+| Turso's own engine | `@tursodatabase/database` 0.6.1 or later, with `.run()`, and `.runSync()` on its compat `Database` |
 | Migrations | [`reylo migrate`](/docs/migrate), on Turso Cloud through its `libsql://` URL |
 | SQLite versions | Reylo's 3.53, and the SQLite of each driver your `package.json` lists: 3.45.1 for `@libsql/client` |
 | libSQL's own SQL | Vector columns and indexes, the vector functions, `vector_top_k` and `alter table … alter column` ([Vectors](#vectors)) |
