@@ -26,7 +26,7 @@
 // those oids are arrays, cached in a WeakMap keyed by the app's object. A row value the module knows
 // the fields of has the kind of its column whatever its oid: `record` is one oid for every shape of
 // row, and a built-in catalog table's row type is below 10000 too.
-import { civilFromDays, coerce, DecodeError, elementKind, holdsArray, holdsJsonArray, isRowKind, numbersInJson, scalarKind, textDecoder, utf8, wholeArrayKind, withFraction, withinDimensions, type Columns, type Decoder, type JsonNumbers, type Kind } from "./values.ts";
+import { civilFromDays, coerce, DecodeError, elementKind, holdsArray, holdsJsonArray, isRowKind, numbersInJson, scalarKind, textDecoder, utf8, wholeArrayKind, withFraction, withinDimensions, type Columns, type Decoder, type JsonNumbers, type Kind, type JsonElements } from "./values.ts";
 import { lastOfEach, namesInResult, rowOf, type RowBuilder } from "./row.ts";
 import { arrayLiteral, asByteaHex, EFFECT_SQL, isJsonValue, jsonElements, jsonText, postgresText, type AnyClient as Client, type Bound, type EffectSql, type Marks, type QueryModule, type Runtime } from "./execute.ts";
 import { readPostgresError } from "./query-error.ts";
@@ -408,6 +408,26 @@ function hexOnToString(v: unknown): unknown {
   return view;
 }
 
+/**
+ * How PGlite's parser for an array's oid, which it reads a value by where Reylo named no parser of
+ * its own, holds a JSON element. The instance's is asked once with a JSON string, whose text comes
+ * back quoted and whose value bare. A transaction shows no parsers, and there PGlite's own for an
+ * array of a type it learned holds each element's text, a parser the app gave the element's type
+ * being out of sight.
+ */
+function pgliteJsonElements(db: AnyClient, oid: number): JsonElements {
+  const parsers = db.parsers as Record<number, (text: string, oid: number) => unknown> | undefined;
+  if (parsers === undefined) return "text";
+  const parse = parsers[oid];
+  if (typeof parse !== "function") return undefined;
+  try {
+    const probe = parse('{"\\"x\\""}', oid);
+    return Array.isArray(probe) && probe[0] === '"x"' ? "text" : Array.isArray(probe) && probe[0] === "x" ? "decoded" : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 async function pglite(db: AnyClient, text: string, values: unknown[], columns: Columns | undefined): Promise<unknown[]> {
   // A statement met for the first time names every built-in type Reylo decodes, and every oid the
   // instance has a parser for (its arrays, and the app's); a transaction has no table to read.
@@ -433,7 +453,7 @@ async function pglite(db: AnyClient, text: string, values: unknown[], columns: C
       const decode = decoders[i]!;
       for (const row of rows) {
         const v = row[f.name];
-        if (v !== null && v !== undefined) row[f.name] = typeof v === "string" ? decode(v) : coerce(kinds[i]!, v, f.name, ",", true);
+        if (v !== null && v !== undefined) row[f.name] = typeof v === "string" ? decode(v) : coerce(kinds[i]!, v, f.name, ",", true, Array.isArray(v) ? pgliteJsonElements(db, f.oid) : undefined);
       }
     }
   }
