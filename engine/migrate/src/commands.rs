@@ -1949,32 +1949,17 @@ fn leftover_filter(statement: &str) -> Option<String> {
                     None => (vec![], rest),
                 };
                 // The clauses after the columns, in the grammar's order: `nulls [not] distinct`,
-                // then `with (…)`, `tablespace` and `where`, read with quoted text blanked out.
-                let mut clauses = String::new();
-                let mut quote = None;
-                for ch in rest.chars() {
-                    match quote {
-                        Some(q) if ch == q => quote = None,
-                        Some(_) => {}
-                        None if ch == '"' || ch == '\'' => quote = Some(ch),
-                        None => {
-                            clauses.push(ch);
-                            continue;
-                        }
-                    }
-                    clauses.push(' ');
-                }
-                let picked = keys.iter().chain(&included).map(|item| Some(format!("(select a.attnum from pg_attribute a where a.attrelid = i.indrelid and a.attname = ((parse_ident({}, false))[1])::name)", literal(index_column(item)?)))).collect::<Option<Vec<_>>>()?;
-                let unique = sql.get(..13).is_some_and(|w| w.eq_ignore_ascii_case("create unique"));
-                // A partial index only for a statement with a WHERE, and the other way round.
-                static WHERE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)(?:^|[ \t\n\r\x0B\x0C)])where[ \t\n\r\x0B\x0C(]").expect("a valid pattern"));
-                // A partial index's predicate can't be read off the statement as the server writes
-                // it, so an unnamed one is tied to nothing.
-                if WHERE.is_match(&clauses) {
+                // then `with (…)`, `tablespace` and `where`, read as the server's tokens, so that a
+                // word inside a string, a dollar quote or a quoted name is none of them. A partial
+                // index's predicate can't be read off the statement as the server writes it, so an
+                // unnamed one is tied to nothing.
+                let words: Vec<String> = crate::sql::tokenize(rest, Dialect::Postgres).into_iter().map(|t| t.text.to_ascii_lowercase()).collect();
+                if words.iter().any(|w| w == "where") {
                     return None;
                 }
-                static NULLS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)^[ \t\n\r\x0B\x0C]*nulls[ \t\n\r\x0B\x0C]+not[ \t\n\r\x0B\x0C]+distinct(?:[ \t\n\r\x0B\x0C(]|$)").expect("a valid pattern"));
-                let distinct = NULLS.is_match(&clauses);
+                let distinct = words.starts_with(&["nulls".to_string(), "not".to_string(), "distinct".to_string()]);
+                let picked = keys.iter().chain(&included).map(|item| Some(format!("(select a.attnum from pg_attribute a where a.attrelid = i.indrelid and a.attname = ((parse_ident({}, false))[1])::name)", literal(index_column(item)?)))).collect::<Option<Vec<_>>>()?;
+                let unique = sql.get(..13).is_some_and(|w| w.eq_ignore_ascii_case("create unique"));
                 Some(format!(r"{on} and c.relname ~ '_idx[0-9]*$' and (starts_with(c.relname, (select t.relname from pg_class t where t.oid = i.indrelid) || '_') or octet_length(c.relname) >= 56) and i.indisunique = {unique} and coalesce((to_jsonb(i) ->> 'indnullsnotdistinct')::boolean, false) = {distinct} and i.indpred is null and i.indnkeyatts = {} and i.indexprs is null and string_to_array(i.indkey::text, ' ')::int2[] = array[{}]::int2[]", keys.len(), picked.join(", ")))
             }
         };
@@ -12187,6 +12172,8 @@ mod tests {
         // Only the clause counts, never the words inside a quoted name.
         assert!(f("create unique index concurrently on t (id) include (\"payload nulls not distinct text\")").contains("'indnullsnotdistinct')::boolean, false) = false"));
         assert!(f("create index concurrently on t (a) tablespace \"where\"").contains("i.indpred is null"));
+        // A dollar quote in a storage option hides no clause.
+        assert_eq!(super::leftover_filter("create index concurrently on t using rum (a, \"d'\") with (attach = $$d'$$) where id > 0"), None);
         // The table as `only (t)` and `t*` write it.
         assert!(f("create index concurrently i on only (orders) (x)").starts_with("i.indrelid = to_regclass('orders') and"));
         assert!(f("create index concurrently i on orders* (x)").starts_with("i.indrelid = to_regclass('orders') and"));
