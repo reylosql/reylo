@@ -1,6 +1,6 @@
 create table new_c (id integer primary key, x int unique);
 create table new_b (id integer primary key, q integer references new_c (id));
-create table new_a (id integer primary key, p integer references new_b (id));
+create table new_a (id integer primary key, p integer references new_b (id)) without rowid;
 insert into new_c (id, x) select id, x from c;
 insert into new_b (id, q) select id, q from b;
 insert into new_a (id, p) select id, p from a;
@@ -9,8 +9,4 @@ drop table b;
 drop table c;
 alter table new_c rename to c;
 alter table new_b rename to b;
-alter table new_a rename to a;
-create table new_a (id integer primary key, p integer references b (id)) without rowid;
-insert into new_a (id, p) select id, p from a;
-drop table a;
 alter table new_a rename to a;
