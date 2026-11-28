@@ -718,6 +718,8 @@ const sameUser = userById(1);
 
 An integer past 2^53 comes back exact. Turso binds the number `2 ** 63` as 2^63 − 1, so Reylo rejects it.
 
+Reylo needs `@tursodatabase/database` 0.6.1 or later.
+
 ### SQLite Wasm
 
 Pass an `oo1` database of `@sqlite.org/sqlite-wasm`, such as an `OpfsDb` in a worker. It's synchronous, so `.runSync()` works too:

@@ -1,7 +1,8 @@
 //! The SQLite diff engine's cases, `tests/diff/sqlite/<case>/`, as `tests/diff.rs` runs Postgres's:
 //! `v1.sql` with `seed.sql`'s rows in one database, `v2.sql` in another, the plan from the first to
 //! the second run on the first as `reylo migrate` runs a file (foreign keys off, one transaction,
-//! `pragma foreign_key_check` before the commit), the first's catalog then required to equal the
+//! `pragma foreign_key_check` before the commit; with foreign keys on, as a Durable Object runs it,
+//! where the case has a file `foreign-keys`), the first's catalog then required to equal the
 //! second's and every table to keep its rows and their values, `check.sql`, where a case has one, to
 //! run after it without an error (a full-text index's integrity check), a second plan to be empty, and the
 //! plan compared with `plan.sql`, which `REYLO_BLESS=1` writes. Then the same database goes back to v1,
@@ -41,9 +42,10 @@ async fn plan(from: &mut Db, to: &mut Db) -> Plan {
     diff::plan(&diff::sqlite::read(from).await.unwrap(), &diff::sqlite::read(to).await.unwrap(), &diff::sqlite::SqliteAlterer::default())
 }
 
-/// Runs the plan as `reylo migrate` runs a file: the statement that failed, if one did.
-async fn run(db: &mut Db, plan: &Plan) -> Option<String> {
-    db.exec("pragma foreign_keys = off").await.unwrap();
+/// Runs the plan as `reylo migrate` runs a file, or, with `keys`, as a Durable Object runs one, with
+/// its foreign keys on: the statement that failed, if one did.
+async fn run(db: &mut Db, plan: &Plan, keys: bool) -> Option<String> {
+    db.exec(if keys { "pragma foreign_keys = on" } else { "pragma foreign_keys = off" }).await.unwrap();
     db.exec("begin").await.unwrap();
     let mut failed = None;
     for s in plan.runnable() {
@@ -64,7 +66,7 @@ async fn run(db: &mut Db, plan: &Plan) -> Option<String> {
 }
 
 async fn counts(db: &mut Db) -> Vec<(String, String)> {
-    let tables = db.rows("select name from pragma_table_list where schema = 'main' and type in ('table', 'virtual') and name not like 'sqlite_%' order by name").await.unwrap();
+    let tables = db.rows("select name from pragma_table_list where schema = 'main' and type in ('table', 'virtual') and name not like 'sqlite\\_%' escape '\\' order by name").await.unwrap();
     let mut out = Vec::new();
     for t in tables {
         let name = t.text("name").to_string();
@@ -80,7 +82,7 @@ async fn counts(db: &mut Db) -> Vec<(String, String)> {
 
 /// Each table's rows, as text, column by column, sorted: `(table, column names, rows)`.
 async fn values(db: &mut Db) -> Vec<(String, Vec<String>, Vec<Vec<String>>)> {
-    let tables = db.rows("select name from pragma_table_list where schema = 'main' and type = 'table' and name not like 'sqlite_%' order by name").await.unwrap();
+    let tables = db.rows("select name from pragma_table_list where schema = 'main' and type = 'table' and name not like 'sqlite\\_%' escape '\\' order by name").await.unwrap();
     let mut out = Vec::new();
     for t in tables {
         let name = t.text("name").to_string();
@@ -133,7 +135,7 @@ async fn counters(db: &mut Db) -> Vec<(String, i64)> {
 
 /// Deletes every table's rows.
 async fn empty(db: &mut Db) {
-    let tables = db.rows("select name from pragma_table_list where schema = 'main' and type = 'table' and name not like 'sqlite_%'").await.unwrap();
+    let tables = db.rows("select name from pragma_table_list where schema = 'main' and type = 'table' and name not like 'sqlite\\_%' escape '\\'").await.unwrap();
     db.exec("pragma foreign_keys = off").await.unwrap();
     for t in tables {
         db.exec(&format!("delete from \"{}\"", t.text("name").replace('"', "\"\""))).await.unwrap();
@@ -183,7 +185,7 @@ async fn leg(db: &mut Db, like: &mut Db, changes: &[String]) -> Vec<String> {
     let rows_before = values(db).await;
     let sequences = counters(db).await;
     let plan = plan(db, like).await;
-    let failed = run(db, &plan).await;
+    let failed = run(db, &plan, false).await;
     let mut lines: Vec<String> = failed.iter().map(|f| format!("the plan failed at {f}")).collect();
     let (only_a, only_b) = difference(&catalog(db).await.unwrap(), &catalog(like).await.unwrap());
     lines.extend(only_a.iter().map(|l| format!("- {l}")).chain(only_b.iter().map(|l| format!("+ {l}"))));
@@ -217,7 +219,7 @@ async fn sqlite() {
         let sequences = counters(&mut from).await;
         let plan = plan(&mut from, &mut to).await;
         let text = plan.sql();
-        let failed = run(&mut from, &plan).await;
+        let failed = run(&mut from, &plan, case.join("foreign-keys").exists()).await;
         let check = read(&case.join("check.sql"));
         let checked = if failed.is_none() && !check.is_empty() { from.exec(&check).await.err() } else { None };
         let (only_a, only_b) = difference(&catalog(&mut from).await.unwrap(), &catalog(&mut to).await.unwrap());
@@ -262,7 +264,7 @@ async fn sqlite() {
             if !back_fails.is_empty() {
                 let (held, valued, counted) = (counts(&mut from).await, values(&mut from).await, counters(&mut from).await);
                 let reverse = crate::plan(&mut from, &mut first).await;
-                let refused = match run(&mut from, &reverse).await {
+                let refused = match run(&mut from, &reverse, false).await {
                     Some(f) if f.contains(&back_fails) => None,
                     Some(f) => Some(format!("the way back failed otherwise than back-fails.txt says: {f}")),
                     None => Some(format!("the way back ran, where back-fails.txt says it fails with {back_fails}")),
@@ -312,7 +314,7 @@ async fn sqlite_oracle_schemas() {
         for direction in ["from empty", "to empty"] {
             let (from, to) = if direction == "from empty" { (&mut empty, &mut full) } else { (&mut full, &mut blank) };
             let plan = plan(from, to).await;
-            let failed = run(from, &plan).await;
+            let failed = run(from, &plan, false).await;
             let (only_a, only_b) = difference(&catalog(from).await.unwrap(), &catalog(to).await.unwrap());
             if failed.is_some() || !only_a.is_empty() || !only_b.is_empty() {
                 let mut lines: Vec<String> = failed.into_iter().map(|f| format!("  failed at {f}")).collect();

@@ -1603,7 +1603,7 @@ fn sqlite_tables<D: SqliteDb + ?Sized>(db: &D) -> Result<Vec<SqliteTable>, Strin
     let listed: Vec<(String, String, String, bool)> = sqlite_rows(
         db,
         "select l.name, l.type, coalesce(s.sql, ''), l.strict from pragma_table_list l left join sqlite_schema s on s.type = 'table' and s.name = l.name \
-         where l.schema = 'main' and l.type in ('table', 'virtual') and l.name not like 'sqlite_%' order by s.rowid",
+         where l.schema = 'main' and l.type in ('table', 'virtual') and l.name not like 'sqlite\\_%' escape '\\' order by s.rowid",
     )?
     .iter()
     .map(|r| (value_text(&r[0]), value_text(&r[1]), value_text(&r[2]), r[3] == rusqlite::types::Value::Integer(1)))

@@ -326,7 +326,7 @@ const SQLITE_CASTS: &[(&str, u32)] = &[
 /// Postgres's built-in cast targets by the name Postgres's parser gives them, so a cast names its type
 /// for a rule that reads one ([`Expr::Guarded`]). A target outside the list proves its argument's
 /// nullability as before and names no type.
-const POSTGRES_CASTS: &[(&str, u32)] = &[
+pub const POSTGRES_CASTS: &[(&str, u32)] = &[
     ("text", oid::TEXT),
     ("varchar", oid::VARCHAR),
     ("bpchar", oid::BPCHAR),

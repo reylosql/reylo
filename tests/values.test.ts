@@ -1071,3 +1071,12 @@ test("a JSON parameter's BigInt is written as its digits, whatever toJSON an app
   assert.equal(writeJson(once, "postgres", fail), '{"n":9007199254740993}');
   assert.equal(reads, 1);
 });
+
+test("a driver's own array of JSON keeps its levels where each JSON value is still its text, so a deeper one is refused as from text", () => {
+  // As Slonik's tag hands an array of JSON over: pg's array parser, each element its text.
+  assert.deepEqual(withinDimensions(coercePostgres("json[]", ["[1, 2]", "[3, 4]"], "docs", ",", "text"), "json[]", "docs"), [[1, 2], [3, 4]]);
+  assert.throws(() => withinDimensions(coercePostgres("json[]", [["1", "2"], ["3", "4"]], "docs", ",", "text"), "json[]", "docs"), /Column "docs" holds an array of 2 dimensions, and its type has one/);
+  assert.throws(() => withinDimensions(coercePostgres("json[]", [["1"]], "docs", ",", "text"), "json[]", "docs", undefined, true), /Column "docs" holds an array of 2 dimensions/);
+  // Bun.sql's own decoder gives each JSON value decoded, so a JSON string that looks like a number stays a string.
+  assert.deepEqual(coercePostgres("json[]", [["1"], { k: "2" }], "docs", ",", "decoded"), [["1"], { k: "2" }]);
+});

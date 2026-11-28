@@ -19,7 +19,7 @@ use syntax::mysql::ast::{self, BinaryOperator, Expr, GroupByExpr, GroupByWithMod
 
 /// Which arguments of a call to a built-in function make it NULL where they are NULL.
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum Strict {
+pub enum Strict {
     /// Every argument.
     Every,
     /// These positions, from 0; NULL elsewhere may give a value.
@@ -46,7 +46,7 @@ use Strict::{At, Every, Last};
 /// `coalesce`, `ifnull`, `if`, `char`, `field`, `interval`, `json_array`, `json_object`, `quote`
 /// and `isnull` does. That a function is NULL for more than its NULL arguments (`str_to_date` for
 /// text that is no date) changes nothing here.
-const STRICT_FUNCTIONS: &[(&str, usize, usize, Strict)] = &[
+pub const STRICT_FUNCTIONS: &[(&str, usize, usize, Strict)] = &[
     // Strings.
     ("ascii", 1, 1, Every), ("bin", 1, 1, Every), ("bit_length", 1, 1, Every), ("char_length", 1, 1, Every), ("character_length", 1, 1, Every), ("compress", 1, 1, Every), ("concat", 1, 12, Every), ("concat_ws", 2, 12, At(&[0])), ("conv", 3, 3, Every), ("crc32", 1, 1, Every), ("elt", 2, 2, Every), ("elt", 3, 12, At(&[0])), ("export_set", 3, 5, Every), ("find_in_set", 2, 2, Every), ("format", 2, 3, At(&[0, 1])), ("from_base64", 1, 1, Every), ("greatest", 2, 12, Every), ("hex", 1, 1, Every), ("insert", 4, 4, Every), ("instr", 2, 2, Every), ("lcase", 1, 1, Every), ("least", 2, 12, Every), ("left", 2, 2, Every), ("length", 1, 1, Every), ("locate", 2, 3, Every), ("lower", 1, 1, Every), ("lpad", 3, 3, Every), ("ltrim", 1, 1, Every), ("make_set", 2, 12, At(&[0])), ("md5", 1, 1, Every), ("mid", 2, 3, Every), ("nullif", 2, 2, At(&[0])), ("oct", 1, 1, Every), ("octet_length", 1, 1, Every), ("ord", 1, 1, Every), ("regexp_instr", 2, 6, Every), ("regexp_like", 2, 3, Every), ("regexp_replace", 3, 6, Every), ("regexp_substr", 2, 5, Every), ("repeat", 2, 2, Every), ("replace", 3, 3, Every), ("reverse", 1, 1, Every), ("right", 2, 2, Every), ("rpad", 3, 3, Every), ("rtrim", 1, 1, Every), ("sha", 1, 1, Every), ("sha1", 1, 1, Every), ("sha2", 2, 2, Every), ("soundex", 1, 1, Every), ("space", 1, 1, Every), ("strcmp", 2, 2, Every), ("substr", 2, 3, Every), ("substring", 2, 3, Every), ("substring_index", 3, 3, Every), ("to_base64", 1, 1, Every), ("ucase", 1, 1, Every), ("uncompress", 1, 1, Every), ("uncompressed_length", 1, 1, Every), ("unhex", 1, 1, Every), ("upper", 1, 1, Every), ("weight_string", 1, 1, Every),
     // Numbers.

@@ -100,7 +100,8 @@ pub fn narrow(ty: &Type, literals: &[Literal]) -> Option<Type> {
             (Kind::Integer(_), Literal::Boolean(b)) => if *b { "1" } else { "0" }.to_string(),
             _ => return None,
         };
-        if known.is_some_and(|known| !known.iter().any(|k| k.value == value)) {
+        // A value rule 7 refuses, as one outside the type's bounds, is none the column holds.
+        if !base.holds(&value) || known.is_some_and(|known| !known.iter().any(|k| k.value == value)) {
             return None;
         }
         push(&mut values, value);
@@ -269,7 +270,23 @@ mod tests {
         assert_eq!(narrow(&boolean, &[Literal::Boolean(true), Literal::Boolean(false)]), None);
         assert_eq!(narrow(&Type::uuid(), &[Literal::Text("x".into())]), None);
         assert_eq!(narrow(&text, &[]), None);
-        for ty in [narrow(&int4, &[number("1")]), narrow(&numeric, &[number("1.5")]), narrow(&float8, &[number("0.5")]), narrow(&boolean, &[Literal::Boolean(false)])] {
+        // A number outside the type's bounds is none of its values.
+        let year = Type::new(Kind::Integer(IntegerType { bits: 16, bounds: crate::types::Bounds::between("1901", "2155"), ..IntegerType::default() }));
+        assert_eq!((narrow(&year, &[number("2026")]).is_some(), narrow(&year, &[number("1900")])), (true, None));
+        // What a narrowing writes is a valid type, its values among its base's.
+        for ty in [
+            narrow(&int4, &[number("1")]),
+            narrow(&int4, &[Literal::Boolean(true), Literal::Boolean(false)]),
+            narrow(&uint8, &[number("255")]),
+            narrow(&numeric, &[number("1.5")]),
+            narrow(&money, &[number("12.30")]),
+            narrow(&float8, &[number("0.5"), number("0.1"), number("1e2")]),
+            narrow(&boolean, &[Literal::Boolean(false)]),
+            narrow(&varchar(Size { max: Some(3), ..Size::default() }), &[Literal::Text("abc".into())]),
+            narrow(&no_nul, &[Literal::Text("a".into())]),
+            narrow(&latin1("ISO-8859-1"), &[Literal::Text("café".into())]),
+            narrow(&mood, &[Literal::Text("sad".into())]),
+        ] {
             ty.unwrap().check().unwrap();
         }
     }

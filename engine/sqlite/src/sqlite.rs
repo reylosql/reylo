@@ -477,6 +477,11 @@ fn tables(t: &Tree) -> Tables {
             }
         }
         fn sel(&mut self, s: &Sel) {
+            for s in s.arms() {
+                self.arm(s);
+            }
+        }
+        fn arm(&mut self, s: &Sel) {
             for c in &s.columns {
                 self.node(&c.expr);
             }
@@ -494,9 +499,6 @@ fn tables(t: &Tree) -> Tables {
             }
             for n in s.rows.iter().flatten().chain(&s.where_).chain(&s.group_by).chain(&s.having).chain(&s.order_by).chain(&s.limit).chain(&s.offset) {
                 self.node(n);
-            }
-            if let Some(prior) = &s.prior {
-                self.sel(prior);
             }
         }
     }
@@ -580,6 +582,11 @@ fn constant_keys(sql: &str, lexed: &Lexed, t: &Tree) -> Vec<crate::api::Diagnost
             }
         }
         fn sel(&mut self, s: &Sel) {
+            for s in s.arms() {
+                self.arm(s);
+            }
+        }
+        fn arm(&mut self, s: &Sel) {
             self.select_keys(s);
             for c in &s.columns {
                 self.node(&c.expr);
@@ -594,9 +601,6 @@ fn constant_keys(sql: &str, lexed: &Lexed, t: &Tree) -> Vec<crate::api::Diagnost
             }
             for n in s.rows.iter().flatten().chain(&s.where_).chain(&s.group_by).chain(&s.having).chain(&s.order_by).chain(&s.limit).chain(&s.offset) {
                 self.node(n);
-            }
-            if let Some(prior) = &s.prior {
-                self.sel(prior);
             }
         }
     }
@@ -1293,10 +1297,88 @@ fn reads_cursor(n: &Node, cursors: &HashSet<i64>) -> bool {
         || n.list.iter().chain(&n.args).chain(&n.order_by).chain(&n.partition_by).any(|x| reads_cursor(x, cursors))
 }
 
-/// The columns a WHERE test at the top level rejects NULL in: under OR the ones every arm does; a
-/// comparison, `IN`, `BETWEEN`, `IS NOT NULL`, `LIKE` or `GLOB`, in the columns its operands
-/// answer NULL for. `IS` and `IS NOT` compare NULL like a value, and reject nothing. A function the
-/// host registers over a built-in's name is the one a call resolves to, and proves nothing.
+/// Which arguments of a call to a built-in make it NULL where they are NULL.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Strict {
+    /// Every argument.
+    Every,
+    /// These positions, from 0; NULL elsewhere may give a value.
+    At(&'static [usize]),
+}
+
+use Strict::{At, Every};
+
+/// SQLite's built-in scalar functions that are NULL wherever one of the arguments named is NULL, a
+/// row for calls of from its first number of arguments to its second, both included. The engine's
+/// tests measure every row against the SQLite rusqlite bundles, with its math, percentile and
+/// geopoly functions: each call at every number of arguments a row covers, with that argument NULL
+/// and the others drawn from values chosen to give a value in its place (numbers at their bounds,
+/// empty and non-empty text and blobs, JSON documents and paths, dates and modifiers, formats),
+/// which it never does; and every scalar function that SQLite lists, at every position, is here
+/// wherever it measures as such, but where a SQLite a driver runs answers otherwise. A call of
+/// another number of arguments, and a function not here, claims nothing.
+///
+/// Each row was also measured so on SQLite 3.38.5 to 3.47.0, libSQL's and the Turso engine's
+/// (0.8.3), where they have the function. These were not, and are left out: `json_valid(NULL)` is 0 before 3.42
+/// (and in a build with `SQLITE_LEGACY_JSON_VALID`); `json_extract` of two paths or more writes a
+/// NULL path as JSON's null in an array before 3.45; and on the Turso engine `json_set`,
+/// `json_insert`, `json_replace` and their `jsonb_` forms edit a NULL document, `json_remove`
+/// takes a NULL path as no edit, `jsonb_remove` edits a NULL document, and `jsonb(NULL)` is a
+/// blob (0.6.1 and 0.7.2).
+///
+/// `nullif(a, NULL)` is `a`, `concat_ws` skips a NULL after its separator, `printf` and `format`
+/// write a NULL value as nothing, `json_pretty` reads a NULL indent as the default one, and
+/// `geopoly_regular` and `geopoly_contains_point` read a NULL coordinate as 0. `replace(X, '', Z)` is X whatever Z
+/// is, so `replace` is NULL for a NULL replacement only behind a pattern that is a text literal
+/// other than '' ([`strict_args`]). With one argument `min` and `max` are the aggregates; `iif`
+/// and `if` of two have no ELSE, so they are NULL wherever their condition or their value is.
+const NULL_STRICT: &[(&str, usize, usize, Strict)] = &[
+    // Text.
+    ("concat_ws", 2, 8, At(&[0])), ("format", 1, 8, At(&[0])), ("glob", 2, 2, Every), ("instr", 2, 2, Every), ("length", 1, 1, Every), ("like", 2, 3, Every), ("lower", 1, 1, Every), ("ltrim", 1, 2, Every), ("octet_length", 1, 1, Every), ("printf", 1, 8, At(&[0])), ("replace", 3, 3, At(&[0, 1])), ("rtrim", 1, 2, Every), ("substr", 2, 3, Every), ("substring", 2, 3, Every), ("trim", 1, 2, Every), ("unhex", 1, 2, Every), ("unicode", 1, 1, Every), ("unistr", 1, 1, Every), ("upper", 1, 1, Every),
+    // Numbers.
+    ("abs", 1, 1, Every), ("acos", 1, 1, Every), ("acosh", 1, 1, Every), ("asin", 1, 1, Every), ("asinh", 1, 1, Every), ("atan", 1, 1, Every), ("atan2", 2, 2, Every), ("atanh", 1, 1, Every), ("ceil", 1, 1, Every), ("ceiling", 1, 1, Every), ("cos", 1, 1, Every), ("cosh", 1, 1, Every), ("degrees", 1, 1, Every), ("exp", 1, 1, Every), ("floor", 1, 1, Every), ("ln", 1, 1, Every), ("log", 1, 2, Every), ("log10", 1, 1, Every), ("log2", 1, 1, Every), ("mod", 2, 2, Every), ("pow", 2, 2, Every), ("power", 2, 2, Every), ("radians", 1, 1, Every), ("round", 1, 2, Every), ("sign", 1, 1, Every), ("sin", 1, 1, Every), ("sinh", 1, 1, Every), ("sqrt", 1, 1, Every), ("tan", 1, 1, Every), ("tanh", 1, 1, Every), ("trunc", 1, 1, Every),
+    // Dates and times.
+    ("date", 1, 6, Every), ("datetime", 1, 6, Every), ("julianday", 1, 6, Every), ("strftime", 1, 6, Every), ("time", 1, 6, Every), ("timediff", 2, 2, Every), ("unixepoch", 1, 6, Every),
+    // JSON.
+    ("->", 2, 2, Every), ("->>", 2, 2, Every), ("json", 1, 1, Every), ("json_array_length", 1, 2, Every), ("json_error_position", 1, 1, Every), ("json_extract", 2, 2, Every), ("json_patch", 2, 2, Every), ("json_pretty", 1, 2, At(&[0])), ("json_remove", 1, 8, At(&[0])), ("json_type", 1, 2, Every),
+    ("jsonb_extract", 2, 8, Every), ("jsonb_patch", 2, 2, Every),
+    // Geopoly.
+    ("geopoly_area", 1, 1, Every), ("geopoly_bbox", 1, 1, Every), ("geopoly_blob", 1, 1, Every), ("geopoly_ccw", 1, 1, Every), ("geopoly_contains_point", 3, 3, At(&[0])), ("geopoly_json", 1, 1, Every), ("geopoly_overlap", 2, 2, Every), ("geopoly_regular", 4, 4, At(&[2, 3])), ("geopoly_svg", 1, 8, At(&[0])), ("geopoly_within", 2, 2, Every), ("geopoly_xform", 7, 7, At(&[0])),
+    // The rest.
+    ("if", 2, 2, Every), ("iif", 2, 2, Every), ("likelihood", 2, 2, At(&[0])), ("likely", 1, 1, Every), ("max", 2, 8, Every), ("min", 2, 8, Every), ("nullif", 2, 2, At(&[0])), ("sqlite_compileoption_used", 1, 1, Every), ("unlikely", 1, 1, Every),
+];
+
+/// The arguments of a call that make it NULL where they are NULL, by [`NULL_STRICT`]: none for an
+/// aggregate or a window call, or for a function the host registers over a built-in's name, which
+/// is the one the call resolves to. `replace`'s replacement is one behind a pattern that is a text
+/// literal other than ''.
+fn strict_args(n: &Node, extras: &Extras) -> Vec<usize> {
+    let Some(name) = n.name.as_deref().filter(|_| n.op == "function" && !n.agg && !n.window) else { return Vec::new() };
+    if extras.function(name, n.args.len()).is_some() {
+        return Vec::new();
+    }
+    strict_positions(name, n.args.len(), n.args.get(1).and_then(literal_text))
+}
+
+/// The arguments of a call of the built-in `name` with `count` arguments that make it NULL where
+/// they are NULL ([`NULL_STRICT`]), given the text literal its second argument is, if it is one.
+fn strict_positions(name: &str, count: usize, second: Option<&str>) -> Vec<usize> {
+    let Some((.., strict)) = NULL_STRICT.iter().find(|(f, fewest, most, _)| *f == name && (*fewest..=*most).contains(&count)) else { return Vec::new() };
+    let mut positions: Vec<usize> = match strict {
+        Every => (0..count).collect(),
+        At(positions) => positions.to_vec(),
+    };
+    if name == "replace" && second.is_some_and(|p| !p.is_empty()) {
+        positions.push(2);
+    }
+    positions
+}
+
+/// The columns a WHERE test at the top level rejects NULL in: under AND the ones any arm does, and
+/// under OR the ones every arm does; `IS NOT NULL` and `IN`, the columns the tested value answers
+/// NULL for; `BETWEEN`, the ones the value or a bound does; any other test, a comparison, a `LIKE`
+/// or a bare value, the columns it answers NULL for ([`nulls_with`]). `IS` and `IS NOT` compare
+/// NULL like a value, and reject nothing.
 fn strict_in(n: &Node, extras: &Extras) -> HashSet<(i64, String)> {
     let nulls = |x: &Node| nulls_with(x, extras);
     match n.op.as_str() {
@@ -1306,43 +1388,30 @@ fn strict_in(n: &Node, extras: &Extras) -> HashSet<(i64, String)> {
             let right = strict_in(r, extras);
             strict_in(l, extras).into_iter().filter(|c| right.contains(c)).collect()
         }
-        "notnull" | "in" | "between" => n.left.as_deref().map(nulls).unwrap_or_default(),
-        "=" | "!=" | "<" | "<=" | ">" | ">=" => n.left.iter().chain(n.right.iter()).flat_map(|x| nulls(x)).collect(),
-        "not" => match n.left.as_deref() {
-            Some(inner) if inner.op == "isnull" => inner.left.as_deref().map(nulls).unwrap_or_default(),
-            // `x NOT IN (SELECT …)` is true of a NULL `x` where the subquery returns no row; a
-            // list is never empty.
-            Some(inner) => strict_in(inner, extras).into_iter().filter(|_| matches!(inner.op.as_str(), "=" | "!=" | "<" | "<=" | ">" | ">=" | "between") || (inner.op == "in" && inner.select.is_none())).collect(),
-            None => HashSet::new(),
-        },
-        "function" if !n.agg && !n.window && matches!(n.name.as_deref(), Some("like" | "glob")) && extras.function(n.name.as_deref().unwrap_or(""), n.args.len()).is_none() => {
-            n.args.iter().flat_map(nulls).collect()
-        }
-        "column" => nulls(n),
-        _ => HashSet::new(),
+        // `x IN (SELECT …)` is NULL or false for a NULL `x`.
+        "notnull" | "in" => n.left.as_deref().map(nulls).unwrap_or_default(),
+        // `x BETWEEN a AND b` is `x >= a AND x <= b`, never true for a NULL bound.
+        "between" => n.left.iter().map(|x| &**x).chain(&n.list).flat_map(nulls).collect(),
+        // `NOT (x IS NULL)` is `x IS NOT NULL`; any other NOT is NULL where its operand is.
+        "not" if n.left.as_deref().is_some_and(|inner| inner.op == "isnull") => n.left.as_deref().and_then(|inner| inner.left.as_deref()).map(nulls).unwrap_or_default(),
+        _ => nulls(n),
     }
 }
 
-/// The built-ins NULL for a NULL argument, and for `replace` one in its first two.
-const NULL_FOR_NULL: &[&str] = &["upper", "lower", "length", "abs", "trim", "ltrim", "rtrim", "substr", "substring", "replace", "round", "instr", "unicode", "sign", "octet_length"];
-
-/// The columns an expression answers NULL for: the column itself, and through arithmetic,
-/// concatenation, a cast, a COLLATE or a built-in that is NULL for a NULL argument (not one the
-/// host registers over it), every column an operand answers NULL for.
+/// The columns an expression answers NULL for: the column itself; through arithmetic,
+/// concatenation, a bitwise operator, a comparison, NOT, a cast or a COLLATE, every column an
+/// operand answers NULL for; through `IN` and `BETWEEN`, every column the tested value does (a
+/// bound or a list member that is NULL leaves the answer false where another settles it); and
+/// through a built-in, every column the arguments [`strict_args`] names answer NULL for. A row
+/// value is NULL in none of its fields: `(NULL, 1) = (1, 2)` is false.
 fn nulls_with(n: &Node, extras: &Extras) -> HashSet<(i64, String)> {
-    const STRICT: &[&str] = NULL_FOR_NULL;
     match n.op.as_str() {
         "column" => n.column.clone().map(|c| HashSet::from([(n.cursor, c)])).unwrap_or_default(),
-        "+" | "-" | "*" | "/" | "%" | "||" => n.left.iter().chain(n.right.iter()).flat_map(|x| nulls_with(x, extras)).collect(),
-        "neg" | "pos" | "cast" | "collate" => n.left.as_deref().map(|x| nulls_with(x, extras)).unwrap_or_default(),
-        // `replace(X, '', Z)` is X whatever Z is: NULL for a NULL in its first two arguments, and in Z only behind a pattern that is a text literal other than ''.
-        "function" if !n.agg && !n.window && n.name.as_deref().is_some_and(|f| STRICT.contains(&f) && extras.function(f, n.args.len()).is_none()) => {
-            let strict = match n.name.as_deref() {
-                Some("replace") if !n.args.get(1).and_then(literal_text).is_some_and(|p| !p.is_empty()) => 2,
-                _ => n.args.len(),
-            };
-            n.args.iter().take(strict).flat_map(|x| nulls_with(x, extras)).collect()
-        }
+        "+" | "-" | "*" | "/" | "%" | "||" | "&" | "|" | "<<" | ">>" | "=" | "!=" | "<" | "<=" | ">" | ">=" => n.left.iter().chain(n.right.iter()).flat_map(|x| nulls_with(x, extras)).collect(),
+        "neg" | "pos" | "~" | "not" | "cast" | "collate" | "between" => n.left.as_deref().map(|x| nulls_with(x, extras)).unwrap_or_default(),
+        // `x IN (SELECT …)` is false where the subquery returns no row; a list is never empty.
+        "in" if n.select.is_none() => n.left.as_deref().map(|x| nulls_with(x, extras)).unwrap_or_default(),
+        "function" => strict_args(n, extras).into_iter().filter_map(|i| n.args.get(i)).flat_map(|x| nulls_with(x, extras)).collect(),
         _ => HashSet::new(),
     }
 }
@@ -1351,8 +1420,9 @@ fn nulls_with(n: &Node, extras: &Extras) -> HashSet<(i64, String)> {
 /// evaluates it: a column by its name in lower case; NULL, TRUE and FALSE, an integer and any
 /// other literal; IS [NOT] NULL, IS [NOT] TRUE, IS [NOT] FALSE and IS [NOT]; AND, OR and NOT; a
 /// CASE without an operand; `coalesce`, `ifnull`, `iif`, `if` and `nullif`; a comparison, of two
-/// integers where neither side takes TEXT or BLOB affinity; and the operators and built-ins NULL
-/// for a NULL operand ([`nulls_with`]'s). A function the host registers over a built-in is none.
+/// integers where neither side takes TEXT or BLOB affinity; and the operators NULL for a NULL
+/// operand and the built-ins [`NULL_STRICT`] names, at the arguments it names ([`strict_args`]). A
+/// function the host registers over a built-in is none.
 fn probe(n: &Node, extras: &Extras) -> Probe {
     let at = |n: &Option<Box<Node>>| n.as_deref().map_or(Probe::Unknown, |n| probe(n, extras));
     let boxed = |n: &Option<Box<Node>>| Box::new(at(n));
@@ -1399,21 +1469,17 @@ fn probe(n: &Node, extras: &Extras) -> Probe {
             p => Probe::Strict(vec![p]),
         },
         "case" if n.left.is_none() => arms(&n.list),
-        "+" | "-" | "*" | "/" | "%" | "||" => Probe::Strict(vec![at(&n.left), at(&n.right)]),
-        "cast" => Probe::Strict(vec![at(&n.left)]),
+        "+" | "-" | "*" | "/" | "%" | "||" | "&" | "|" | "<<" | ">>" => Probe::Strict(vec![at(&n.left), at(&n.right)]),
+        "cast" | "~" => Probe::Strict(vec![at(&n.left)]),
         "function" => match n.name.as_deref() {
             Some("coalesce" | "ifnull") if builtin(n.name.as_deref().unwrap_or("")) && !n.args.is_empty() => Probe::Coalesce(n.args.iter().map(|a| probe(a, extras)).collect()),
             Some(name @ ("iif" | "if")) if builtin(name) && n.args.len() >= 2 => arms(&n.args),
             Some("nullif") if builtin("nullif") && n.args.len() == 2 => Probe::NullIf { value: Box::new(probe(&n.args[0], extras)), other: Box::new(probe(&n.args[1], extras)), exact: !matches!(n.args[0].aff.as_str(), "text" | "blob") && !matches!(n.args[1].aff.as_str(), "text" | "blob") },
             Some(name @ ("likely" | "unlikely")) if builtin(name) && n.args.len() == 1 => probe(&n.args[0], extras),
-            Some(name) if builtin(name) && NULL_FOR_NULL.contains(&name) => {
-                let strict = match name {
-                    "replace" if !n.args.get(1).and_then(literal_text).is_some_and(|p| !p.is_empty()) => 2,
-                    _ => n.args.len(),
-                };
-                Probe::Strict(n.args.iter().take(strict).map(|a| probe(a, extras)).collect())
-            }
-            _ => Probe::Unknown,
+            _ => match strict_args(n, extras) {
+                strict if strict.is_empty() => Probe::Unknown,
+                strict => Probe::Strict(strict.iter().filter_map(|i| n.args.get(*i)).map(|a| probe(a, extras)).collect()),
+            },
         },
         _ => Probe::Unknown,
     }
@@ -1961,7 +2027,11 @@ impl Analyzer<'_> {
             return Fact { ty, non_null: self.built_non_null(n, scope) };
         }
         let args: Vec<Fact> = n.args.iter().map(|a| self.type_of(a, scope)).collect();
-        self.function(n, &args)
+        let fact = self.function(n, &args);
+        // A call NULL for a NULL argument ([`NULL_STRICT`]) is NULL where that argument may be,
+        // whatever the function's own row says of it.
+        let nullable_strict = strict_args(n, &self.extras).iter().any(|i| args.get(*i).is_some_and(|a| !a.non_null));
+        Fact { non_null: fact.non_null && !nullable_strict, ..fact }
     }
 
     /// Whether JSON a constructor builds ([`Analyzer::shape`]) is never NULL. Every constructor
@@ -2842,6 +2912,12 @@ impl Analyzer<'_> {
         } else {
             targets
         };
+        for sel in sel.arms() {
+            self.walk_arm(sel, scope, targets, found);
+        }
+    }
+
+    fn walk_arm(&self, sel: &Sel, scope: &ScopeStack, targets: &[Option<Fact>], found: &mut Vec<(String, Fact)>) {
         let mut inner = scope.clone();
         inner.push(&sel.from);
         for (i, e) in sel.columns.iter().map(|c| &c.expr).enumerate().chain(sel.rows.iter().flat_map(|row| row.iter().enumerate())) {
@@ -2885,9 +2961,6 @@ impl Analyzer<'_> {
         }
         for l in sel.limit.iter().chain(sel.offset.iter()) {
             self.walk(l, Ctx::Typed(Some(Fact::new("integer", true))), &inner, found);
-        }
-        if let Some(prior) = &sel.prior {
-            self.walk_select(prior, scope, targets, found);
         }
     }
 
@@ -3308,18 +3381,25 @@ impl Analyzer<'_> {
         if !sel.values && self.one_before_limit(sel).is_ok() {
             return Ok(());
         }
+        if sel.prior.is_none() {
+            return self.arm_at_most_one(sel);
+        }
         // An INTERSECT returns only rows both sides return, and an EXCEPT only rows of its left
         // side (`prior`, the arms before this one): at most one row when a side it draws every
-        // row from is.
-        if let Some(prior) = &sel.prior {
-            let drawn = match sel.op.as_deref() {
-                Some("intersect") => self.at_most_one(prior).is_ok() || self.arm_at_most_one(sel).is_ok(),
-                Some("except") => self.at_most_one(prior).is_ok(),
-                _ => false,
-            };
-            return if drawn { Ok(()) } else { Err("a set operation (UNION, INTERSECT, EXCEPT) returns any number of rows".into()) };
+        // row from is. The arms are read from the last, one after another, each left side proved
+        // as any SELECT is.
+        let mut arm = sel;
+        while let Some(prior) = arm.prior.as_deref() {
+            match arm.op.as_deref() {
+                Some("intersect") if self.arm_at_most_one(arm).is_ok() => return Ok(()),
+                Some("intersect" | "except") => arm = prior,
+                _ => break,
+            }
+            if arm.limit.as_ref().and_then(integer).is_some_and(|n| (0..=1).contains(&n)) || arm.prior.is_none() && (!arm.values && self.one_before_limit(arm).is_ok() || self.arm_at_most_one(arm).is_ok()) {
+                return Ok(());
+            }
         }
-        self.arm_at_most_one(sel)
+        Err("a set operation (UNION, INTERSECT, EXCEPT) returns any number of rows".into())
     }
 
     /// The proof for one SELECT arm, its set operation aside: the closure of [`Self::determined`],
@@ -3476,8 +3556,8 @@ impl Analyzer<'_> {
     }
 
     fn read_output_keys(&self, sel: &Sel) -> Vec<Vec<i64>> {
-        if let Some(prior) = &sel.prior {
-            return self.compound_keys(sel, prior);
+        if sel.prior.is_some() {
+            return self.compound_keys(sel);
         }
         if sel.values {
             return Vec::new();
@@ -3538,37 +3618,41 @@ impl Analyzer<'_> {
     }
 
     /// The keys of a compound SELECT's rows, `sel` its last arm and `prior` the arms before it.
-    /// INTERSECT and EXCEPT return only rows of their left side, so they keep its keys. Any operator
-    /// but UNION ALL returns distinct rows, so the whole row is a key, where each column is a
-    /// column on every arm, of one affinity and one collation, which the comparison that told the
-    /// rows apart and the one that reads them agree on.
-    fn compound_keys(&self, sel: &Sel, prior: &Sel) -> Vec<Vec<i64>> {
-        let op = sel.op.as_deref().unwrap_or("");
+    /// INTERSECT and EXCEPT return only rows of their left side, so they keep its keys, which are
+    /// read down the arms one after another. Any operator but UNION ALL returns distinct rows, so the
+    /// whole row is a key, where each column is a column on every arm, of one affinity and one
+    /// collation, which the comparison that told the rows apart and the one that reads them agree on.
+    fn compound_keys(&self, sel: &Sel) -> Vec<Vec<i64>> {
+        // The whole row's key of `sel` and of each left side whose keys it keeps, the last first.
+        let mut rows = Vec::new();
         let mut keys = Vec::new();
-        if op == "intersect" || op == "except" {
-            keys.extend(self.output_keys(prior));
-        }
-        if op != "union all" {
-            let mut arms = vec![sel];
-            let mut at = Some(prior);
-            while let Some(arm) = at {
-                arms.push(arm);
-                at = arm.prior.as_deref();
+        for top in sel.arms() {
+            if top.prior.is_none() {
+                keys = self.output_keys(top);
+                break;
             }
-            let width = sel.columns.len();
-            let alike = width > 0
-                && arms.iter().all(|arm| !arm.values && arm.columns.len() == width)
-                && (0..width).all(|i| {
-                    let first = &sel.columns[i].expr;
-                    first.op == "column" && arms.iter().all(|arm| {
-                        let e = &arm.columns[i].expr;
-                        e.op == "column" && e.aff == first.aff && e.coll.as_deref().unwrap_or("BINARY").eq_ignore_ascii_case(first.coll.as_deref().unwrap_or("BINARY"))
-                    })
-                });
-            if alike {
-                keys.push((0..width as i64).collect());
+            let op = top.op.as_deref().unwrap_or("");
+            if op != "union all" {
+                let arms: Vec<&Sel> = top.arms().collect();
+                let width = top.columns.len();
+                let alike = width > 0
+                    && arms.iter().all(|arm| !arm.values && arm.columns.len() == width)
+                    && (0..width).all(|i| {
+                        let first = &top.columns[i].expr;
+                        first.op == "column" && arms.iter().all(|arm| {
+                            let e = &arm.columns[i].expr;
+                            e.op == "column" && e.aff == first.aff && e.coll.as_deref().unwrap_or("BINARY").eq_ignore_ascii_case(first.coll.as_deref().unwrap_or("BINARY"))
+                        })
+                    });
+                if alike {
+                    rows.push((0..width as i64).collect());
+                }
+            }
+            if op != "intersect" && op != "except" {
+                break;
             }
         }
+        keys.extend(rows.into_iter().rev());
         keys
     }
 
@@ -4088,25 +4172,25 @@ fn select_calls(sel: &Sel, found: &dyn Fn(&Node) -> bool) -> bool {
             || n.list.iter().chain(&n.args).chain(&n.order_by).chain(&n.partition_by).any(|c| node(c, found))
             || n.select.as_deref().is_some_and(|s| select_calls(s, found))
     }
-    sel.from.iter().any(|f| f.args.iter().chain(f.on.iter()).any(|n| node(n, found)) || f.subquery.as_deref().is_some_and(|s| select_calls(s, found)))
-        || sel.columns.iter().map(|c| &c.expr).chain(sel.rows.iter().flatten()).chain(sel.where_.iter()).chain(&sel.group_by).chain(sel.having.iter()).chain(&sel.order_by).chain(sel.limit.iter()).chain(sel.offset.iter()).any(|n| node(n, found))
-        || sel.prior.as_deref().is_some_and(|p| select_calls(p, found))
+    sel.arms().any(|sel| {
+        sel.from.iter().any(|f| f.args.iter().chain(f.on.iter()).any(|n| node(n, found)) || f.subquery.as_deref().is_some_and(|s| select_calls(s, found)))
+            || sel.columns.iter().map(|c| &c.expr).chain(sel.rows.iter().flatten()).chain(sel.where_.iter()).chain(&sel.group_by).chain(sel.having.iter()).chain(&sel.order_by).chain(sel.limit.iter()).chain(sel.offset.iter()).any(|n| node(n, found))
+    })
 }
 
 /// Whether a SELECT reads only columns of its own FROM items, at any depth: none of a query around
 /// it, which would make it correlated.
 fn self_contained(sel: &Sel) -> bool {
     fn select(sel: &Sel, own: &mut HashSet<i64>, read: &mut Vec<i64>) {
-        for f in &sel.from {
-            own.insert(f.cursor);
-            f.args.iter().chain(f.on.iter()).for_each(|n| node(n, own, read));
-            if let Some(sub) = &f.subquery {
-                select(sub, own, read);
+        for sel in sel.arms() {
+            for f in &sel.from {
+                own.insert(f.cursor);
+                f.args.iter().chain(f.on.iter()).for_each(|n| node(n, own, read));
+                if let Some(sub) = &f.subquery {
+                    select(sub, own, read);
+                }
             }
-        }
-        sel.columns.iter().map(|c| &c.expr).chain(sel.rows.iter().flatten()).chain(sel.where_.iter()).chain(&sel.group_by).chain(sel.having.iter()).chain(&sel.order_by).chain(sel.limit.iter()).chain(sel.offset.iter()).for_each(|n| node(n, own, read));
-        if let Some(prior) = &sel.prior {
-            select(prior, own, read);
+            sel.columns.iter().map(|c| &c.expr).chain(sel.rows.iter().flatten()).chain(sel.where_.iter()).chain(&sel.group_by).chain(sel.having.iter()).chain(&sel.order_by).chain(sel.limit.iter()).chain(sel.offset.iter()).for_each(|n| node(n, own, read));
         }
     }
     fn node(n: &Node, own: &mut HashSet<i64>, read: &mut Vec<i64>) {
@@ -4399,6 +4483,131 @@ mod tests {
         // A list does not nest: SQLite's OR is a tree, which its bound counts; an IN list is not.
         let list = (0..5_000).map(|i| i.to_string()).collect::<Vec<_>>().join(", ");
         assert!(small(format!("select id from users where id in ({list})")).diagnostics.is_empty());
+    }
+
+    #[test]
+    fn a_chain_of_with_queries_nests_as_deep_as_sqlite_nests_views_and_one_query_past_it_is_an_error_at_the_bound() {
+        // SQLite reads each view and each WITH query a statement reads as a subquery of its own, so
+        // a chain of them, each reading the one before, nests a SELECT per link. SQLite holds a
+        // chain of views to 1,000 nested SELECTs, the statement's own counted, and a chain of WITH
+        // queries to none: the engine holds both to that bound, in a read as in a write.
+        let ddl = vec!["create table users (id integer primary key, name text not null, nick text)".to_string()];
+        let small = |sql: String, ddl: &[String]| std::thread::scope(|s| std::thread::Builder::new().stack_size(256 << 10).spawn_scoped(s, || analyze_ddl(&sql, ddl, &Extras::default()).analysis).unwrap().join().unwrap());
+        let refused = |a: &Analysis| a.diagnostics.iter().map(|d| d.message.clone()).collect::<Vec<_>>();
+        let with = |n: usize| (1..n).fold("with c0 as (select 1 as a)".to_string(), |q, i| format!("{q}, c{i} as (select * from c{})", i - 1));
+        let chain = |n: usize| format!("{} select a from c{}", with(n), n - 1);
+        let at = small(chain(999), &ddl);
+        assert!(at.diagnostics.is_empty(), "{:?}", at.diagnostics);
+        assert_eq!((at.cardinality, col(&at, "a")), (Cardinality::One, ("integer".to_string(), false)));
+        for sql in [chain(1_000), chain(4_200), format!("delete from users where id in ({} select a from c999)", with(1_000)), format!("{} insert into users (id, name) select a, 'x' from c999", with(1_000))] {
+            assert_eq!(refused(&small(sql.clone(), &ddl)), ["VIEWs and/or subqueries nested too deep"], "{}", &sql[sql.len() - 60..]);
+        }
+        let views: Vec<String> = std::iter::once("create view v0 as select 1 as a".to_string()).chain((1..1_000).map(|i| format!("create view v{i} as select * from v{}", i - 1))).collect();
+        assert!(small("select a from v998".to_string(), &views).diagnostics.is_empty());
+        assert_eq!(refused(&small("select a from v999".to_string(), &views)), ["VIEWs and/or subqueries nested too deep"]);
+    }
+
+    #[test]
+    fn a_compound_s_arms_stand_side_by_side_so_a_subquery_nests_as_deep_in_any_of_them() {
+        // SQLite walks a compound's arms one after another, and reads the deepest chain of views
+        // it accepts in any of them; the engine's bound counts a SELECT inside another, not an
+        // arm beside one, so a chain of WITH queries that are each a compound, reading the one
+        // before in the first arm, is held to the bound of the plain chain.
+        let views: Vec<String> = std::iter::once("create view v0 as select 1 as a".to_string()).chain((1..1_000).map(|i| format!("create view v{i} as select * from v{}", i - 1))).collect();
+        for sql in ["select a from v998 union all select 2", "select 2 as a union all select a from v998", "select 2 as a union all select a from v998 union all select 3"] {
+            let a = analyze_ddl(sql, &views, &Extras::default()).analysis;
+            assert!(a.diagnostics.is_empty(), "{sql}: {:?}", a.diagnostics);
+            assert_eq!((a.cardinality, col(&a, "a")), (Cardinality::Many, ("integer".to_string(), false)), "{sql}");
+        }
+        let with = |n: usize| (1..n).fold("with c0 as (select 1 as a)".to_string(), |q, i| format!("{q}, c{i} as (select a from c{} intersect select 1 except select 2)", i - 1));
+        let at = analyze_ddl(&format!("{} select a from c998", with(999)), &[], &Extras::default()).analysis;
+        assert!(at.diagnostics.is_empty(), "{:?}", at.diagnostics);
+        assert_eq!((at.cardinality, col(&at, "a")), (Cardinality::AtMostOne, ("integer".to_string(), false)));
+        let past = analyze_ddl(&format!("{} select a from c999", with(1_000)), &[], &Extras::default()).analysis;
+        assert_eq!(past.diagnostics.iter().map(|d| d.message.as_str()).collect::<Vec<_>>(), ["VIEWs and/or subqueries nested too deep"]);
+    }
+
+    #[test]
+    fn the_engine_s_stack_holds_selects_nested_to_the_bound_over_the_highest_expression() {
+        // The deepest tree SQLite's bounds admit at once: WITH queries nested to the bound on
+        // SELECTs, each a compound that reads the one before in its first arm, over an expression
+        // whose height across a subquery reaches SQLite's bound on it, which an unoptimized build
+        // reads on the engine's stack (`crate::stack`).
+        let ddl = vec!["create table users (id integer primary key, name text not null, nick text)".to_string()];
+        let coalesce = |n: usize, inner: &str| (0..n).fold(inner.to_string(), |e, _| format!("coalesce({e}, name)"));
+        let high = format!("with c0 as (select {} as a from users), c1 as (select {} as a from users)", coalesce(500, "nick"), coalesce(490, "(select a from c0)"));
+        let sql = (2..997).fold(high, |q, i| format!("{q}, c{i} as (select a from c{} union all select 1)", i - 1)) + " select a from c996";
+        let a = analyze_ddl(&sql, &ddl, &Extras::default()).analysis;
+        assert!(a.diagnostics.is_empty(), "{:?}", a.diagnostics);
+        assert_eq!(a.cardinality, Cardinality::Many);
+    }
+
+    #[test]
+    fn a_compounds_code_generation_is_held_to_twenty_compounds_of_500_arms_one_inside_another() {
+        // SQLite codes the first of a compound's arms inside all the others, so a compound of its
+        // 500 arms in each of a chain of WITH queries recurses 500 levels per link: 20 links read,
+        // and past them the statement is refused rather than overflow SQLite's own stack.
+        let small = |sql: String| std::thread::scope(|s| std::thread::Builder::new().stack_size(256 << 10).spawn_scoped(s, || analyze_ddl(&sql, &[], &Extras::default()).analysis).unwrap().join().unwrap());
+        let refused = |a: &Analysis| a.diagnostics.iter().map(|d| d.message.clone()).collect::<Vec<_>>();
+        let arms: String = (1..500).map(|_| " union all select 1").collect();
+        let chain = |n: usize| (1..n).fold("with c0 as (select 1 as a)".to_string(), |q, i| format!("{q}, c{i} as (select a from c{}{arms})", i - 1)) + &format!(" select count(*) from c{}", n - 1);
+        let at = small(chain(20));
+        assert!(at.diagnostics.is_empty(), "{:?}", at.diagnostics);
+        assert_eq!(refused(&small(chain(30))), ["VIEWs and/or subqueries nested too deep"]);
+        // SQLite's bound of 500 arms skips a compound whose last arm is a one-row VALUES, and a
+        // chain of VALUES written out, which it codes as arms too; one VALUES list of many rows it
+        // codes one row after another.
+        let n = 20_000;
+        for sql in [format!("select 1{} union all values (1)", " union all select 1".repeat(n)), format!("values (1){}", " union all values (2)".repeat(n))] {
+            assert_eq!(refused(&small(sql)), ["VIEWs and/or subqueries nested too deep"]);
+        }
+        assert!(small(format!("values (1){}", ", (2)".repeat(n))).diagnostics.is_empty());
+    }
+
+    #[test]
+    fn an_expression_is_held_to_sqlites_bound_through_the_columns_of_the_subqueries_it_reads() {
+        // A column of a WITH query or a view stands for the query's expression, which the engine
+        // reads through and SQLite's flattener copies in its place, so a chain of them each wrapping
+        // the one before adds up: held to SQLite's bound on an expression's depth, 1,000.
+        let small = |sql: String, ddl: &[String]| std::thread::scope(|s| std::thread::Builder::new().stack_size(256 << 10).spawn_scoped(s, || analyze_ddl(&sql, ddl, &Extras::default()).analysis).unwrap().join().unwrap());
+        let refused = |a: &Analysis| a.diagnostics.iter().map(|d| d.message.clone()).collect::<Vec<_>>();
+        let too_tall = ["Expression tree is too large (maximum depth 1000)"];
+        let wrap = |e: String, k: usize| (0..k).fold(e, |e, _| format!("coalesce({e}, 0)"));
+        let queries = |n: usize, k: usize| (1..n).fold("with c0 as (select 1 as a)".to_string(), |q, i| format!("{q}, c{i} as (select {} as a from c{})", wrap("a".into(), k), i - 1));
+        let with = |n: usize, k: usize| format!("{} select a from c{}", queries(n, k), n - 1);
+        // 1 + 333 × 3 levels, and one link more.
+        let at = small(with(334, 3), &[]);
+        assert!(at.diagnostics.is_empty(), "{:?}", at.diagnostics);
+        assert_eq!(col(&at, "a"), ("integer".to_string(), false));
+        for sql in [with(335, 3), with(999, 50)] {
+            assert_eq!(refused(&small(sql, &[])), too_tall);
+        }
+        let views = |n: usize| std::iter::once("create view v0 as select 1 as a".to_string()).chain((1..n).map(|i| format!("create view v{i} as select {} as a from v{}", wrap("a".into(), 3), i - 1))).collect::<Vec<_>>();
+        assert!(small("select a from v333".to_string(), &views(334)).diagnostics.is_empty());
+        assert_eq!(refused(&small("select a from v334".to_string(), &views(335))), too_tall);
+        // A scalar subquery, a level as SQLite counts it, and a WHERE count as the select list does.
+        assert!(small(format!("{} select (select a from c332) as x", queries(333, 3)), &[]).diagnostics.is_empty());
+        let tall = wrap("a".into(), 3);
+        for sql in [format!("{} select (select {tall} from c332) as x", queries(333, 3)), format!("{} select 1 as x from c332 where {tall} > 0", queries(333, 3))] {
+            assert_eq!(refused(&small(sql, &[])), too_tall);
+        }
+        // A window's ORDER BY, and a write's expressions around a subquery, as SQLite measures them.
+        let users = |n: usize| std::iter::once("create table users (id integer primary key, name text not null, nick text)".to_string()).chain(views(n)).collect::<Vec<_>>();
+        let (fits, past) = (wrap("a".into(), 2), wrap("a".into(), 3));
+        for (at, over) in [
+            (format!("{} select row_number() over (order by {fits}) as r from c332", queries(333, 3)), format!("{} select row_number() over (order by {past}) as r from c332", queries(333, 3))),
+            (format!("update users set nick = (select {fits} from v332)"), format!("update users set nick = (select {past} from v332)")),
+            (format!("delete from users where id = (select {} from v332)", wrap("a".into(), 1)), format!("delete from users where id = (select {fits} from v332)")),
+            (format!("delete from users returning (select {fits} from v332) as x"), format!("delete from users returning (select {past} from v332) as x")),
+            (format!("insert into users (id, name) values ((select {fits} from v332), 'x')"), format!("insert into users (id, name) values ((select {past} from v332), 'x')")),
+            (format!("insert into users (id, name) values (1, 'x') on conflict (id) do update set nick = (select {fits} from v332)"), format!("insert into users (id, name) values (1, 'x') on conflict (id) do update set nick = (select {past} from v332)")),
+            ("select (select 1 limit (select a from v332)) as x".to_string(), format!("select (select 1 limit (select {} from v332)) as x", wrap("a".into(), 1))),
+            ("select (select 1 limit 1 offset (select a from v332)) as x".to_string(), format!("select (select 1 limit 1 offset (select {} from v332)) as x", wrap("a".into(), 1))),
+        ] {
+            let read = small(at.clone(), &users(333));
+            assert!(read.diagnostics.is_empty(), "{at}: {:?}", read.diagnostics);
+            assert_eq!(refused(&small(over, &users(333))), too_tall, "{at}");
+        }
     }
 
     fn col(a: &Analysis, name: &str) -> (String, bool) {
@@ -6280,5 +6489,225 @@ mod tests {
         assert!(said("insert into g (_shape) values ('[[0,0],[1,0],[0,1],[0,0]]')", &["create virtual table g using geopoly(name text not null)"]).is_empty());
         assert!(said("explain insert into req (id) values (1)", &[]).is_empty());
         assert!(said("explain query plan insert into req (id) values (1)", &[]).is_empty());
+    }
+
+    /// [`NULL_STRICT`] measured against SQLite itself: the SQLite rusqlite bundles, built with the
+    /// math, percentile and geopoly functions (`.cargo/config.toml`).
+    mod null_strict {
+        use super::*;
+        use rusqlite::{types::ValueRef, Connection};
+
+        /// The values an argument takes beside a NULL one, as SQL literals: numbers at their
+        /// bounds, empty and non-empty text and blobs, JSON documents and paths (a document of
+        /// JSON's own subtype too), a polygon, dates, date modifiers, formats and patterns.
+        const VALUES: &[&str] = &[
+            "NULL", "0", "1", "-1", "2", "3", "0.5", "-0.5", "-0.0", "1e308", "1e999", "-1e999", "9223372036854775807", "-9223372036854775808", "''", "' '", "'a'", "'abc'", "'A'", "'x'", "'ab'", "'b'", "'é'",
+            "'%'", "'_'", "'*'", "'1'", "'0'", "'-1'", "'2.5'", "'$'", "'$.a'", "'$[0]'", "'$[#]'", "'$[#-1]'", "'$.\"a\"'", "'\"a\"'", "'[1]'", "'{\"a\":1}'", "'{}'", "'[]'", "'null'", "'true'",
+            "'[[0,0],[1,0],[0,1],[0,0]]'", "'now'", "'2020-01-02'", "'2020-01-02 03:04:05'", "'+1 day'", "'unixepoch'", "'subsec'", "'start of month'", "'%Y'", "'%s'", "'%d'",
+            "x''", "x'00'", "x'616263'", "x'ffff'", "'\\u0041'", "json('[1]')", "jsonb('{\"a\":1}')",
+        ];
+
+        /// Functions whose answers say nothing of a call in a statement: each call a new value or
+        /// an effect, and FTS5's helper for the text of a MATCH query.
+        const LEFT_OUT: &[&str] = &["random", "randomblob", "changes", "total_changes", "last_insert_rowid", "load_extension", "sqlite_log", "sqlite_offset", "fts5_insttoken"];
+
+        /// Calls this SQLite answers NULL for a NULL argument, which [`NULL_STRICT`] leaves out
+        /// since another SQLite a driver runs does not (its comment says which).
+        const ELSEWHERE: &[(&str, usize, usize, Strict)] = &[
+            ("json_valid", 1, 2, At(&[0])), ("json_extract", 3, 8, Every), ("jsonb", 1, 1, Every), ("json_remove", 2, 8, Every), ("jsonb_remove", 1, 8, Every),
+            ("json_insert", 1, 9, At(&[0])), ("json_replace", 1, 9, At(&[0])), ("json_set", 1, 9, At(&[0])), ("jsonb_insert", 1, 9, At(&[0])), ("jsonb_replace", 1, 9, At(&[0])), ("jsonb_set", 1, 9, At(&[0])),
+        ];
+
+        /// `k` arguments from [`VALUES`]: every combination where there are at most 4,000, else
+        /// 4,000 drawn from them, the same on every run.
+        fn draws(k: usize) -> Vec<Vec<&'static str>> {
+            let n = VALUES.len();
+            match n.checked_pow(k as u32).filter(|total| *total <= 4_000) {
+                Some(total) => (0..total).map(|mut i| (0..k).map(|_| { let v = VALUES[i % n]; i /= n; v }).collect()).collect(),
+                None => {
+                    let mut seed: u64 = 0x5eed;
+                    (0..4_000).map(|_| (0..k).map(|_| { seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407); VALUES[(seed >> 33) as usize % n] }).collect()).collect()
+                }
+            }
+        }
+
+        /// The arguments of calls with `count` of them, argument `i` NULL.
+        fn null_at(count: usize, i: usize) -> Vec<Vec<&'static str>> {
+            draws(count - 1).into_iter().map(|mut args| { args.insert(i, "NULL"); args }).collect()
+        }
+
+        fn call(name: &str, args: &[&str]) -> String {
+            match name {
+                "->" | "->>" => format!("{} {name} {}", args[0], args[1]),
+                _ => format!("\"{name}\"({})", args.join(", ")),
+            }
+        }
+
+        /// Whether SQLite answers the call with NULL; `None` where it refuses it.
+        fn null(db: &Connection, name: &str, args: &[&str]) -> Option<bool> {
+            db.query_row(&format!("select {}", call(name, args)), [], |r| Ok(matches!(r.get_ref(0)?, ValueRef::Null))).ok()
+        }
+
+        /// SQLite's scalar functions, each with the numbers of arguments it is called with here:
+        /// its own, or from 1 to 8 for one that takes any number, but a number of arguments at
+        /// which the name is an aggregate's (`max(x)`).
+        fn scalars(db: &Connection) -> Vec<(String, Vec<usize>)> {
+            let mut listing = db.prepare("select name, narg, type from pragma_function_list").unwrap();
+            let listed: Vec<(String, i64, String)> = listing.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?))).unwrap().map(Result::unwrap).collect();
+            let aggregate = |name: &str, count: usize| listed.iter().any(|(n, narg, ty)| n == name && *narg == count as i64 && ty != "s");
+            let mut out: Vec<(String, Vec<usize>)> = Vec::new();
+            for (name, narg, ty) in &listed {
+                if ty != "s" || LEFT_OUT.contains(&name.as_str()) {
+                    continue;
+                }
+                let counts: Vec<usize> = if *narg < 0 { (1..=8).collect() } else { vec![*narg as usize] };
+                let counts = counts.into_iter().filter(|c| *c > 0 && !aggregate(name, *c)).collect();
+                out.push((name.clone(), counts));
+            }
+            out
+        }
+
+        #[test]
+        fn the_rows_are_in_lower_case_and_apart() {
+            for (i, (name, fewest, most, strict)) in NULL_STRICT.iter().enumerate() {
+                assert_eq!(*name, name.to_ascii_lowercase());
+                assert!(1 <= *fewest && fewest <= most, "{name}");
+                if let At(positions) = strict {
+                    assert!(!positions.is_empty() && positions.windows(2).all(|w| w[0] < w[1]) && positions.iter().all(|p| p < fewest), "{name}");
+                }
+                assert!(NULL_STRICT[i + 1..].iter().all(|(other, lo, hi, _)| other != name || hi < fewest || lo > most), "{name}");
+            }
+        }
+
+        #[test]
+        fn each_row_is_null_for_a_null_argument_as_sqlite_answers() {
+            let db = Connection::open_in_memory().unwrap();
+            let mut wrong = Vec::new();
+            for (name, fewest, most, _) in NULL_STRICT {
+                for count in *fewest..=*most {
+                    let listed: bool = db.query_row("select count(*) > 0 from pragma_function_list where name = ?1 and type = 's' and (narg = ?2 or narg < 0)", rusqlite::params![name, count as i64], |r| r.get(0)).unwrap();
+                    assert!(listed, "{name} of {count} arguments is no scalar function of SQLite {}", rusqlite::version());
+                    for i in strict_positions(name, count, None) {
+                        if let Some(args) = null_at(count, i).into_iter().find(|args| null(&db, name, args) == Some(false)) {
+                            wrong.push(call(name, &args));
+                        }
+                    }
+                }
+            }
+            // A NULL replacement behind a pattern that is a text literal other than ''.
+            for pattern in VALUES.iter().filter(|v| v.starts_with('\'') && **v != "''") {
+                for x in VALUES {
+                    if null(&db, "replace", &[*x, *pattern, "NULL"]) == Some(false) {
+                        wrong.push(call("replace", &[*x, *pattern, "NULL"]));
+                    }
+                }
+            }
+            assert!(wrong.is_empty(), "SQLite {} answers these with a value, for a NULL argument the table names: {wrong:#?}", rusqlite::version());
+        }
+
+        #[test]
+        fn every_argument_sqlite_answers_null_for_is_a_row_s() {
+            let db = Connection::open_in_memory().unwrap();
+            let mut missing = Vec::new();
+            for (name, counts) in scalars(&db) {
+                for count in counts {
+                    // A function no call of which gives a value here says nothing of its NULLs.
+                    if !draws(count).iter().any(|args| !args.contains(&"NULL") && null(&db, &name, args) == Some(false)) {
+                        continue;
+                    }
+                    let strict = strict_positions(&name, count, None);
+                    let elsewhere: Vec<usize> = ELSEWHERE.iter().filter(|(f, fewest, most, _)| *f == name && (*fewest..=*most).contains(&count)).flat_map(|(.., s)| match s { Every => (0..count).collect::<Vec<_>>(), At(p) => p.to_vec() }).collect();
+                    for i in (0..count).filter(|i| !strict.contains(i) && !elsewhere.contains(i)) {
+                        let answers: Vec<Option<bool>> = null_at(count, i).iter().map(|args| null(&db, &name, args)).collect();
+                        if answers.contains(&Some(true)) && !answers.contains(&Some(false)) {
+                            missing.push(format!("{name} of {count} arguments, argument {i}"));
+                        }
+                    }
+                }
+            }
+            assert!(missing.is_empty(), "SQLite {} answers NULL for a NULL in each of these, which NULL_STRICT leaves out: {missing:#?}", rusqlite::version());
+        }
+
+        /// Whether the engine types `u.v` non-null under a WHERE of `test` over a LEFT JOIN that
+        /// null-extends `u`; `None` where SQLite refuses the statement.
+        fn narrows(test: &str) -> Option<bool> {
+            let ddl = vec!["create table t (id integer primary key)".to_string(), "create table u (id integer primary key, v)".to_string()];
+            let sql = format!("select u.v as v from t left join u on u.id = t.id where {test}");
+            let a = analyze_ddl(&sql, &ddl, &Extras::default()).analysis;
+            a.diagnostics.is_empty().then(|| !col(&a, "v").1)
+        }
+
+        #[test]
+        fn a_where_test_narrows_through_each_argument_a_row_names_and_no_other() {
+            for (name, fewest, most, _) in NULL_STRICT {
+                for count in *fewest..=*most {
+                    let strict = strict_positions(name, count, None);
+                    for i in 0..count {
+                        // 0.5 elsewhere, since `likelihood` takes a literal real, and refuses a column.
+                        let mut args = vec!["0.5"; count];
+                        args[i] = "u.v";
+                        let test = format!("{} is not null", call(name, &args));
+                        match narrows(&test) {
+                            Some(narrowed) => assert_eq!(narrowed, strict.contains(&i), "{test}"),
+                            None => assert!(*name == "likelihood" && i == 1, "{test} is refused"),
+                        }
+                    }
+                }
+            }
+            // What another SQLite answers otherwise narrows nothing.
+            for (name, fewest, most, _) in ELSEWHERE {
+                for count in *fewest..=*most {
+                    let strict = strict_positions(name, count, None);
+                    for i in (0..count).filter(|i| !strict.contains(i)) {
+                        let mut args = vec!["'{}'"; count];
+                        args[i] = "u.v";
+                        let test = format!("{} is not null", call(name, &args));
+                        assert_ne!(narrows(&test), Some(true), "{test}");
+                    }
+                }
+            }
+            // Operators, `replace` behind a pattern that is a text literal, and a function inside another's argument.
+            for test in [
+                "u.v + 1 > 0", "u.v & 1", "1 | u.v", "u.v << 1", "~u.v", "not u.v", "(u.v = 1) = 0", "(u.v < 1) is not null", "-u.v is not null", "+u.v is not null", "cast(u.v as text) is not null",
+                "u.v collate nocase is not null", "(u.v between 1 and 2) is not null", "(u.v in (1, 2)) is not null", "abs(sqrt(u.v)) > 0", "date(u.v) = '2020-01-02'", "u.v ->> '$.a' = 1", "json_extract(u.v, '$.a') = 1",
+                "'x' like u.v escape '\\'", "'x' like 'x' escape u.v", "nullif(u.v, 1) is not null", "max(u.v, 1) > 0", "iif(u.v, 1)", "replace('x', 'a', u.v) is not null", "1 between u.v and 2", "1 between 0 and u.v",
+                "not (u.v like 'a%')", "not (u.v in (1, 2))",
+            ] {
+                assert_eq!(narrows(test), Some(true), "{test}");
+            }
+            for test in [
+                "(1 between u.v and 0) is not null", "not json_valid(u.v)", "json_extract('{}', '$', u.v) is not null", "json_set(u.v, '$', 1) is not null", "json_remove('{}', u.v) is not null", "jsonb_remove(u.v) is not null", "jsonb(u.v) is not null", "not (1 between u.v and 0)", "not (u.v in (select 1))", "not (u.v is null) is null", "(1 in (u.v, 1)) is not null", "(u.v in (select 1)) is not null", "u.v is not 1", "coalesce(u.v, 1) > 0", "nullif(1, u.v) > 0", "iif(u.v, 1, 2) > 0",
+                "json_set('{}', u.v, 1) is not null", "concat_ws(',', u.v) is not null", "printf('%s', u.v) is not null", "replace('x', '', u.v) = 'x'", "((u.v, 1) = (1, 2)) is not null", "(u.v or 1) is not null",
+            ] {
+                assert_eq!(narrows(test), Some(false), "{test}");
+            }
+        }
+
+        #[test]
+        fn a_call_sqlite_answers_null_for_is_typed_nullable() {
+            let db = Connection::open_in_memory().unwrap();
+            let ddl = vec!["create table c (n0, n1 integer, n2 real, n3 text, n4 blob)".to_string()];
+            let mut wrong = Vec::new();
+            for (name, counts) in scalars(&db) {
+                for count in counts {
+                    for i in 0..count {
+                        // A few calls SQLite answers with NULL, with the NULL a nullable column of each type.
+                        let (plain, nulls): (Vec<_>, Vec<_>) = null_at(count, i).into_iter().partition(|args| args.iter().filter(|a| **a == "NULL").count() == 1);
+                        for args in plain.into_iter().chain(nulls).filter(|args| null(&db, &name, args) == Some(true)).take(5) {
+                            for column in ["c.n0", "c.n1", "c.n2", "c.n3", "c.n4"] {
+                                let mut args = args.clone();
+                                args[i] = column;
+                                let sql = format!("select {} as v from c", call(&name, &args));
+                                let a = analyze_ddl(&sql, &ddl, &Extras::default()).analysis;
+                                if a.diagnostics.is_empty() && !col(&a, "v").1 {
+                                    wrong.push(sql);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            assert!(wrong.is_empty(), "SQLite {} answers NULL for each of these with the column NULL, which the engine types non-null: {wrong:#?}", rusqlite::version());
+        }
     }
 }

@@ -273,6 +273,12 @@ impl Walk {
     }
 
     fn sel(&mut self, s: &Sel) {
+        for s in s.arms() {
+            self.arm(s);
+        }
+    }
+
+    fn arm(&mut self, s: &Sel) {
         for c in &s.columns {
             self.node(&c.expr);
         }
@@ -295,9 +301,6 @@ impl Walk {
         }
         for n in s.rows.iter().flatten().chain(&s.where_).chain(&s.group_by).chain(&s.having).chain(&s.order_by).chain(&s.limit).chain(&s.offset) {
             self.node(n);
-        }
-        if let Some(prior) = &s.prior {
-            self.sel(prior);
         }
     }
 }

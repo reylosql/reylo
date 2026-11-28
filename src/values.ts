@@ -29,6 +29,7 @@
 // reached through `globalThis` where one exists.
 import { bareName, holdsWholeArrays, isMysqlSet, type EngineType } from "./engine-type.ts";
 import type { AnyClient, QueryModule } from "./execute.ts";
+import { lastOfEach } from "./row.ts";
 
 export type Dialect = "postgres" | "mysql" | "sqlite" | "clickhouse";
 
@@ -1322,17 +1323,34 @@ export function parseArray(text: string, element: (text: string) => unknown, del
  * level as a parameter tells it (`isLevel`); a JSON element may be one at any depth, which its type
  * holds whatever the dimensions around it.
  * A whole array standing as an element (`{k}`) is held to its own kind's, and the array around it to
- * its own by the dimensions its text had (`recordDepth`).
+ * its own by the dimensions its text had (`recordDepth`). An array a row value's field holds is held
+ * to the field's kind, in a column of rows or an array of them, and named by its field.
  */
-export function withinDimensions(v: unknown, kind: Kind, column: string): unknown {
+export function withinDimensions(v: unknown, kind: Kind, column: string, path?: FieldPath, jsonOnly = false): unknown {
+  if (!kind.endsWith("[]")) {
+    // Of two fields of one name the row holds the last one's value, and its type shows that field.
+    if (isRowKind(kind) && isObject(v)) for (const [name, inner] of lastOfEach(rowFields(kind))) if (jsonOnly ? holdsJsonArray(inner) : holdsArray(inner)) withinDimensions(v[name], inner, column, { fields: [...(path?.fields ?? []), name], inArray: path?.inArray ?? false }, jsonOnly);
+    return v;
+  }
   if (!Array.isArray(v)) return v;
   const element = elementKind(kind);
   const declared = (kind.length - element.length) / 2;
   const whole = wholeArrayKind(element);
+  // Under allow_nested_arrays only an array of JSON is held to its dimensions: its type has no deeper form, since its value can't tell a level from a JSON array.
+  const holds = !jsonOnly || element === "json";
+  const rows = (level: unknown[]): void => {
+    if (!holdsArray(element)) return;
+    const inside: FieldPath = { fields: path?.fields ?? [], inArray: true };
+    const each = (at: unknown[]): void => {
+      for (const e of at) Array.isArray(e) ? each(e) : withinDimensions(e, element, column, inside, jsonOnly);
+    };
+    each(level);
+  };
   // A whole array's own dimensions, from its text, whatever its elements are.
   const recorded = wholeDepths.get(v);
   if (recorded !== undefined && whole === undefined) {
-    if (recorded > declared) throw tooDeep(column, recorded, declared);
+    if (holds && recorded > declared) throw tooDeep(column, recorded, declared, path, element === "json");
+    rows(v);
     return v;
   }
   if (element === "json") return v;
@@ -1340,25 +1358,63 @@ export function withinDimensions(v: unknown, kind: Kind, column: string): unknow
     // An array of whole arrays: only its text told its own levels from its elements' (a driver's
     // own arrays are taken at the levels declared); each element is held to its own.
     const depth = recorded ?? declared;
-    if (depth > declared) throw tooDeep(column, depth, declared);
+    if (holds && depth > declared) throw tooDeep(column, depth, declared, path);
     const each = (level: unknown[], at: number): void => {
-      for (const e of level) if (Array.isArray(e)) at > 1 ? each(e, at - 1) : withinDimensions(e, whole, column);
+      for (const e of level) if (Array.isArray(e)) at > 1 ? each(e, at - 1) : withinDimensions(e, whole, column, path && { ...path, inArray: true }, jsonOnly);
     };
-    each(v, declared);
+    // Under allow_nested_arrays the levels around them may be more than declared, which their text recorded.
+    each(v, recorded ?? declared);
     return v;
   }
   let depth = 0;
   for (let level: unknown = v; Array.isArray(level) && (depth === 0 || isLevel(element, level)); level = level.find((e) => e !== null)) depth++;
-  if (depth <= declared) return v;
-  throw tooDeep(column, depth, declared);
+  if (holds && depth > declared) throw tooDeep(column, depth, declared, path, element === "json");
+  rows(v);
+  return v;
 }
 
-/** Why a Postgres array is refused: it holds `depth` dimensions, and its type `declared`. */
-function tooDeep(column: string, depth: number, declared: number): DecodeError {
+const holdsJsonArrayCache = new Map<Kind, boolean>();
+/** Whether a value of `kind` is an array of JSON or holds one in a row value's field: what `withinDimensions` holds to its dimensions under allow_nested_arrays too. */
+export function holdsJsonArray(kind: Kind): boolean {
+  // A whole array standing as an element (a domain's over jsonb[]) is one as its own kind is.
+  const whole = wholeArrayKind(kind);
+  if (whole !== undefined) return holdsJsonArray(whole);
+  if (kind.endsWith("[]")) return elementKind(kind) === "json" || holdsJsonArray(elementKind(kind));
+  if (!isRowKind(kind)) return false;
+  let holds = holdsJsonArrayCache.get(kind);
+  if (holds === undefined) holdsJsonArrayCache.set(kind, (holds = rowFields(kind).some(([, inner]) => holdsJsonArray(inner))));
+  return holds;
+}
+
+/** The row value's fields that lead to an array, from the column, and whether an array of rows stands between, so that the field can't be read off the column alone. */
+type FieldPath = { readonly fields: readonly string[]; readonly inArray: boolean };
+
+const holdsArrayCache = new Map<Kind, boolean>();
+/** Whether a value of `kind` is a Postgres array or holds one in a row value's field: what `withinDimensions` holds to its dimensions. */
+export function holdsArray(kind: Kind): boolean {
+  if (kind.endsWith("[]")) return true;
+  if (!isRowKind(kind)) return false;
+  let holds = holdsArrayCache.get(kind);
+  if (holds === undefined) holdsArrayCache.set(kind, (holds = rowFields(kind).some(([, inner]) => holdsArray(inner))));
+  return holds;
+}
+
+/** A name as SQL reads it whatever it is, a keyword (`current_date`) or mixed case included: quoted. */
+const ident = (name: string) => `"${name.replace(/"/g, '""')}"`;
+
+/** Why a Postgres array is refused: it holds `depth` dimensions, and its type `declared`; `path` names the row value's field that holds it. */
+function tooDeep(column: string, depth: number, declared: number, path?: FieldPath, json = false): DecodeError {
+  // allow_nested_arrays types no array of JSON at any depth, so for one it is no way out.
+  const nesting = json ? "" : " allow_nested_arrays: true in .reylo.yaml to type it at any depth.";
+  if (path !== undefined) {
+    // The field read off the column, a column expression, is typed as JSON through to_jsonb, where the whole row's to_jsonb holds the field's array to its dimensions too. A field of a row inside an array can be read so only once that row is.
+    const read = path.inArray ? (nesting ? ` Set${nesting}` : "") : ` Select to_jsonb((${ident(column)}).${path.fields.map(ident).join(".")}) to read that field as JSON${nesting ? `, or set${nesting}` : "."}`;
+    return new DecodeError(`Column "${column}" holds, in its row value's field ${JSON.stringify(path.fields.join("."))}, an array of ${depth} dimensions, and its type has ${declared === 1 ? "one" : declared}: Reylo types a Postgres array with the dimensions its type declares, which Postgres doesn't enforce.${read}`);
+  }
   // An array built of arrays is too deep only where an array column it collects is.
   return new DecodeError(
     declared === 1
-      ? `Column "${column}" holds an array of ${depth} dimensions, and its type has one: Reylo types a Postgres array column with one dimension, which Postgres doesn't enforce. Select to_jsonb(${column}) to read it as JSON, or set allow_nested_arrays: true in .reylo.yaml to type it at any depth.`
+      ? `Column "${column}" holds an array of ${depth} dimensions, and its type has one: Reylo types a Postgres array column with one dimension, which Postgres doesn't enforce. Select to_jsonb(${column}) to read it as JSON${nesting ? `, or set${nesting}` : "."}`
       : `Column "${column}" holds an array of ${depth} dimensions, and its type has ${declared}: an array column it collects holds more than one dimension, which Postgres doesn't enforce. Collect to_jsonb(<that column>) instead to read it as JSON.`,
   );
 }
@@ -1415,7 +1471,8 @@ export function textDecoder(kind: Kind, delim = ","): Decoder {
   }
   if (kind.endsWith("[]")) {
     const element = textDecoder(elementKind(kind), delim);
-    if (wholeArrayKind(elementKind(kind)) !== undefined) return (x) => recordDepth(x, parseArray(x, element, delim));
+    // An array of whole arrays, or of JSON, which may be arrays themselves: only the text tells its levels from its elements'.
+    if (wholeArrayKind(elementKind(kind)) !== undefined || elementKind(kind) === "json") return (x) => recordDepth(x, parseArray(x, element, delim));
     return isRowKind(elementKind(kind)) && delim === "," ? rare(kind, (types) => types.rowsDecoder(element)) : (x) => parseArray(x, element, delim);
   }
   if (isRareKind(kind)) return rare(kind, (types) => types.decoder(kind));
@@ -1724,10 +1781,19 @@ function coerceArray(kind: Kind, v: unknown, column: string, each: (kind: Kind, 
 }
 
 /**
- * `v` as a Postgres value of `kind`, from the form a driver decoded it to (`coerce`): the kinds only
- * Postgres has, and an array's text, which `delim` separates.
+ * How a driver's own array of JSON holds each value: `text`, its text, so that the array's levels
+ * are its dimensions (Slonik's tag); `decoded`, a value the driver read, which may be an array
+ * itself (Bun.sql's own decoder); unknown otherwise, where each string is read as JSON text and the
+ * levels are taken as they are.
  */
-export function coercePostgres(kind: Kind, v: unknown, column: string, delim = ","): unknown {
+export type JsonElements = "text" | "decoded" | undefined;
+
+/**
+ * `v` as a Postgres value of `kind`, from the form a driver decoded it to (`coerce`): the kinds only
+ * Postgres has, and an array's text, which `delim` separates; `jsonElements` says how a driver's own
+ * array of JSON holds each value.
+ */
+export function coercePostgres(kind: Kind, v: unknown, column: string, delim = ",", jsonElements?: JsonElements): unknown {
   if (v === null || v === undefined) return null;
   const whole = wholeArrayKind(kind);
   // A whole array still in its text is the server's text, which a driver that parsed the array
@@ -1737,15 +1803,20 @@ export function coercePostgres(kind: Kind, v: unknown, column: string, delim = "
     const element = elementKind(kind);
     if (typeof v === "string") {
       const parsed = parseArray(v, (s) => coercePostgres(element, s, column), delim);
-      return wholeArrayKind(element) === undefined ? parsed : recordDepth(v, parsed);
+      return wholeArrayKind(element) === undefined && element !== "json" ? parsed : recordDepth(v, parsed);
     }
-    if (Array.isArray(v) && wholeArrayKind(element) !== undefined) {
+    // A driver that decoded each JSON value itself gives them as values, a string among them a JSON string, never text to read again.
+    if (Array.isArray(v) && element === "json" && jsonElements === "decoded") return v;
+    if (Array.isArray(v) && (wholeArrayKind(element) !== undefined || element === "json")) {
       // A driver's own array, as PGlite's parser gives one, whose arrays are its levels: each whole
       // array in it is still its text.
-      const out = v.map((e) => (Array.isArray(e) ? coercePostgres(kind, e, column, delim) : coercePostgres(element, e, column)));
-      let depth = 0;
-      for (let level: unknown = v; Array.isArray(level); level = level.find((e) => e !== null)) depth++;
-      wholeDepths.set(out, depth);
+      const out = v.map((e) => (Array.isArray(e) ? coercePostgres(kind, e, column, delim, jsonElements) : coercePostgres(element, e, column)));
+      // Its levels are the array's where each whole array, or each JSON value, is still its text, as the caller that passes `text` knows.
+      if (wholeArrayKind(element) !== undefined || jsonElements === "text") {
+        let depth = 0;
+        for (let level: unknown = v; Array.isArray(level); level = level.find((e) => e !== null)) depth++;
+        wholeDepths.set(out, depth);
+      }
       return out;
     }
     return coerceArray(kind, v, column, (k, e) => coercePostgres(k, e, column));

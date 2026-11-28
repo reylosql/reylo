@@ -19,3 +19,8 @@ reylo-engine-core.workspace = true
 syntax.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order", "unbounded_depth"] }
+
+[dev-dependencies]
+# The server the lists of strict built-ins are held to (`tests/strict.rs`).
+tokio = { version = "1", features = ["rt"] }
+tokio-postgres = "0.7"

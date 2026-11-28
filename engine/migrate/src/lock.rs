@@ -26,7 +26,9 @@ const HEADER: &str = "# On a conflict, keep main's and run reylo migrate dev\n";
 /// text `canonical` keeps) and how it is written. A lock with none is version 1, as written up to
 /// 0.8.2. A change to any of them moves it, so that a lock written by the old rules is still
 /// checked by them, and a Reylo that reads an older version refuses a newer lock rather than read
-/// its checksums by the wrong rules, which would show every migration as edited.
+/// its checksums by the wrong rules, which would show every migration as edited. A correction
+/// where the old rules took two texts a database runs differently for the same moves none: a lock
+/// still checked by them would keep letting the edit through.
 pub const VERSION: u64 = 1;
 
 /// The lock: its migrations in order, and schema.sql's checksum where one was proven.
@@ -137,14 +139,17 @@ pub fn checksum(prev: &str, name: &str, sql: &str) -> String {
     digest(&[prev, "\n", name, "\n", &canonical(sql)])
 }
 
-/// The checksum of schema.sql's SQL, as `canonical` writes it, with the last entry's checksum the
+/// The checksum of schema.sql's SQL, as `canonical` writes it with its `\r\n` line endings as
+/// `\n`, so that a checkout that writes them matches, with the last entry's checksum the
 /// migrations it was proven against end with: a stamp that no longer holds once they change.
 pub fn schema_sum(last: &str, sql: &str) -> String {
-    digest(&["schema\n", last, "\n", &canonical(sql)])
+    digest(&["schema\n", last, "\n", &canonical(&sql.replace("\r\n", "\n"))])
 }
 
 /// SQL without its comments, its whitespace runs as one space, as any of the three databases reads
-/// it: what a lock's checksum covers, so an edit to a comment or to spacing is no edit. Quoted text
+/// it: what a lock's checksum covers, so an edit to a comment or to spacing is no edit. Spacing is
+/// ASCII's alone, as `sql.rs` reads it: the databases read a U+3000 or a U+00A0 outside quotes and
+/// comments as part of a name, so it is kept as written. Quoted text
 /// (`'…'`, `"…"`, `` `…` ``, and Postgres's `$tag$…$tag$`) and MySQL's `/*! … */` are kept as
 /// written, and so is everything after a string, a comment, a `--` or a `#` that the databases
 /// read differently, or a comment that never ends, so that text one of them runs is never dropped
@@ -161,20 +166,37 @@ pub fn canonical(sql: &str) -> String {
         *space = false;
         out.push_str(text);
     };
+    // SQLite reads `[…]` as a name, up to its first `]`, and Postgres as a subscript: where a quote
+    // or a comment that opens inside one ends past that `]`, the two read what follows differently,
+    // so the rest is kept as written.
+    let mut bracket: Option<usize> = None;
     while k < b.len() {
         let c = b[k];
+        let (start, written, spaced) = (k, out.len(), space);
+        if bracket.is_some_and(|e| k > e) {
+            bracket = None;
+        }
+        if c == '[' && bracket.is_none() {
+            bracket = (k + 1..b.len()).find(|&j| b[j] == ']');
+        }
         if c == '-' && b.get(k + 1) == Some(&'-') {
             // MySQL reads `--` as a comment only where a space or a control character follows it
-            // (`n--1` is `n - -1` there), Postgres and SQLite everywhere: where the two differ, the
-            // rest is kept as written.
-            if b.get(k + 2).is_some_and(|n| !n.is_whitespace() && !n.is_control()) {
+            // (`n--1` is `n - -1` there, and so is `--` before a U+3000), Postgres and SQLite
+            // everywhere: where the two differ, the rest is kept as written. The statements
+            // `sql.rs` splits for MySQL end a comment's `--` at the same characters, up to the space.
+            if b.get(k + 2).is_some_and(|n| *n > ' ') {
                 push(&mut out, &mut space, &b[k..].iter().collect::<String>());
                 k = b.len();
                 continue;
             }
-            while k < b.len() && b[k] != '\n' {
-                k += 1;
+            // Postgres ends one at a lone carriage return too, MySQL and SQLite only at a line feed.
+            let end = (k..b.len()).find(|&j| b[j] == '\n').unwrap_or(b.len());
+            if (k..end).any(|j| b[j] == '\r' && b.get(j + 1) != Some(&'\n')) {
+                push(&mut out, &mut space, &b[k..].iter().collect::<String>());
+                k = b.len();
+                continue;
             }
+            k = end;
             space = true;
         } else if c == '#' {
             // MySQL reads `#` as a line comment, Postgres as an operator (`#`, `#>`, `#>>`): the rest
@@ -217,7 +239,7 @@ pub fn canonical(sql: &str) -> String {
                     space = true;
                 }
             }
-        } else if c.is_whitespace() {
+        } else if c.is_ascii_whitespace() {
             space = true;
             k += 1;
         } else if c == '\'' || c == '"' || c == '`' {
@@ -230,9 +252,10 @@ pub fn canonical(sql: &str) -> String {
             let end = if c == '`' || quoted_end(&b, k, c, true) == standard { standard } else { b.len() };
             push(&mut out, &mut space, &b[k..end].iter().collect::<String>());
             k = end;
-        } else if c == '$' && (k == 0 || !(b[k - 1].is_alphanumeric() || b[k - 1] == '_')) {
-            // A dollar-quoted string: $tag$ … $tag$.
-            let tag_end = (k + 1..b.len()).find(|&j| !(b[j].is_alphanumeric() || b[j] == '_'));
+        } else if c == '$' && (k == 0 || !(tag_char(b[k - 1]) || b[k - 1] == '$')) {
+            // A dollar-quoted string: $tag$ … $tag$. Postgres takes any character past ASCII in a
+            // tag or a name, and a `$` inside a name, as `x$$a$`, opens none.
+            let tag_end = (k + 1..b.len()).find(|&j| !tag_char(b[j]));
             match tag_end.filter(|&j| b[j] == '$') {
                 Some(j) => {
                     let tag: String = b[k..=j].iter().collect();
@@ -251,8 +274,19 @@ pub fn canonical(sql: &str) -> String {
             push(&mut out, &mut space, &c.to_string());
             k += 1;
         }
+        if bracket.is_some_and(|e| start < e && k > e) {
+            out.truncate(written);
+            space = spaced;
+            push(&mut out, &mut space, &b[start..].iter().collect::<String>());
+            break;
+        }
     }
     out
+}
+
+/// A character of a dollar quote's tag, as Postgres reads one.
+fn tag_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_' || !c.is_ascii()
 }
 
 /// Where the string or identifier quoted by `q` at `start` ends: after its closing quote (a doubled
@@ -469,6 +503,37 @@ mod tests {
         // A backslash both readings agree on changes nothing.
         assert_eq!(canonical("select 'a\\n' -- x\n,  'b\\\\'"), "select 'a\\n' , 'b\\\\'");
         assert_ne!(checksum("", "a.sql", "create table a (id int)"), checksum("", "a.sql", "create table a (id bigint)"));
+    }
+
+    #[test]
+    fn a_space_beyond_ascii_is_part_of_a_name() {
+        // Postgres, MySQL and SQLite read U+3000 and U+00A0 outside quotes and comments as part of a
+        // name, so turning one into a space renames a column: an edit.
+        assert_ne!(canonical("create view v as select 1 as x\u{3000}, 2 as y;"), canonical("create view v as select 1 as x , 2 as y;"));
+        assert_ne!(canonical("create table t (a\u{a0}int)"), canonical("create table t (a int)"));
+        assert_eq!(canonical("select  'a\u{3000}b' -- x\n"), "select 'a\u{3000}b'");
+        // MySQL reads `--` before one, or before DEL as the statements are split for it, as `- -`
+        // and runs the rest of the line, a `;` and what follows it included, so the rest is kept.
+        assert_ne!(canonical("select 1 --\u{3000}x"), canonical("select 1 --\u{3000}; drop table users;"));
+        assert_ne!(canonical("select 1 --\u{a0}x"), canonical("select 1 --\u{a0}; drop table users;"));
+        assert_ne!(canonical("select 1 --\u{7f}x"), canonical("select 1 --\u{7f}; drop table users;"));
+        // A lone carriage return ends a `--` comment on Postgres alone, and is spacing elsewhere.
+        assert_ne!(canonical("-- note\rdrop table users;"), canonical("-- note\ndrop table users;"));
+        assert_eq!(canonical("select 1 -- a\r\n,\r2"), "select 1 , 2");
+        // Postgres takes any character past ASCII in a dollar quote's tag, and none after a name's `$`.
+        assert_ne!(canonical("select $\u{3000}$--\nx$\u{3000}$"), canonical("select $\u{3000}$ x$\u{3000}$"));
+        assert_ne!(canonical("select x$$a$, '$a$ -- b'"), canonical("select x$$a$, '$a$ -- c'"));
+        // SQLite's `[…]` is a name: a quote or a dollar sign inside one opens nothing there.
+        let default = |word: &str| canonical(&format!("create table t ([$\u{3000}$] text default 'a $\u{3000}$ -- {word}');"));
+        assert_ne!(default("one"), default("two"));
+        assert_ne!(canonical("create table t ([a'b] text default 'x -- y')"), canonical("create table t ([a'b] text default 'x -- z')"));
+        assert_eq!(canonical("select data['key'],  arr[1] -- c\nfrom t"), "select data['key'], arr[1] from t");
+    }
+
+    #[test]
+    fn a_schema_checked_out_with_crlf_keeps_its_stamp() {
+        let lf = "create function f() returns int as $$\n  select 1\n$$ language sql;\n# made by hand\n";
+        assert_eq!(schema_sum("a", &lf.replace('\n', "\r\n")), schema_sum("a", lf));
     }
 
     #[test]

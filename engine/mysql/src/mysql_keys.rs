@@ -582,7 +582,8 @@ impl<'a> From<'a> {
         self.items
             .iter()
             .map(|it| match &it.source {
-                Source::Query(q, ctes, _) | Source::Lateral(q, ctes) => query_varies(q, ctes, self.keys, VIEW_DEPTH),
+                Source::Query(q, ctes, _) => !materialized(q) && query_varies(q, ctes, self.keys, VIEW_DEPTH),
+                Source::Lateral(q, ctes) => query_varies(q, ctes, self.keys, VIEW_DEPTH),
                 _ => false,
             })
             .collect()
@@ -675,7 +676,7 @@ const VIEW_DEPTH: usize = 4;
 /// its own text, in a WITH query in `ctes` it may read, or in a view it reads, `depth` deep. A
 /// WITH query of a RECURSIVE WITH, whose body the scope does not carry, may.
 fn query_varies(q: &Query, ctes: &[Cte], keys: &Keys, depth: usize) -> bool {
-    if calls_nondeterministic(&q.to_string()) {
+    if calls_nondeterministic(&q.to_string()) || lists_unvouched(q) {
         return true;
     }
     // The names it reads as it parses them, a WITH query's around it among them, since it reads
@@ -683,6 +684,155 @@ fn query_varies(q: &Query, ctes: &[Cte], keys: &Keys, depth: usize) -> bool {
     let read = tables_anywhere(q, keys.schema.as_deref());
     let withs = ctes.iter().filter(|(name, ..)| read.iter().any(|t| crate::mysql_names::may_match(t, name))).any(|(_, body, sees, _)| depth == 0 || body.is_none_or(|b| query_varies(b, &ctes[..(*sees).min(ctes.len())], keys, depth - 1)));
     withs || read.iter().filter_map(|t| keys.view(t)).any(|view| depth == 0 || query_varies(view, &[], keys, depth - 1))
+}
+
+/// MySQL 8.4's built-in functions that give every call over the same arguments in one statement
+/// one value, by name: its help tables' functions but its aggregates, window functions and those
+/// [`calls_nondeterministic`] names, and the locking ones. A newer release's are unknown, and
+/// [`calls_unvouched`] takes them to vary.
+const BUILTINS: &[&str] = &[
+    "abs", "acos", "adddate", "addtime", "aes_decrypt", "aes_encrypt", "any_value", "ascii", "asin", "atan", "atan2", "bin", "bin_to_uuid", "bit_count",
+    "bit_length", "cast", "ceil", "ceiling", "char", "char_length", "character_length", "charset", "coalesce", "coercibility", "collation", "compress",
+    "concat", "concat_ws", "conv", "convert", "convert_tz", "cos", "cot", "crc32", "curdate", "current_date", "current_role", "current_time",
+    "current_timestamp", "current_user", "curtime", "database", "date", "date_add", "date_format", "date_sub", "datediff", "day", "dayname", "dayofmonth",
+    "dayofweek", "dayofyear", "degrees", "div", "elt", "exp", "export_set", "extract", "field", "find_in_set", "floor", "format", "format_bytes",
+    "format_pico_time", "from_base64", "from_days", "from_unixtime", "geometrycollection", "get_format", "greatest", "grouping", "hex", "hour",
+    "icu_version", "if", "ifnull", "inet6_aton", "inet6_ntoa", "inet_aton", "inet_ntoa", "insert", "instr", "is_ipv4", "is_ipv4_compat", "is_ipv4_mapped",
+    "is_ipv6", "is_uuid", "json_array", "json_array_append", "json_array_insert", "json_contains", "json_contains_path", "json_depth", "json_extract",
+    "json_insert", "json_keys", "json_length", "json_merge", "json_merge_patch", "json_merge_preserve", "json_object", "json_overlaps", "json_pretty",
+    "json_quote", "json_remove", "json_replace", "json_schema_valid", "json_schema_validation_report", "json_search", "json_set", "json_storage_free",
+    "json_storage_size", "json_table", "json_type", "json_unquote", "json_valid", "json_value", "last_day", "lcase", "least", "left", "length", "like",
+    "linestring", "ln", "load_file", "localtime", "localtimestamp", "locate", "log", "log10", "log2", "lower", "lpad", "ltrim", "make_set", "makedate",
+    "maketime", "mbrcontains", "mbrcoveredby", "mbrcovers", "mbrdisjoint", "mbrequals", "mbrintersects", "mbroverlaps", "mbrtouches", "mbrwithin", "md5",
+    "microsecond", "mid", "minute", "mod", "month", "monthname", "multilinestring", "multipoint", "multipolygon", "name_const", "now", "nullif", "oct",
+    "octet_length", "ord", "period_add", "period_diff", "pi", "point", "polygon", "position", "pow", "power", "quarter", "quote", "radians", "regexp",
+    "regexp_instr", "regexp_like", "regexp_replace", "regexp_substr", "repeat", "replace", "reverse", "right", "roles_graphml", "round", "rpad", "rtrim",
+    "schema", "sec_to_time", "second", "session_user", "sha1", "sha2", "sign", "sin", "soundex", "space", "sqrt", "st_area", "st_asbinary", "st_asgeojson",
+    "st_astext", "st_buffer", "st_buffer_strategy", "st_centroid", "st_collect", "st_contains", "st_convexhull", "st_crosses", "st_difference",
+    "st_dimension", "st_disjoint", "st_distance", "st_distance_sphere", "st_endpoint", "st_envelope", "st_equals", "st_exteriorring", "st_frechetdistance",
+    "st_geohash", "st_geomcollfromtext", "st_geomcollfromwkb", "st_geometryn", "st_geometrytype", "st_geomfromgeojson", "st_geomfromtext",
+    "st_geomfromwkb", "st_hausdorffdistance", "st_interiorringn", "st_intersection", "st_intersects", "st_isclosed", "st_isempty", "st_issimple",
+    "st_isvalid", "st_latfromgeohash", "st_latitude", "st_length", "st_linefromtext", "st_linefromwkb", "st_lineinterpolatepoint",
+    "st_lineinterpolatepoints", "st_longfromgeohash", "st_longitude", "st_makeenvelope", "st_mlinefromtext", "st_mlinefromwkb", "st_mpointfromtext",
+    "st_mpointfromwkb", "st_mpolyfromtext", "st_mpolyfromwkb", "st_numgeometries", "st_numinteriorrings", "st_numpoints", "st_overlaps",
+    "st_pointatdistance", "st_pointfromgeohash", "st_pointfromtext", "st_pointfromwkb", "st_pointn", "st_polyfromtext", "st_polyfromwkb", "st_simplify",
+    "st_srid", "st_startpoint", "st_swapxy", "st_symdifference", "st_touches", "st_transform", "st_union", "st_validate", "st_within", "st_x", "st_y",
+    "str_to_date", "strcmp", "subdate", "substr", "substring", "substring_index", "subtime", "system_user", "tan", "time", "time_format", "time_to_sec",
+    "timediff", "timestamp", "timestampadd", "timestampdiff", "to_base64", "to_days", "to_seconds", "trim", "truncate", "ucase", "uncompress",
+    "uncompressed_length", "unhex", "unix_timestamp", "upper", "user", "utc_date", "utc_time", "utc_timestamp", "uuid_to_bin", "version", "week",
+    "weekday", "weekofyear", "weight_string", "year", "yearweek",
+];
+
+/// Whether an expression calls a function the engine cannot vouch gives every call one value:
+/// neither a built-in ([`BUILTINS`]) nor an aggregate, as a stored function the database declares
+/// `NOT DETERMINISTIC` may be; or holds a form the walk does not read. A select list that calls
+/// one varies ([`query_varies`]).
+fn calls_unvouched(e: &Expr) -> bool {
+    match e {
+        Expr::Identifier(_) | Expr::CompoundIdentifier(_) | Expr::Value(_) | Expr::TypedString { .. } => false,
+        Expr::Function(f) => {
+            let name = builtin(f);
+            let vouched = f.over.is_some() || crate::mysql::AGGREGATES.contains(&name.as_str()) || BUILTINS.contains(&name.as_str());
+            !vouched
+                || match &f.args {
+                    ast::FunctionArguments::None => false,
+                    ast::FunctionArguments::List(list) => list.args.iter().any(|a| match a {
+                        ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(x)) | ast::FunctionArg::Named { arg: ast::FunctionArgExpr::Expr(x), .. } | ast::FunctionArg::ExprNamed { arg: ast::FunctionArgExpr::Expr(x), .. } => calls_unvouched(x),
+                        ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Wildcard) => false,
+                        _ => true,
+                    }),
+                    ast::FunctionArguments::Subquery(q) => lists_unvouched(q),
+                }
+        }
+        Expr::Nested(inner)
+        | Expr::UnaryOp { expr: inner, .. }
+        | Expr::Cast { expr: inner, .. }
+        | Expr::IsNull(inner)
+        | Expr::IsNotNull(inner)
+        | Expr::IsTrue(inner)
+        | Expr::IsNotTrue(inner)
+        | Expr::IsFalse(inner)
+        | Expr::IsNotFalse(inner)
+        | Expr::IsUnknown(inner)
+        | Expr::IsNotUnknown(inner)
+        | Expr::Floor { expr: inner, .. }
+        | Expr::Ceil { expr: inner, .. }
+        | Expr::Extract { expr: inner, .. }
+        | Expr::Convert { expr: inner, .. }
+        | Expr::Collate { expr: inner, .. } => calls_unvouched(inner),
+        Expr::BinaryOp { left, right, .. } | Expr::IsDistinctFrom(left, right) | Expr::IsNotDistinctFrom(left, right) | Expr::Position { expr: left, r#in: right } => calls_unvouched(left) || calls_unvouched(right),
+        Expr::Like { expr, pattern, escape_char, .. } => calls_unvouched(expr) || calls_unvouched(pattern) || escape_char.as_deref().is_some_and(calls_unvouched),
+        Expr::RLike { expr, pattern, .. } => calls_unvouched(expr) || calls_unvouched(pattern),
+        Expr::Substring { expr, substring_from, substring_for, .. } => calls_unvouched(expr) || substring_from.as_deref().is_some_and(calls_unvouched) || substring_for.as_deref().is_some_and(calls_unvouched),
+        Expr::Trim { expr, trim_what, trim_characters, .. } => calls_unvouched(expr) || trim_what.as_deref().is_some_and(calls_unvouched) || trim_characters.iter().flatten().any(calls_unvouched),
+        Expr::InList { expr, list, .. } => calls_unvouched(expr) || list.iter().any(calls_unvouched),
+        Expr::Between { expr, low, high, .. } => calls_unvouched(expr) || calls_unvouched(low) || calls_unvouched(high),
+        Expr::Case { operand, conditions, else_result, .. } => operand.as_deref().is_some_and(calls_unvouched) || conditions.iter().any(|c| calls_unvouched(&c.condition) || calls_unvouched(&c.result)) || else_result.as_deref().is_some_and(calls_unvouched),
+        Expr::Interval(i) => calls_unvouched(&i.value),
+        Expr::MemberOf(m) => calls_unvouched(&m.value) || calls_unvouched(&m.array),
+        Expr::Tuple(items) => items.iter().any(calls_unvouched),
+        // The server folds a subquery of no table into the query around it (`(select pick())` is
+        // `pick()`, `pick() in (select 1)` is `pick() = 1`), and then merges as if it were not there.
+        Expr::Subquery(q) => lists_unvouched(q),
+        // EXISTS reads no value of its subquery's select list, only whether a row passes, unless a
+        // HAVING reads the list by an alias.
+        Expr::Exists { subquery, .. } => reads_unvouched(subquery, plain(subquery).is_none_or(|s| s.having.is_some())),
+        Expr::InSubquery { expr, subquery, .. } => calls_unvouched(expr) || lists_unvouched(subquery),
+        Expr::MatchAgainst { .. } => false,
+        _ => true,
+    }
+}
+
+/// Whether the server computes a derived table, WITH query or view once and stores its rows,
+/// never merging it into the query that reads it, so that every row reads one value of each of its
+/// columns: one with a LIMIT, a set operation, DISTINCT, GROUP BY, HAVING or an aggregate, or no
+/// table (https://dev.mysql.com/doc/refman/8.4/en/derived-table-optimization.html). A LATERAL one
+/// is computed again for each row it is joined to.
+fn materialized(q: &Query) -> bool {
+    if q.limit_clause.is_some() {
+        return true;
+    }
+    match q.body.as_ref() {
+        SetExpr::Query(inner) => materialized(inner),
+        SetExpr::Select(s) => {
+            let grouped = !matches!(&s.group_by, GroupByExpr::Expressions(keys, modifiers) if keys.is_empty() && modifiers.is_empty());
+            s.from.is_empty() || s.distinct.is_some() || grouped || s.having.is_some() || crate::mysql::lone_aggregate(s)
+        }
+        _ => true,
+    }
+}
+
+/// Whether a query, or a derived table or WITH query inside it, lists a value [`calls_unvouched`]
+/// makes, or decides which rows it keeps by one: the server may merge each level into the one
+/// around it.
+fn lists_unvouched(q: &Query) -> bool {
+    reads_unvouched(q, true)
+}
+
+/// [`lists_unvouched`], reading the select list only where `listed`: EXISTS reads no value of it.
+fn reads_unvouched(q: &Query, listed: bool) -> bool {
+    if q.with.iter().flat_map(|w| &w.cte_tables).any(|c| lists_unvouched(&c.query)) {
+        return true;
+    }
+    if let SetExpr::Query(inner) = q.body.as_ref() {
+        return reads_unvouched(inner, listed);
+    }
+    // A FROM item's: a derived table's own, and each join's ON, which decides which rows meet.
+    fn joined(twj: &TableWithJoins) -> bool {
+        factor(&twj.relation) || twj.joins.iter().any(|j| factor(&j.relation) || crate::mysql::join_on(&j.join_operator).is_some_and(calls_unvouched))
+    }
+    fn factor(f: &TableFactor) -> bool {
+        match f {
+            TableFactor::Derived { subquery, .. } => lists_unvouched(subquery),
+            TableFactor::NestedJoin { table_with_joins, .. } => joined(table_with_joins),
+            _ => false,
+        }
+    }
+    plain(q).is_some_and(|s| {
+        (listed && s.projection.iter().any(|item| matches!(item, SelectItem::UnnamedExpr(e) | SelectItem::ExprWithAlias { expr: e, .. } if calls_unvouched(e))))
+            || s.selection.iter().chain(s.having.iter()).any(calls_unvouched)
+            || s.from.iter().any(joined)
+    })
 }
 
 /// The terms of a condition's top-level `AND`.

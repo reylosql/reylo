@@ -15,7 +15,7 @@
 // none raw, so its `encode`, `decode` and `output` throw and it has no `columns` (`standardQuery`).
 import { codecsOf, compile, jsonNumbersOf, rawStatement, sentText, type Dialect, type QueryModule } from "./execute.ts";
 import type { StandardTypedV1 } from "./standard.ts";
-import { rowOf, type RowBuilder } from "./row.ts";
+import { lastOfEach, rowOf, type RowBuilder } from "./row.ts";
 import { DecodeError } from "./values.ts";
 
 /** The Standard Query interface: a statement a driver can execute, as a typed function from an input to an output. */
@@ -157,19 +157,23 @@ export function standardQuery<D extends Dialect, Output>(module: QueryModule<D>,
   // column's type does not allow included. Its default suits a driver whose integer mode is
   // unknown: a BigInt is read exact, and a number past 2^53 in an INTEGER column is refused as a
   // rounded one. They are built on first use, not when the query is defined, so that defining one
-  // costs nothing and refuses nothing.
+  // costs nothing and refuses nothing. A column a later one of its name replaces in the row is never
+  // returned, so, as in `.run()`, it is held to no dimensions.
   let decoders: ((v: never) => unknown)[] | undefined;
-  const decodersOf = () =>
-    (decoders ??= module.columns!.map(([name, kind, delim], i): ((v: never) => unknown) => {
+  const decodersOf = () => {
+    if (decoders) return decoders;
+    const kept = new Set(lastOfEach(module.columns!.map(([name], i) => [name, i] as const)).map(([, i]) => i));
+    return (decoders = module.columns!.map(([name, kind, delim], i): ((v: never) => unknown) => {
       const at = module.nonFinite?.[i] ?? undefined;
       const inJson = at === undefined ? undefined : (v: unknown) => jsonNumbersOf(module)(v, at, name);
       // Postgres's decoder reads a document's plan itself, before an array's dimensions; on MySQL and SQLite it is read here, as `.run()` reads it.
-      const read = module.runtime.decoder(name, kind, delim, dialect === "postgres" ? inJson : undefined, module.nestedArrays);
+      const read = module.runtime.decoder(name, kind, delim, dialect === "postgres" ? inJson : undefined, module.nestedArrays, !kept.has(i));
       const decode = inJson === undefined || dialect === "postgres" ? read : (v: never) => inJson(read(v));
       // A family the project file's `js.codecs` gives another type takes it here too, as in `.run()` (src/codecs.ts).
       const plan = module.codecs?.[name];
       return plan === undefined ? decode : (v) => codecsOf(module).decodePlan(plan, decode(v), name, module.libraries);
     }));
+  };
   const columns = mapped ? module.columns?.map(([name], i) => Object.freeze({ name, decode: (v: never) => decodersOf()[i]!(v) }) as StandardQueryV1.Column<D>) : undefined;
   // A closure, not `this`: a driver may take `encode` off the object.
   // The statement as Reylo sends it, the comment naming its file included, as `.run()` sends it.

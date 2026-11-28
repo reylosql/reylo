@@ -320,7 +320,7 @@ export type Runtime<D extends Dialect = Dialect> = {
   /** The same at once, for the synchronous clients (`.trySync()`). */
   readErrorSync?(error: unknown): QueryError<D> | undefined;
   /** A column's raw value as `.run()` gives it, as a Standard Query's `decode` maps it (src/standard-query.ts). */
-  decoder(name: string, kind: Kind, delim: string | undefined, inJson: ((v: unknown) => unknown) | undefined, nestedArrays: boolean | undefined): (v: never) => unknown;
+  decoder(name: string, kind: Kind, delim: string | undefined, inJson: ((v: unknown) => unknown) | undefined, nestedArrays: boolean | undefined, dropped?: boolean): (v: never) => unknown;
 };
 
 /** Placeholders' places in a statement: `[start, end]` for each, at JavaScript's offsets, in text order. */
