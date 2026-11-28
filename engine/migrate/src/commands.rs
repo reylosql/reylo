@@ -1954,8 +1954,14 @@ fn leftover_filter(statement: &str) -> Option<String> {
                 // index's predicate can't be read off the statement as the server writes it, so an
                 // unnamed one is tied to nothing.
                 let words: Vec<String> = crate::sql::tokenize(rest, Dialect::Postgres).into_iter().map(|t| t.text.to_ascii_lowercase()).collect();
-                if words.iter().any(|w| w == "where") {
-                    return None;
+                let mut depth = 0usize;
+                for w in &words {
+                    match w.as_str() {
+                        "(" => depth += 1,
+                        ")" => depth = depth.saturating_sub(1),
+                        "where" if depth == 0 => return None,
+                        _ => {}
+                    }
                 }
                 let distinct = words.starts_with(&["nulls".to_string(), "not".to_string(), "distinct".to_string()]);
                 let picked = keys.iter().chain(&included).map(|item| Some(format!("(select a.attnum from pg_attribute a where a.attrelid = i.indrelid and a.attname = ((parse_ident({}, false))[1])::name)", literal(index_column(item)?)))).collect::<Option<Vec<_>>>()?;
@@ -12174,6 +12180,8 @@ mod tests {
         assert!(f("create index concurrently on t (a) tablespace \"where\"").contains("i.indpred is null"));
         // A dollar quote in a storage option hides no clause.
         assert_eq!(super::leftover_filter("create index concurrently on t using rum (a, \"d'\") with (attach = $$d'$$) where id > 0"), None);
+        // A `where` inside `with (…)` is an option's value, not the predicate.
+        assert!(f("create index concurrently on t using rum (a) with (attach = p.where)").contains("i.indpred is null"));
         // The table as `only (t)` and `t*` write it.
         assert!(f("create index concurrently i on only (orders) (x)").starts_with("i.indrelid = to_regclass('orders') and"));
         assert!(f("create index concurrently i on orders* (x)").starts_with("i.indrelid = to_regclass('orders') and"));
