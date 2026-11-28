@@ -4397,6 +4397,9 @@ mod tests {
             (format!("delete from users where id = (select {} from v332)", wrap("a".into(), 1)), format!("delete from users where id = (select {fits} from v332)")),
             (format!("delete from users returning (select {fits} from v332) as x"), format!("delete from users returning (select {past} from v332) as x")),
             (format!("insert into users (id, name) values ((select {fits} from v332), 'x')"), format!("insert into users (id, name) values ((select {past} from v332), 'x')")),
+            (format!("insert into users (id, name) values (1, 'x') on conflict (id) do update set nick = (select {fits} from v332)"), format!("insert into users (id, name) values (1, 'x') on conflict (id) do update set nick = (select {past} from v332)")),
+            ("select (select 1 limit (select a from v332)) as x".to_string(), format!("select (select 1 limit (select {} from v332)) as x", wrap("a".into(), 1))),
+            ("select (select 1 limit 1 offset (select a from v332)) as x".to_string(), format!("select (select 1 limit 1 offset (select {} from v332)) as x", wrap("a".into(), 1))),
         ] {
             let read = small(at.clone(), &users(333));
             assert!(read.diagnostics.is_empty(), "{at}: {:?}", read.diagnostics);

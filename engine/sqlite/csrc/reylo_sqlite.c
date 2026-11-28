@@ -433,11 +433,10 @@ static int selectHeight(Select *p, Scope *pOuter, int *aCol){
       if( pItem->fg.isTabFunc && (j = exprListHeight(pItem->u1.pFuncArg, pIn))>h ) h = j;
     }
     {
-      int j, aj[6];
+      int j, aj[5];
       aj[0] = exprHeight(pArm->pWhere, pIn); aj[1] = exprListHeight(pArm->pGroupBy, pIn); aj[2] = exprHeight(pArm->pHaving, pIn);
-      aj[3] = exprListHeight(pArm->pOrderBy, pIn);
-      aj[4] = pArm->pLimit ? exprHeight(pArm->pLimit->pLeft, pIn) : 0; aj[5] = pArm->pLimit ? exprHeight(pArm->pLimit->pRight, pIn) : 0;
-      for(j=0; j<6; j++) if( aj[j]>h ) h = aj[j];
+      aj[3] = exprListHeight(pArm->pOrderBy, pIn); aj[4] = exprHeight(pArm->pLimit, pIn);   /* a TK_LIMIT over the LIMIT and the OFFSET */
+      for(j=0; j<5; j++) if( aj[j]>h ) h = aj[j];
     }
     for(i=0; i<nSrc; i++) sqlite3_free(aScope[i].aHeight);
     sqlite3_free(aScope);
@@ -658,16 +657,19 @@ static void insertHook(Parse *pParse, Table *pTab, IdList *pColumn, ExprList *pL
     kv_int(gDml, "rows", 1);
   }
   closeObj(gDml);
+  /* An upsert's DO UPDATE is resolved later, as the UPDATE it runs: updateHook measures it there. */
   exprListHeight(pList, 0);
-  for(; pUpsert; pUpsert=pUpsert->pNextUpsert){
-    exprListHeight(pUpsert->pUpsertSet, 0); exprHeight(pUpsert->pUpsertWhere, 0); exprHeight(pUpsert->pUpsertTargetWhere, 0);
-  }
   refuseTooDeep(pParse);
 }
 static void updateHook(Parse *pParse, Table *pTab, ExprList *pChanges, Expr *pWhere, int *aXRef, SrcList *pTabList, int onError, Upsert *pUpsert){
   int i, j;
   (void)pTabList;
-  if( skipHook(pParse) || gCaptured ) return;
+  if( skipHook(pParse) ) return;
+  /* An upsert's DO UPDATE, resolved as the UPDATE it runs once the INSERT's hook has written it. */
+  if( gCaptured ){
+    if( pUpsert ){ exprListHeight(pChanges, 0); exprHeight(pWhere, 0); refuseTooDeep(pParse); }
+    return;
+  }
   gCaptured = 1;
   tableSeen(pTab);
   sqlite3_str_appendchar(gDml, 1, '{');
