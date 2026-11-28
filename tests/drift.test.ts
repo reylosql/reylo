@@ -113,8 +113,11 @@ test("postgres: after a migration adds a column under select *, a created type t
     const freshPayload = postgres(own.url, { max: 1 });
     try {
       assert.deepEqual(await payloads.run(freshPayload), [{ id: 1, payload: 42, note: null }]);
-      // Retyped again, to text, which no reader of its own names.
-      await admin.unsafe(`alter table payloads alter column payload type text`);
+      // Retyped again, to regclass, a built-in type with no reader of its own, which reads as its text.
+      await admin.unsafe(`alter table payloads alter column payload type regclass using 'pg_class'::regclass`);
+      assert.deepEqual(await payloads.run(freshPayload), [{ id: 1, payload: "pg_class", note: null }]);
+      // And to text.
+      await admin.unsafe(`alter table payloads alter column payload type text using '42'`);
       const freshText = new pg.Client({ connectionString: own.url });
       await freshText.connect();
       try {
@@ -128,7 +131,15 @@ test("postgres: after a migration adds a column under select *, a created type t
     // A row value's column replaced by a text column, the result as wide as before: by its type.
     await admin.unsafe(`create table replaced (id int primary key, payload pair); insert into replaced values (1, row(1, 'a'))`);
     const replaced = await built("replaced", "select * from replaced");
-    await admin.unsafe(`alter table replaced drop column payload; alter table replaced add column note text; update replaced set note = '42'`);
+    await admin.unsafe(`alter table replaced drop column payload; alter table replaced add column note regclass; update replaced set note = 'pg_class'`);
+    const regclassFirst = new pg.Client({ connectionString: own.url });
+    await regclassFirst.connect();
+    try {
+      assert.deepEqual(await replaced.run(regclassFirst), [{ id: 1, note: "pg_class" }]);
+    } finally {
+      await regclassFirst.end();
+    }
+    await admin.unsafe(`alter table replaced alter column note type text using '42'`);
     const freshReplaced = new pg.Client({ connectionString: own.url });
     await freshReplaced.connect();
     try {

@@ -61,8 +61,12 @@ const ARRAY_OIDS = new Map<number, number>([
   [5039, 5038], [6150, 4451], [6151, 4532], [6152, 4533], [6153, 4534], [6155, 4535], [6157, 4536], [6442, 6437], [6491, 6490],
 ]);
 const BOX_ARRAY = 1020;
-/** The built-in types whose value is their text: text, varchar, char, name, uuid, the network and bit-string types, time and timetz, tsvector, tsquery and xml. */
-const TEXT_OIDS = new Set([18, 19, 25, 142, 650, 774, 829, 869, 1042, 1043, 1083, 1266, 1560, 1562, 2950, 3614, 3615]);
+/**
+ * The built-in row types below 10000, and their arrays: `record` and `record[]`, and the row types of
+ * the catalogs whose oids are fixed (pg_type, pg_attribute, pg_proc, pg_class, pg_database, pg_authid,
+ * pg_auth_members, pg_shseclabel, pg_subscription). Every other catalog's row type is 10000 or above.
+ */
+const ROW_OIDS = new Set([2249, 2287, 71, 75, 81, 83, 1248, 2842, 2843, 4066, 6101, 210, 270, 272, 273]);
 
 /** A built-in type's kind and its array delimiter; undefined for a type the database created. */
 function builtin(oid: number): { kind: Kind; delim: string } | undefined {
@@ -230,12 +234,12 @@ function declaredColumn(fields: readonly Field[], columns: Columns | undefined, 
   if (!columns?.length) return () => undefined;
   // A field of a built-in type whose kind is not the declared one (a column a migration retyped or
   // replaced) is read by its type. Postgres gives an array of every rank one oid, so an array's kind
-  // is compared without its rank. A built-in type Reylo doesn't list (`record`, a catalog table's
-  // row type) says nothing of the value's kind.
+  // is compared without its rank. A row type's oid (`record`, a shared catalog's) says nothing of its
+  // fields, and the declaration does.
   const rankless = (kind: Kind) => kind.replace(/(?:\[\])+$/, "[]");
   const fits = (f: Field, c: Columns[number] | undefined) => {
     if (c === undefined) return undefined;
-    const b = SCALAR_OIDS[f.oid] !== undefined || ARRAY_OIDS.has(f.oid) || TEXT_OIDS.has(f.oid) ? builtin(f.oid) : undefined;
+    const b = ROW_OIDS.has(f.oid) ? undefined : builtin(f.oid);
     return b === undefined || rankless(b.kind) === rankless(c[1]) ? c : undefined;
   };
   if (columns.length === fields.length) return (f, i) => fits(f, columns[i]);
