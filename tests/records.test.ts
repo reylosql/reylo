@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { Session } from "../src/analyze.ts";
 import { sqlModule } from "../src/loader.ts";
-import { DRIVERS, INDEX, MYSQL, driver, mysqlDatabase, mysqlLive, pgLive, postgresDatabase } from "./helpers.ts";
+import { DRIVERS, INDEX, MODULE, MYSQL, driver, mysqlDatabase, mysqlLive, pgLive, postgresDatabase } from "./helpers.ts";
 
 // A Postgres row value of known fields, and each built-in geometric type, is an object of its
 // fields, and a range an object of its bounds (src/values.ts): the run time decodes each from the
@@ -59,7 +59,7 @@ async function built(root: string, name: string, sql: string) {
   writeFileSync(file, sql);
   const { code } = await sqlModule(file, sql);
   const out = join(root, `${name}.mjs`);
-  writeFileSync(out, code.replace(`from "reylo"`, `from ${JSON.stringify(INDEX)}`));
+  writeFileSync(out, code.replace(`from "reylo/module"`, `from ${JSON.stringify(MODULE)}`));
   return (await import(pathToFileURL(out).href)).default;
 }
 

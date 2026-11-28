@@ -1,18 +1,20 @@
 // The runtime query object behind `import query from "./file.sql"`.
 // Types come from the content mapper; values come from the runtime loader.
-import { compile, execute, executeSync, type ClientFor, type Dialect, type Inputs, type Marks, type QueryModule, type Runtime, type SyncClientFor } from "./execute.ts";
+import { compile, execute, refuseSync, type DriverClient, type ClientFor, type Dialect, type Inputs, type Marks, type QueryModule, type Runtime, type SyncClientFor } from "./execute.ts";
 import type { SqlMode } from "./engine-core.ts";
-import type { Libraries, Plan } from "./codecs.ts";
+import type { CodecRuntime, Libraries, Plan } from "./codecs.ts";
 import type { StandardTypedV1 } from "./standard.ts";
 import { standardQuery, type StandardQueryV1 } from "./standard-query.ts";
 import type { Structured } from "./rows.ts";
 import type { RowBuilder } from "./row.ts";
 import type { Checks } from "./checks.ts";
-import { DecodeError, ParameterError, type Columns, type JsonNumbers } from "./values.ts";
+import { allReaders, DecodeError, numbersInJson, READ_KINDS, withKinds, writeJson, installPostgresTypes, installReaders, ParameterError, scalarKinds, type Columns, type JsonNumbers, type PostgresTypes, type Readers } from "./values.ts";
+import { postgresTypes } from "./postgres-types.ts";
+import { codecRuntime } from "./codecs.ts";
 import type { QueryError } from "./query-error.ts";
-import { postgres } from "./decode.ts";
-import { mysql } from "./decode-mysql.ts";
-import { sqlite } from "./decode-sqlite.ts";
+import { installPostgresCatalog, postgres, postgresCatalog, postgresDrivers } from "./decode.ts";
+import { mysql, mysqlDrivers } from "./decode-mysql.ts";
+import { sqlite, sqliteDrivers } from "./decode-sqlite.ts";
 import { clickhouse } from "./decode-clickhouse.ts";
 import { listening, type QueryTrace } from "./trace.ts";
 import { buildTime, type AnalyzeInput, type StatementDescriptor } from "./build-time.ts";
@@ -21,6 +23,9 @@ export type { ClickhouseClient, ClientFor, Dialect, Inputs, MysqlClient, Postgre
 export type { QueryTrace } from "./trace.ts";
 export type { StandardQueryV1 } from "./standard-query.ts";
 export { checks } from "./checks.ts";
+export { codecRuntime, type CodecRuntime } from "./codecs.ts";
+export { postgresTypes } from "./postgres-types.ts";
+export type { PostgresTypes } from "./values.ts";
 export { migrate, type MigrationStorage, type MigrationConnection } from "./migrate.ts";
 export type { MigrateOptions } from "./build-time.ts";
 export type { AnalyzeInput } from "./build-time.ts";
@@ -174,6 +179,18 @@ export type QueryDefinition = {
   codecs?: Readonly<Record<string, Plan>>;
   /** The classes the codecs build values with (`decimal`, the class of `js.codecs.decimal`'s library), which a build step's module imports from the app's install where a codec needs one. */
   libraries?: Libraries;
+  /** `js.codecs` at run time, `codecRuntime` from "reylo": a build step passes it where `codecs` or a parameter names a codec, so that an app none of whose statements holds such a value bundles none of it. A query defined with `defineQuery` has it. */
+  codecRuntime?: CodecRuntime;
+  /** Postgres's rarer types at run time, `postgresTypes` from "reylo": a build step passes it where the statement reads or binds a row value, a range, a geometric type, an hstore or a money, so that an app none of whose statements does bundles none of it. A query defined with `defineQuery` has it. */
+  postgresTypes?: PostgresTypes;
+  /** Postgres's readers of the kinds its columns hold whose text is not the value itself (`readInt8`, `readTimestamptz`, …, from "reylo"), by kind: a build step passes the ones the statement reads, so that an app bundles the readers its statements use and no other. A query defined with `defineQuery` has every one. */
+  readers?: Readers;
+  /** The reading of the numbers inside a JSON column's document, `nonFinite`'s plans: a build step passes it where a column has one. A query defined with `defineQuery` has it. */
+  jsonNumbers?: typeof numbersInJson;
+  /** The writer of a JSON parameter's text: a build step passes it where a parameter is JSON. A query defined with `defineQuery` has it. */
+  jsonWriter?: typeof writeJson;
+  /** The drivers the statement runs on, in the order they are tried: a build step passes the ones its project installs, so that an app bundles those drivers' code and no other. A query defined with `defineQuery` runs on every one. */
+  drivers?: readonly DriverClient<any, any>[];
   /** Each structured parameter in a MySQL insert, with the lists of `text` the run time writes again for the keys a call carries (a Postgres or SQLite insert copies its defaults instead). */
   structured?: readonly Structured[];
   /** The `.sql` file, relative to the project's root and written with `/`: the query's `source`. Every build step puts it in the module. */
@@ -197,6 +214,19 @@ function onlyValue(row: unknown): unknown {
   return undefined;
 }
 
+/** A Postgres query's readers, installed for the process where they cover every kind its columns hold; a query whose own readers leave one out is refused, as one an earlier reylo wrote would be. */
+function checkReaders(columns: Columns | undefined, readers: Readers | undefined, source: string | undefined): void {
+  if (readers) installReaders(readers);
+  for (const [, kind] of columns ?? []) {
+    for (const k of scalarKinds(kind)) {
+      if (READ_KINDS.test(k) && !readers?.[k]) throw new TypeError(`${source ? `${source}: ` : ""}This statement reads a Postgres ${k}, which Reylo reads with a reader a module a build step writes passes (readers): build a module an earlier reylo wrote again (reylo generate typescript writes the files it wrote). A query defined by hand passes every reader with defineQuery({ dialect: "postgres", … }).`);
+    }
+  }
+}
+
+/** Each dialect's drivers, every one, for a query defined by hand; a dialect whose module names none runs on its runtime's own. */
+const DRIVERS: { readonly [D in Dialect]: readonly DriverClient<D, any>[] | undefined } = { postgres: postgresDrivers, mysql: mysqlDrivers, sqlite: sqliteDrivers, clickhouse: undefined };
+
 /** Each dialect's half of the run time, for a query defined by hand, which names its dialect. */
 const RUNTIMES: { readonly [D in Dialect]: Runtime<D> } = { postgres, mysql, sqlite, clickhouse };
 
@@ -207,11 +237,18 @@ const RUNTIMES: { readonly [D in Dialect]: Runtime<D> } = { postgres, mysql, sql
  * so that a bundle holds no other dialect's drivers and error codes.
  */
 export function defineQuery<Params, Row, C extends Cardinality, D extends Dialect>(def: QueryDefinition & { dialect: D; cardinality?: C }): Query<Params, Row, C, D> {
-  return define(RUNTIMES[def.dialect] as Runtime<D>, def);
+  // A query defined by hand may name no columns, whose created types the catalog says.
+  if (def.dialect === "postgres") installPostgresCatalog(postgresCatalog);
+  const drivers = def.drivers ?? DRIVERS[def.dialect];
+  const postgres = def.dialect === "postgres" ? { postgresTypes: def.postgresTypes ?? postgresTypes, readers: def.readers ?? allReaders } : {};
+  if (def.dialect === "postgres") installReaders(postgres.readers!);
+  const inputs = withKinds(def.inputs, def.dialect);
+  return define(RUNTIMES[def.dialect] as Runtime<D>, { ...def, ...(inputs ? { inputs } : {}), codecRuntime: def.codecRuntime ?? codecRuntime, jsonNumbers: def.jsonNumbers ?? numbersInJson, jsonWriter: def.jsonWriter ?? writeJson, ...(drivers ? { drivers } : {}), ...postgres });
 }
 
 /** A Postgres query, as a module a build step writes defines one (`defineQuery`). */
 export function definePostgresQuery<Params, Row, C extends Cardinality>(def: Omit<QueryDefinition, "dialect"> & { cardinality?: C }): Query<Params, Row, C, "postgres"> {
+  checkReaders(def.columns, def.readers, def.source);
   return define(postgres, def);
 }
 
@@ -232,6 +269,7 @@ export function defineClickhouseQuery<Params, Row, C extends Cardinality>(def: O
 
 function define<Params, Row, C extends Cardinality, D extends Dialect>(runtime: Runtime<D>, def: Omit<QueryDefinition, "dialect"> & { cardinality?: C }): Query<Params, Row, C, D> {
   const dialect = runtime.dialect;
+  if (def.postgresTypes) installPostgresTypes(def.postgresTypes);
   const cardinality = (def.cardinality ?? "many") as C;
   // Reylo's own errors about the query start with its file.
   const where = def.source ? `${def.source}: ` : "";
@@ -255,11 +293,15 @@ function define<Params, Row, C extends Cardinality, D extends Dialect>(runtime: 
     value: def.value,
     codecs: def.codecs,
     libraries: def.libraries,
+    codecRuntime: def.codecRuntime,
     structured: def.structured,
     source: def.source,
     sqlcommenter: def.sqlcommenter,
     nestedArrays: def.nestedArrays,
     checks: def.checks,
+    drivers: def.drivers,
+    jsonNumbers: def.jsonNumbers,
+    jsonWriter: def.jsonWriter,
   };
   const query: Query<Params, Row, C, D> = {
     dialect,
@@ -280,7 +322,8 @@ function define<Params, Row, C extends Cardinality, D extends Dialect>(runtime: 
       const values = (params ?? {}) as Record<string, unknown>;
       const runOnce = () => {
         try {
-          return materialize(executeSync(client, module, values) as Row[]);
+          if (!runtime.executeSync) throw refuseSync(`a ${dialect} statement has none`);
+          return materialize(runtime.executeSync(client, module, values) as Row[]);
         } catch (error) {
           throw named(error);
         }

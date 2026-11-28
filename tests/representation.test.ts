@@ -10,7 +10,7 @@ import { Session } from "../src/analyze.ts";
 import { sqlModule } from "../src/loader.ts";
 import { renderType } from "../src/render.ts";
 import { defineQuery } from "../src/index.ts";
-import { DRIVERS, PG, MYSQL, INDEX, driver, sqliteWasmCopy } from "./helpers.ts";
+import { DRIVERS, PG, MYSQL, INDEX, MODULE, driver, sqliteWasmCopy } from "./helpers.ts";
 
 // Reylo's one representation per SQL type (src/values.ts), on the real drivers, each set up by the
 // app against it: the module a build step writes, run on each, must give the same rows, and each
@@ -38,7 +38,7 @@ async function built(root: string, url: string, name: string, sql: string) {
   try {
     const { code } = await sqlModule(file, sql);
     const out = join(root, `${name}.mjs`);
-    writeFileSync(out, code.replace(`from "reylo"`, `from ${JSON.stringify(INDEX)}`));
+    writeFileSync(out, code.replace(`from "reylo/module"`, `from ${JSON.stringify(MODULE)}`));
     return (await import(pathToFileURL(out).href)).default;
   } finally {
     for (const session of Session.opened()) await session.close();

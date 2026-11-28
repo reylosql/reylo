@@ -14,6 +14,8 @@ export const ROOT = join(import.meta.dirname, "..");
 export const DRIVERS = join(ROOT, "lab", "drivers", "node_modules");
 export const MAPPER = join(ROOT, "src", "mapper.ts");
 export const INDEX = pathToFileURL(join(ROOT, "src", "index.ts")).href;
+/** What a module a build step writes imports, "reylo/module", as a test that writes one outside the repository reaches it. */
+export const MODULE = pathToFileURL(join(ROOT, "src", "module.ts")).href;
 export const PG = process.env.REYLO_TEST_PG;
 export const MYSQL = process.env.REYLO_TEST_MYSQL;
 /** The HTTP interface of a throwaway ClickHouse, as `http://127.0.0.1:28123`, whose user may create databases. */

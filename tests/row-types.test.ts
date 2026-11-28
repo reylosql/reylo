@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { Session } from "../src/analyze.ts";
 import { sqlModule } from "../src/loader.ts";
-import { clickhouseDatabase, clickhouseLive, closeSessions, DRIVERS, INDEX, mysqlDatabase, mysqlLive, pgLive, postgresDatabase, ROOT } from "./helpers.ts";
+import { clickhouseDatabase, clickhouseLive, closeSessions, DRIVERS, INDEX, MODULE, mysqlDatabase, mysqlLive, pgLive, postgresDatabase, ROOT } from "./helpers.ts";
 
 // Every type of each database, at the edges of what it holds, as `.run()` returns it and as the
 // server writes it inside each kind of JSON document it builds, held to the type the content mapper
@@ -58,7 +58,7 @@ async function built(root: string, name: string, sql: string): Promise<Built> {
   try {
     const { code } = await sqlModule(file, sql);
     const out = join(root, `${name}.mjs`);
-    writeFileSync(out, code.replace(`from "reylo"`, `from ${JSON.stringify(INDEX)}`));
+    writeFileSync(out, code.replace(`from "reylo/module"`, `from ${JSON.stringify(MODULE)}`));
     return ((await import(pathToFileURL(out).href)) as { default: Built }).default;
   } finally {
     for (const session of Session.opened()) await session.close();

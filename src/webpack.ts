@@ -8,6 +8,8 @@ import { tooling } from "./tooling-loader.ts";
 
 type LoaderContext = {
   resourcePath: string;
+  /** The directory the build takes as its root, webpack's `context` (Turbopack's project root): the app whose drivers a module passes. */
+  rootContext?: string;
   addDependency(file: string): void;
   /** Absent on a host that keeps no result of a loader. */
   cacheable?(flag: boolean): void;
@@ -20,7 +22,7 @@ export default function reyloSqlLoader(this: LoaderContext, source: string): voi
   // build, and `reylo/.cache/` answers it while the schema is unchanged.
   this.cacheable?.(false);
   const done = this.async();
-  tooling(dirname(this.resourcePath)).then((t) => t.sqlModule(this.resourcePath, source)).then(
+  tooling(dirname(this.resourcePath)).then((t) => t.sqlModule(this.resourcePath, source, this.rootContext ?? process.cwd())).then(
     ({ code, entry, watched }) => {
       // A new analysis of the statement (the type check's, after a migration) rebuilds the module,
       // and so does a change to the project file or a `.env` file, which the module's text reads.

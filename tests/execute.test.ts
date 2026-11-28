@@ -16,7 +16,7 @@ import { pathToFileURL } from "node:url";
 import { engine as loadEngine, type EngineIo } from "../src/engine.ts";
 import { marksOf, sqlModule } from "../src/loader.ts";
 import { connect, createServer, type AddressInfo, type Socket } from "node:net";
-import { closeSessions, DRIVERS, driver, handWritten, INDEX, MYSQL, mysqlDatabase, mysqlLive, pgLive, plain, postgresDatabase, sqliteWasm } from "./helpers.ts";
+import { closeSessions, DRIVERS, driver, handWritten, INDEX, MODULE, MYSQL, mysqlDatabase, mysqlLive, pgLive, plain, postgresDatabase, sqliteWasm } from "./helpers.ts";
 import { neonSql, pgPool, postgresJsSql } from "./stand-ins.ts";
 
 // Each fake client records what execute handed it and answers the way its driver does; the
@@ -80,6 +80,10 @@ test("postgres: unsafe(text, values) → rows, as on postgres.js and Bun.sql and
   const bun = { unsafe: (...args: unknown[]) => (bunCalls.push({ method: "unsafe", args }), Promise.resolve([row])), commitDistributed: async () => {} };
   assert.deepEqual(await execute(bun, pg, { id: 1, name: "ada" }), [row]);
   assert.deepEqual(bunCalls, [{ method: "unsafe", args: ["select $1::int as id, $2 as name, $1 as again", [1, "ada"]] }]);
+  // Bun's SQL is a function with transaction(), an alias of begin(), as Neon's neon() is: it is still Bun.sql's.
+  const callable = Object.assign(() => assert.fail("called as Neon's neon()"), { unsafe: bun.unsafe, commitDistributed: async () => {}, transaction: async () => {} });
+  assert.deepEqual(await execute(callable as never, pg, { id: 1, name: "ada" }), [row]);
+  assert.equal(bunCalls.length, 2);
 });
 
 // The module's `inputs`: :ids is an int4[] parameter, :data a jsonb one, :name text.
@@ -1404,7 +1408,7 @@ async function builtModule(url: string, name: string, raw: string): Promise<any>
   try {
     const { code } = await sqlModule(file, raw);
     const out = join(root, `${name}.mjs`);
-    writeFileSync(out, code.replace(`from "reylo"`, `from ${JSON.stringify(INDEX)}`));
+    writeFileSync(out, code.replace(`from "reylo/module"`, `from ${JSON.stringify(MODULE)}`));
     return (await import(pathToFileURL(out).href)).default;
   } finally {
     await closeSessions();
@@ -2290,9 +2294,9 @@ test("postgres: Slonik, through a tag from its own createSqlTag that passes ever
 });
 
 test("an unsupported client rejects, naming what it has and what reylo takes", async () => {
-  await assert.rejects(() => execute({ connect() {}, end() {} } as never, pg) as Promise<unknown>, (e: TypeError) => e instanceof TypeError && /postgres statement on an object with connect, end\. It takes a client with query\(text, values\)/.test(e.message));
+  await assert.rejects(() => execute({ connect() {}, end() {} } as never, pg) as Promise<unknown>, (e: TypeError) => e instanceof TypeError && /postgres statement on an object with connect, end\. It takes .*query\(text, values\) as on pg/.test(e.message));
   // An object with Drizzle's select() but no session over a client is no Drizzle database.
-  await assert.rejects(() => execute({ $client: {}, select() {} } as never, pg) as Promise<unknown>, /object with select\. .*or a Drizzle database or Knex instance over one of them\./);
+  await assert.rejects(() => execute({ $client: {}, select() {} } as never, pg) as Promise<unknown>, /object with select\. .*; a Knex instance over one of them; a Drizzle database over one of them\./);
   // Kysely and Prisma decode their values themselves, so each is told to pass the driver's client.
   class Kysely { selectFrom() {} executeQuery() {} transaction() {} }
   await assert.rejects(() => execute(new Kysely() as never, pg) as Promise<unknown>, /object with selectFrom, executeQuery, transaction\. .* Kysely decodes the values of its queries itself: pass the pool or database its dialect was made with\.$/);
@@ -2345,7 +2349,7 @@ test("an Effect SQL client is refused before it runs anything: its unsafe() hand
 test("postgres: a client that is none of the drivers' is refused before it runs anything, a wrapper around one included", async () => {
   let ran = 0;
   const rows = async () => (ran++, { rows: [{ id: "1" }] });
-  const refused = (seen: string) => (e: Error) => e instanceof TypeError && e.message.startsWith(`reylo cannot run a postgres statement on ${seen}. It takes a client with query(text, values) as on pg,`) && /It is none of those drivers' clients\. A wrapper around one hands back the values its driver already converted/.test(e.message);
+  const refused = (seen: string) => (e: Error) => e instanceof TypeError && e.message.startsWith(`reylo cannot run a postgres statement on ${seen}. It takes `) && e.message.includes("; query(text, values) as on pg,") && / A wrapper around a driver's client hands back the values its driver already converted/.test(e.message);
   // A wrapper with a pool's query(), which would hand back pg's Date and its string for an int8.
   await assert.rejects(() => execute({ query: rows }, pg, { id: 1, name: "ada" }) as Promise<unknown>, refused("an object with query"));
   // One with a query() and a transaction() of its own: Neon's neon() is a function.
@@ -2592,7 +2596,7 @@ test("runSync: a client that answers through a promise, or a Postgres or MySQL s
   let called = false;
   const libsql = { execute: async () => ((called = true), { rows: [] }), executeMultiple: async () => {} };
   const lite = defineQuery<{}, unknown, "many", "sqlite">({ dialect: "sqlite", sql: "select 1", params: [] });
-  assert.throws(() => lite.runSync(libsql as never), /runSync takes a synchronous SQLite client .*answers through a promise\. run takes every client/);
+  assert.throws(() => lite.runSync(libsql as never), /runSync takes a synchronous SQLite client .*answers through a promise.*\. run takes every client/);
   const pgq = defineQuery<{}, unknown, "many", "postgres">({ dialect: "postgres", sql: "select 1", params: [] });
   assert.throws(() => pgq.runSync({ query: async () => ((called = true), { rows: [] }) } as never), /a postgres statement has none/);
   assert.equal(called, false);

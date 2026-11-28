@@ -855,6 +855,8 @@ Since a function may raise any code, TypeScript takes any string for `code`. Com
 
 Reylo decodes its query results itself, so your client's type parsers don't affect Reylo's queries, or the reverse. Type checking reads your schema over its own connection, whatever driver your app uses.
 
+A bundled query holds the code of the drivers your app depends on, and no other.
+
 Each example below runs this query:
 
 ```sql file="pg_get_user.sql"

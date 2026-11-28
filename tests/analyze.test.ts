@@ -10,6 +10,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Session } from "../src/analyze.ts";
 import { engine, type Connection } from "../src/engine.ts";
+import { installedDrivers } from "../src/installed-drivers.ts";
 import { sqlModule } from "../src/loader.ts";
 import { mapperHandlers } from "../src/mapper-server.ts";
 import { reportedDiagnostics, type Reported } from "../src/mapper-diagnostics.ts";
@@ -757,6 +758,8 @@ test("the module a build step emits carries the analysis and reads nothing at ru
   writeFileSync(file, SELECT);
   // The build steps share one session per project; this one finds the database through .env.
   writeFileSync(join(root, ".env"), `DATABASE_URL=${env.DATABASE_URL}\n`);
+  // Built for no app, as Node's preload builds it, the module passes every driver (src/installed-drivers.ts).
+  const { drivers } = installedDrivers("sqlite", null)!;
   try {
     const { code, entry, watched } = await sqlModule(file, SELECT);
     assert.ok(existsSync(entry));
@@ -764,13 +767,20 @@ test("the module a build step emits carries the analysis and reads nothing at ru
     // file, the only one of the project's files that exists.
     assert.deepEqual(watched, [join(root, ".env")]);
     assert.equal(code, [
-      `import { defineSqliteQuery } from "reylo";`,
+      `import { ${["defineSqliteQuery", ...drivers].join(", ")} } from "reylo/module";`,
       `export const sql = "select id, name from users where id = ?";`,
       `export const raw = ${JSON.stringify(SELECT)};`,
       `export const params = ["id"];`,
-      `export default defineSqliteQuery({ sql: raw, params, cardinality: "maybeOne", readOnly: true, text: sql, order: ["id"], marks: [[38,39]], inputs: {"id":{"type":{"kind":"integer","bits":64},"nullable":false}}, columns: [["id","int"],["name","text"]], row: (v) => ({ "id": v[0], "name": v[1] }), source: "user.sql", sqlcommenter: true });`,
+      `export default defineSqliteQuery({ sql: raw, params, cardinality: "maybeOne", readOnly: true, text: sql, order: ["id"], marks: [[38,39]], inputs: {"id":{"type":{"kind":"integer","bits":64},"kind":"int","nullable":false}}, columns: [["id","int"],["name","text"]], row: (v) => ({ "id": v[0], "name": v[1] }), source: "user.sql", sqlcommenter: true, drivers: [${drivers.join(", ")}] });`,
       ``,
     ].join("\n"));
+    // Built for an app, as a bundler builds it from its root, the module passes the drivers the
+    // app depends on, and the bundler watches the package.json that says which.
+    writeFileSync(join(root, "package.json"), JSON.stringify({ dependencies: { "@libsql/client": "*" } }));
+    const forApp = await sqlModule(file, SELECT, root);
+    assert.match(forApp.code, /^import \{ defineSqliteQuery, durableObjectDriver, syncSqliteDriver, libsqlDriver, d1Driver \} from "reylo\/module";$/m);
+    assert.ok(forApp.code.includes(", drivers: [durableObjectDriver, syncSqliteDriver, libsqlDriver, d1Driver] });"));
+    assert.deepEqual(forApp.watched, [join(root, ".env"), join(root, "package.json")]);
     // A statement in a directory carries its file written with `/`.
     mkdirSync(join(root, "queries"));
     const one = join(root, "queries", "one.sql");

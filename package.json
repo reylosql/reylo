@@ -29,8 +29,16 @@
     "./turbopack": "./src/turbopack.ts",
     "./next": "./src/next.ts",
     "./jest": "./src/jest.ts",
-    "./effect": "./src/effect.ts"
+    "./effect": "./src/effect.ts",
+    "./module": "./src/module.ts"
   },
+  "sideEffects": [
+    "./src/cli.ts",
+    "./src/d1-proxy.ts",
+    "./src/mapper.ts",
+    "./src/register.ts",
+    "./src/register-worker.ts"
+  ],
   "typescript": {
     "contentMapper": {
       "exec": [

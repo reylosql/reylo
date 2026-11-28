@@ -10,15 +10,15 @@
 // the databases its queries are written for.
 
 import type { QueryError } from "./query-error.ts";
-import { columnKind, describe, given, holdsArray, holdsJsonArray, hstoreText, isLevel, isMultirangeKind, isRangeKind, isRowKind, numbersInJson, ParameterError, writeJson, postgresInterval, postgresLiteral, postgresYear, rowMasks, vectorText, withinDimensions, zoned, type Columns, type JsonNumbers, type Kind } from "./values.ts";
-import { bareName, holdsWholeArrays, isMysqlSet, schemaOf, type EngineType } from "./engine-type.ts";
+import { describe, given, isLevel, ParameterError, wholeArrayKind, type numbersInJson, type writeJson, rowMasks, vectorText, zoned, type Columns, type JsonNumbers, type Kind } from "./values.ts";
+import { schemaOf, type EngineType } from "./engine-type.ts";
 import { withSqlcommenter } from "./sqlcommenter.ts";
 import type { JsonSchema } from "./engine-type.ts";
 import type { SqlMode } from "./engine-core.ts";
 import type { Checks } from "./checks.ts";
 import type { Members, Structured } from "./rows.ts";
-import { lastOfEach, type RowBuilder } from "./row.ts";
-import { decodeCodecs, encodePlan, type Libraries, type Plan } from "./codecs.ts";
+import type { RowBuilder } from "./row.ts";
+import type { CodecRuntime, Libraries, Plan } from "./codecs.ts";
 
 export type Dialect = "postgres" | "mysql" | "sqlite" | "clickhouse";
 
@@ -204,6 +204,10 @@ export type QueryModule<D extends Dialect = Dialect> = {
   readonly columns?: Columns | undefined;
   /** Where each JSON column, by position beside `columns`, holds a 64-bit integer, whose number past 2^53 - 1 the run time refuses, or on Postgres a float or a decimal that may be NaN or an infinity, which the run time gives as that number, or a Postgres array it holds to one level (src/values.ts, `numbersInJson`); `null` for a column that holds none. */
   readonly nonFinite?: readonly (JsonNumbers | null)[] | undefined;
+  /** The reading of `nonFinite`'s plans (src/values.ts, `numbersInJson`), which a build step passes where a column has one. */
+  readonly jsonNumbers?: typeof numbersInJson | undefined;
+  /** The writer of a JSON parameter's text (src/values.ts, `writeJson`), which a build step passes where a parameter is JSON. */
+  readonly jsonWriter?: typeof writeJson | undefined;
   /** Each row as an object of the columns' names, one shape for every row (src/row.ts): every build step puts it in the module, beside `columns`. */
   readonly row?: RowBuilder | undefined;
   /** The result key: output columns, by name, that identify each row of the result, where the analysis proves one. */
@@ -218,6 +222,8 @@ export type QueryModule<D extends Dialect = Dialect> = {
   readonly codecs?: Readonly<Record<string, Plan>> | undefined;
   /** The classes the codecs build values with, which the module imports from the app's install (src/codecs.ts). */
   readonly libraries?: Libraries | undefined;
+  /** `js.codecs` at run time (src/codecs.ts), which a build step passes where the statement holds a value a codec gives another type. */
+  readonly codecRuntime?: CodecRuntime | undefined;
   /** Each structured parameter in insert position, with the lists of `text` the run time writes again for the keys a call carries. */
   readonly structured?: readonly Structured[] | undefined;
   /** The `.sql` file the module was built from, relative to the project's root, for messages. */
@@ -230,7 +236,52 @@ export type QueryModule<D extends Dialect = Dialect> = {
   readonly checks?: Checks | undefined;
   /** The dialect's half of the run time, which its define function passes (src/index.ts). */
   readonly runtime: Runtime<D>;
+  /** The drivers the statement runs on, which a build step passes for the ones the project installs (src/loader.ts, `moduleDrivers`), in the order they are tried. */
+  readonly drivers?: readonly DriverClient<D, any>[] | undefined;
 };
+
+/**
+ * One driver's way of running a statement: a module passes the drivers its project installs
+ * (src/loader.ts, `moduleDrivers`), so that an app's bundle holds those drivers' code and no
+ * other. `P` is what the dialect's run time hands each, its statement bound for its drivers.
+ */
+export type DriverClient<D extends Dialect = Dialect, P = Bound> = {
+  /** What this driver takes, as the refusal of any other client names it. */
+  readonly label: string;
+  /** The rows of the statement on `c`, or undefined where `c` is not this driver's. */
+  run?(c: AnyClient, prepared: P): Promise<unknown[]> | undefined;
+  /** Whether `c` is this driver's and answers at once (SQLite's synchronous clients), which `runSync` then runs on. */
+  atOnce?(c: AnyClient): boolean;
+  /** The rows of the statement on a client `atOnce` took: at once, or a promise where its statement answers with one. */
+  runSync?(c: AnyClient, prepared: P): unknown[] | Promise<unknown[]>;
+  /** The rows of `run` on a connection a wrapper lends (a Knex instance's), or undefined where `c` is no such wrapper. */
+  lend?(c: AnyClient, dialect: Dialect, run: (connection: AnyClient) => unknown[] | Promise<unknown[]>): Promise<unknown[]> | undefined;
+};
+
+/** The drivers a query runs on: a module passes them, and a query defined by hand with `defineQuery` has every one. */
+export function driversOf<D extends Dialect>(query: QueryModule<D>): readonly DriverClient<D, any>[] {
+  if (query.drivers) return query.drivers;
+  throw new TypeError(`${query.source ? `${query.source}: ` : ""}This query names no driver to run on, which a module a build step writes passes for the drivers its project installs: build a module an earlier reylo wrote again (reylo generate typescript writes the files it wrote). A query defined by hand runs on every driver with defineQuery({ dialect: "${query.dialect}", … }).`);
+}
+
+/**
+ * The driver's client under a Drizzle database, transaction or savepoint, else `c` itself. Every
+ * module unwraps one, whether or not the build found drizzle-orm: one taken for its driver's client
+ * would be run by another driver's way (a Drizzle MySQL database has PlanetScale's execute()).
+ */
+function unwrapped(query: QueryModule, c: AnyClient): AnyClient {
+  return query.drivers ? underneath(c) : (query.runtime.wrappers?.underneath(c) ?? c);
+}
+
+/** The rows of `run` on a connection a wrapper lends (a Knex instance), by the drivers that know one, or undefined where `c` is no such wrapper. */
+function lent(query: QueryModule, c: AnyClient, run: (connection: AnyClient) => unknown[] | Promise<unknown[]>): Promise<unknown[]> | undefined {
+  if (!query.drivers) return query.runtime.wrappers?.knex(c, query.dialect, run);
+  for (const d of query.drivers) {
+    const rows = d.lend?.(c, query.dialect, run);
+    if (rows !== undefined) return rows;
+  }
+  return undefined;
+}
 
 /**
  * What the run time does differently on each database, each in its database's own module: running
@@ -246,12 +297,30 @@ export type Runtime<D extends Dialect = Dialect> = {
   run(c: AnyClient, query: QueryModule<D>, bound: Bound): Promise<unknown[] | undefined>;
   /** SQLite's synchronous clients (better-sqlite3, node:sqlite, bun:sqlite, Turso's compat Database, SQLite Wasm's and sql.js's Database, a Durable Object's SQL storage): the rows at once, or a promise where a statement answers with one. */
   runSync?(c: AnyClient, query: QueryModule<D>, bound: Bound): unknown[] | Promise<unknown[]>;
+  /** Whether `c` is one of the clients `runSync` takes, which `.run()` hands to it too. */
+  answersAtOnce?(c: AnyClient, query: QueryModule<D>): boolean;
+  /** `.runSync()`'s whole path (`executeSync`), for the database whose clients answer at once: any other database's refuses (`refuseSync`). */
+  executeSync?(client: SyncClientFor<D>, query: QueryModule<D>, params: ParamsInput): unknown[];
+  /** The clients Drizzle and Knex wrap, for the databases they run on (`wrappers`). */
+  readonly wrappers?: Wrappers;
+  /** What `.run()` checks on the client before the statement runs (Postgres's `lc_monetary`, for a `money` parameter). */
+  before?(c: AnyClient, query: QueryModule<D>): Promise<void>;
+  /** The rows of an asynchronous client as `.run()` returns them, where the driver's need more (Postgres's numbers inside JSON, and its arrays' dimensions). */
+  after?(query: QueryModule<D>, rows: unknown[]): unknown[];
+  /** The bound statement as the database's drivers take it, after each value is bound (`statement`); `run` is false for a Standard Query's values, which bind to the module's own text. */
+  bind?(query: QueryModule<D>, bound: Bound, run: boolean): Bound;
+  /** A parameter's value of the engine's type `type`, checked, as the database's drivers bind it (`statement`): neither is null or undefined. */
+  encode: (type: EngineType, kind: Kind, v: unknown, name: string) => unknown;
+  /** A bound value as the database reads it with no declared type, which a Standard Query's `encode` returns (Postgres's text, `rawStatement`); every other database's as it is bound. */
+  rawValue?(query: QueryModule<D>, name: string, v: unknown): unknown;
+  /** The clients `.run()` takes, in the refusal of any other (`unsupported`), for a dialect whose module names no drivers. */
+  readonly clients?: string;
   /** The database's error `error` is, or undefined where it is another (`.try()`). */
   readError(error: unknown): QueryError<D> | undefined | Promise<QueryError<D> | undefined>;
   /** The same at once, for the synchronous clients (`.trySync()`). */
   readErrorSync?(error: unknown): QueryError<D> | undefined;
   /** A column's raw value as `.run()` gives it, as a Standard Query's `decode` maps it (src/standard-query.ts). */
-  decoder(name: string, kind: Kind, delim: string | undefined, nonFinite: JsonNumbers | undefined, nestedArrays: boolean | undefined, dropped?: boolean): (v: never) => unknown;
+  decoder(name: string, kind: Kind, delim: string | undefined, inJson: ((v: unknown) => unknown) | undefined, nestedArrays: boolean | undefined, dropped?: boolean): (v: never) => unknown;
 };
 
 /** Placeholders' places in a statement: `[start, end]` for each, at JavaScript's offsets, in text order. */
@@ -270,7 +339,7 @@ export type Bound = { text: string; values: unknown[]; names: readonly string[];
  * then refuses, given or left out, except that a JSON parameter's null there is JSON's null; a
  * query defined by hand without it binds what it is given.
  */
-export type Inputs = Readonly<Record<string, { readonly type: EngineType; readonly schema?: JsonSchema; readonly cast?: string; readonly members?: Members; readonly delimiter?: string; readonly nullable?: boolean; readonly codec?: Plan }>>;
+export type Inputs = Readonly<Record<string, { readonly type: EngineType; readonly kind?: Kind; readonly schema?: JsonSchema; readonly cast?: string; readonly members?: Members; readonly delimiter?: string; readonly nullable?: boolean; readonly codec?: Plan }>>;
 
 export type AnyClient = Record<string, any> & ((...args: any[]) => any);
 
@@ -317,15 +386,16 @@ export function execute<D extends Dialect>(
   query: QueryModule<D>,
   params: ParamsInput = {},
 ): unknown[] | Promise<unknown[]> {
-  const c = underneath(client as AnyClient);
-  if (isKnex(c)) return onKnexConnection(c, query.dialect, (connection) => execute(connection as ClientFor<D>, query, params));
-  const runSync = query.runtime.runSync;
-  if (runSync && (isSyncSqlite(c) || isDurableObjectSql(c))) return withCodecs(query, executeSyncSqlite(c, query, params, runSync));
-  const nonFinite = jsonPlans(query);
-  // A Postgres array column holds the dimensions its type declares and no more (src/values.ts, `withinDimensions`), unless the project lets it nest, which an array of JSON never does: its value can't tell a level from a JSON array.
-  const arrays = query.dialect === "postgres" ? lastOfEach(query.columns ?? []).filter(([, kind]) => (query.nestedArrays ? holdsJsonArray(kind) : holdsArray(kind))) : [];
-  if (!nonFinite.length && !arrays.length) return withCodecs(query, executeAsync(c, query, params));
-  return withCodecs(query, executeAsync(c, query, params).then((rows) => inJson(rows, nonFinite, arrays, query.nestedArrays === true)));
+  const { runtime } = query;
+  const c = unwrapped(query, client as AnyClient);
+  const onConnection = lent(query, c, (connection) => execute(connection as ClientFor<D>, query, params));
+  if (onConnection) return onConnection;
+  if (runtime.answersAtOnce?.(c, query)) return withCodecs(query, syncRows(c, query, params));
+  const rows = executeAsync(c, query, params);
+  const plans = jsonPlans(query);
+  const after = runtime.after;
+  if (!plans.length && !after) return withCodecs(query, rows);
+  return withCodecs(query, rows.then((r) => (after ? after(query, inJson(query, r, plans)) : inJson(query, r, plans))));
 }
 
 /**
@@ -337,20 +407,31 @@ function jsonPlans(query: QueryModule): (readonly [name: string, at: JsonNumbers
   return query.nonFinite !== undefined && query.columns !== undefined ? rowMasks(query.columns, query.nonFinite) : [];
 }
 
-/** The rows with what each JSON column's plan reads inside its document read there, and each Postgres array column held to its dimensions. */
-function inJson(rows: unknown[], nonFinite: readonly (readonly [name: string, at: JsonNumbers])[], arrays: Columns, jsonOnly = false): unknown[] {
-  for (const row of rows as Record<string, unknown>[]) {
-    for (const [name, at] of nonFinite) row[name] = numbersInJson(row[name], at, name);
-    for (const [name, kind] of arrays) withinDimensions(row[name], kind, name, undefined, jsonOnly);
-  }
+/** The rows with what each JSON column's plan reads inside its document read there. */
+function inJson(query: QueryModule, rows: unknown[], plans: readonly (readonly [name: string, at: JsonNumbers])[]): unknown[] {
+  if (!plans.length) return rows;
+  const read = jsonNumbersOf(query);
+  for (const row of rows as Record<string, unknown>[]) for (const [name, at] of plans) row[name] = read(row[name], at, name);
   return rows;
+}
+
+/** The reading of what a JSON column's plan reads inside its document (src/values.ts, `numbersInJson`): every build step passes it where a column has a plan. */
+export function jsonNumbersOf(query: QueryModule): typeof numbersInJson {
+  if (query.jsonNumbers) return query.jsonNumbers;
+  throw new TypeError(`${query.source ? `${query.source}: ` : ""}This statement returns JSON whose numbers Reylo reads with jsonNumbers, which a module a build step writes passes: build a module an earlier reylo wrote again (reylo generate typescript writes the files it wrote). A query defined by hand passes it with defineQuery.`);
 }
 
 /** The rows with the codecs of the module's columns applied where they stand (src/codecs.ts): one pass, where a column holds one. */
 function withCodecs(query: QueryModule, rows: unknown[] | Promise<unknown[]>): unknown[] | Promise<unknown[]> {
   const codecs = query.codecs;
   if (codecs === undefined || Object.keys(codecs).length === 0) return rows;
-  return Array.isArray(rows) ? decodeCodecs(rows, codecs, query.libraries) : rows.then((r) => decodeCodecs(r, codecs, query.libraries));
+  return Array.isArray(rows) ? codecsOf(query).decodeCodecs(rows, codecs, query.libraries) : rows.then((r) => codecsOf(query).decodeCodecs(r, codecs, query.libraries));
+}
+
+/** `js.codecs` at run time (src/codecs.ts): every build step passes it where the statement holds a value a codec gives another type. */
+export function codecsOf(query: QueryModule): CodecRuntime {
+  if (query.codecRuntime) return query.codecRuntime;
+  throw new TypeError(`${query.source ? `${query.source}: ` : ""}This statement holds a value js.codecs gives another type, which the run time converts with Reylo's codecRuntime, which a module a build step writes passes: build a module an earlier reylo wrote again (reylo generate typescript writes the files it wrote). A query defined by hand has it with defineQuery({ dialect: "${query.dialect}", … }).`);
 }
 
 /**
@@ -402,67 +483,47 @@ async function onKnexConnection(knex: AnyClient, dialect: Dialect, run: (connect
   }
 }
 
+/** A Drizzle database's client and a Knex instance's connections, for the databases Drizzle and Knex run on (`Runtime`), so that a bundle of another holds neither. */
+export type Wrappers = {
+  /** The driver's client a Drizzle database runs on (`underneath`), else `c` itself. */
+  underneath(c: AnyClient): AnyClient;
+  /** The rows of `run` on a connection a Knex instance lends, or undefined where `c` is none. */
+  knex(c: AnyClient, dialect: Dialect, run: (connection: AnyClient) => unknown[] | Promise<unknown[]>): Promise<unknown[]> | undefined;
+};
+export const wrappers: Wrappers = { underneath, knex: (c, dialect, run) => (isKnex(c) ? onKnexConnection(c, dialect, run) : undefined) };
+
+/** A Knex instance, transaction or savepoint over one of the dialect's drivers: Reylo runs on a connection it lends. */
+export const knexDriver: DriverClient = {
+  label: "a Knex instance over one of them",
+  lend: (c, dialect, run) => (isKnex(c) ? onKnexConnection(c, dialect, run) : undefined),
+};
+
 /** The synchronous path alone, for `runSync`: any other client is refused before anything runs. */
 export function executeSync<D extends Dialect>(client: SyncClientFor<D>, query: QueryModule<D>, params: ParamsInput = {}): unknown[] {
-  const c = underneath(client as unknown as AnyClient);
-  const refuse = (why: string) => new TypeError(`runSync takes a synchronous SQLite client (better-sqlite3, node:sqlite, bun:sqlite, the Database of @tursodatabase/database/compat, an oo1 Database of @sqlite.org/sqlite-wasm, sql.js's Database or a Durable Object's ctx.storage.sql); ${why}. run takes every client.`);
-  const runSync = query.runtime.runSync;
-  if (!runSync) throw refuse(`a ${query.dialect} statement has none`);
-  if (!isSyncSqlite(c) && !isDurableObjectSql(c)) throw refuse("this client answers through a promise");
-  const rows = executeSyncSqlite(c, query, params, runSync);
+  const c = unwrapped(query, client as unknown as AnyClient);
+  if (!query.runtime.runSync) throw refuseSync(`a ${query.dialect} statement has none`);
+  if (!query.runtime.answersAtOnce?.(c, query)) {
+    const atOnce = query.drivers?.filter((d) => d.atOnce).map((d) => d.label);
+    throw refuseSync(atOnce ? `this client answers through a promise, or is none of the synchronous drivers its app depends on (${atOnce.join("; ") || "none"})` : "this client answers through a promise");
+  }
+  const rows = syncRows(c, query, params);
   if (Array.isArray(rows)) return withCodecs(query, rows) as unknown[];
   rows.catch(() => {});
-  throw refuse("this client's statement answered with a promise");
+  throw refuseSync("this client's statement answered with a promise");
 }
 
-function executeSyncSqlite<D extends Dialect>(c: AnyClient, query: QueryModule<D>, params: ParamsInput, runSync: NonNullable<Runtime<D>["runSync"]>): unknown[] | Promise<unknown[]> {
-  if (isSqlJs(c) && !sqlJsCurrent(c)) throw new TypeError(`This sql.js binds a BigInt as its text and throws SQLite's errors with no code, which .try() could not tell apart: reylo takes sql.js ${SQLJS_MIN} or later.`);
+/** `.runSync()` on a client that does not answer at once, or a statement of a database that has none. */
+export function refuseSync(why: string): TypeError {
+  return new TypeError(`runSync takes a synchronous SQLite client (better-sqlite3, node:sqlite, bun:sqlite, the Database of @tursodatabase/database/compat, an oo1 Database of @sqlite.org/sqlite-wasm, sql.js's Database or a Durable Object's ctx.storage.sql); ${why}. run takes every client.`);
+}
+
+/** The rows of a client that answers at once (`Runtime`, `answersAtOnce`). */
+function syncRows<D extends Dialect>(c: AnyClient, query: QueryModule<D>, params: ParamsInput): unknown[] | Promise<unknown[]> {
   checkParams(query, params);
-  const rows = runSync(c, query, statement(query, params));
+  const rows = query.runtime.runSync!(c, query, statement(query, params));
   const plans = jsonPlans(query);
   if (!plans.length) return rows;
-  return Array.isArray(rows) ? inJson(rows, plans, []) : rows.then((r) => inJson(r, plans, []));
-}
-
-// SQLite Wasm's oo1 Database: prepare() and selectObjects(), which no other driver has. Its
-// statement has no all(), so it would otherwise be taken for better-sqlite3's.
-export function isSqliteWasm(c: AnyClient | null | undefined): boolean {
-  return c != null && typeof c.prepare === "function" && typeof c.selectObjects === "function";
-}
-
-// sql.js's Database, which getRowsModified() tells apart, answers at once as better-sqlite3's does.
-// Its statement has no all(), so it would otherwise be taken for better-sqlite3's.
-export function isSqlJs(c: AnyClient | null | undefined): boolean {
-  return c != null && typeof c.prepare === "function" && typeof c.getRowsModified === "function";
-}
-
-/** The first sql.js that binds a BigInt as an INTEGER and gives each SQLite error its code. */
-const SQLJS_MIN = "1.17.0";
-const sqlJsChecked = new WeakMap<object, boolean>();
-
-// Before SQLJS_MIN, sql.js bound a BigInt as its text, which an INTEGER compares unequal to, and
-// threw SQLite's errors with their message alone. Each database is asked once which its sql.js does:
-// a BigInt bound to typeof(?), and the code of a statement that does not parse.
-function sqlJsCurrent(db: AnyClient): boolean {
-  let current = sqlJsChecked.get(db);
-  if (current !== undefined) return current;
-  const st = db.prepare("select typeof(?)");
-  try {
-    st.bind([BigInt(0)]);
-    st.step();
-    current = st.get()[0] === "integer";
-  } finally {
-    st.free();
-  }
-  if (current) {
-    try {
-      db.prepare("select from").free();
-    } catch (e) {
-      current = (e as { code?: unknown }).code === "SQLITE_ERROR";
-    }
-  }
-  sqlJsChecked.set(db, current);
-  return current;
+  return Array.isArray(rows) ? inJson(query, rows, plans) : rows.then((r) => inJson(query, r, plans));
 }
 
 // A SQLite-backed Durable Object's `ctx.storage.sql`: exec() and databaseSize, and no prepare().
@@ -471,85 +532,19 @@ export function isDurableObjectSql(c: AnyClient | null | undefined): boolean {
   return c != null && typeof c.exec === "function" && typeof c.prepare !== "function" && typeof c.all !== "function" && "databaseSize" in c;
 }
 
-// A SQLite client with prepare() whose statements answer at once. D1 (batch()), sqlite3 and
-// sqlite (all() on the database), libSQL (execute()), Bun.sql (unsafe()) and Turso's promise API
-// are asynchronous. Turso's compat Database has batch() as D1 does, and answers at once; its
-// maxWriteReplicationIndex(), which every Database of Turso's has, tells it from D1's.
-function isSyncSqlite(c: AnyClient | null | undefined): boolean {
-  return (
-    c != null &&
-    typeof c.prepare === "function" &&
-    (typeof c.batch !== "function" || typeof c.maxWriteReplicationIndex === "function") &&
-    typeof c.all !== "function" &&
-    typeof c.execute !== "function" &&
-    typeof c.unsafe !== "function" &&
-    !isTurso(c)
-  );
-}
-
-// Turso's promise API (@tursodatabase/database): a Database has connect() and
-// maxWriteReplicationIndex() in every release from 0.4 (0.4 has no all(), so it looked synchronous,
-// and from 0.6 its all() took it for sqlite3's, whose callback it never calls); the Transaction
-// that transactionAsync() hands its callback (0.7 and later) has all() beside batch(), which
-// sqlite3's database lacks. The compat Database has no connect().
-export function isTurso(c: AnyClient): boolean {
-  return typeof c.prepare === "function" && ((typeof c.connect === "function" && typeof c.maxWriteReplicationIndex === "function") || (typeof c.all === "function" && typeof c.batch === "function"));
-}
-
 async function executeAsync(c: AnyClient | null | undefined, query: QueryModule, params: ParamsInput): Promise<unknown[]> {
-  if (c == null || (typeof c !== "object" && typeof c !== "function")) throw unsupported(c, query.dialect);
+  if (c == null || (typeof c !== "object" && typeof c !== "function")) throw unsupported(c, query);
   // Effect SQL's client has an unsafe() whose statement is an Effect, which an await never runs:
   // taken for Bun.sql's on SQLite, a read gave no rows and a write ran nothing. Effect 4 brands
   // the client with a string, Effect 3's @effect/sql with a symbol.
   if ("~effect/sql/SqlClient" in c || Symbol.for("@effect/sql/SqlClient") in c) throw new TypeError(`reylo cannot run a statement on an Effect SQL client: .run() takes a driver's own client. Inside an Effect, run the query with effect(query, params) from reylo/effect.`);
   checkParams(query, params);
-  if (query.dialect === "postgres") await checkMoneyLocale(c, query);
+  // Only a database with a check to make awaits one, so that a driver is handed the statement before anything else is awaited where none is made.
+  if (query.runtime.before) await query.runtime.before(c, query);
   const rows = await query.runtime.run(c, query, statement(query, params));
-  if (rows === undefined) throw unsupported(c, query.dialect);
+  if (rows === undefined) throw unsupported(c, query);
   return rows;
 }
-
-/** The clients whose session writes a `money` in the C locale's form, which `checkMoneyLocale` has seen. */
-const moneyLocales = new WeakSet<object>();
-
-/** The statements that take a Postgres `money` parameter, anywhere in its value. */
-const moneyParams = new WeakMap<object, string | null>();
-
-/** Whether `t` holds a Postgres `money`, itself or in an array's elements or a structured parameter's fields. */
-function holdsMoney(t: EngineType): boolean {
-  if (t.kind === "opaque") return bareName(t) === "money";
-  if (t.kind === "array") return holdsMoney(t.element.type);
-  if (t.kind === "struct") return t.fields.some((f) => holdsMoney(f.type));
-  return false;
-}
-
-/**
- * Postgres reads a `money` parameter in the session's lc_monetary, which under another locale can
- * read the same text as another amount without an error (under de_DE, `1234.56` is 123456.00):
- * `.run()` reads a money in the C locale's form and refuses another, and a parameter is refused
- * under a session that does not write 1234.50 as the C locale's `$1,234.50`. A client is checked once, before the first statement that takes
- * one, by the text its session writes for 1234.50; a client whose check fails to run is not held up.
- */
-async function checkMoneyLocale(c: AnyClient, query: QueryModule): Promise<void> {
-  let name = moneyParams.get(query);
-  if (name === undefined) moneyParams.set(query, (name = Object.entries(query.inputs ?? {}).find(([, input]) => holdsMoney(input.type))?.[0] ?? null));
-  // A client effect() passes (src/effect.ts) is made for one call, and checks under the client it reads through.
-  const effect = (c as Partial<EffectSql>)[EFFECT_SQL];
-  const key = effect?.dialect === "postgres" ? effect.key : (c as object);
-  if (name === null || moneyLocales.has(key)) return;
-  let written: unknown;
-  try {
-    const rows = await executeAsync(c, { dialect: "postgres", runtime: query.runtime, sql: MONEY_CHECK, params: [], text: MONEY_CHECK, order: [], marks: [], columns: [["m", "text"]] }, {});
-    written = (rows[0] as { m?: unknown } | undefined)?.m;
-  } catch {
-    return;
-  }
-  if (written === "$1,234.50") return void moneyLocales.add(key);
-  throw new ParameterError(`Parameter "${name}" is a Postgres money, which Postgres reads in the session's lc_monetary, and this session writes 1234.50 as ${JSON.stringify(written)}, not the C locale's "$1,234.50", so it could store the parameter as another amount. Set lc_monetary = 'C' on the session, the role or the database, or cast the parameter to numeric in the statement (:${name}::numeric).`);
-}
-
-/** The text a session writes for a money of 1234.50, in its lc_monetary. */
-const MONEY_CHECK = "select 1234.50::numeric::money::text as m";
 
 // The parameters are an object, refused before anything reaches the database otherwise: an
 // array, which `run` took in the order of `params` from 2026-10-03, was dropped on 2026-10-20
@@ -565,6 +560,9 @@ function checkParams(query: QueryModule, input: unknown): asserts input is Recor
 // PGlite, better-sqlite3 and Bun.sql already do; postgres.js, mysql2, node:sqlite and libSQL
 // would reject it instead.
 function statement(query: QueryModule, params: ParamsInput, run = true) {
+  // A column of a family js.codecs gives another type is refused before the statement runs, not
+  // after a write it returns from has committed, where its module passes no codecRuntime.
+  if (query.codecs !== undefined && Object.keys(query.codecs).length) codecsOf(query);
   // The build step already compiled the statement; only the values need ordering.
   const compiled = compile(query);
   const bound: Bound = { text: compiled.text, values: compiled.order.map((name) => value(params, name)), names: compiled.order, marks: compiled.marks };
@@ -595,7 +593,7 @@ function statement(query: QueryModule, params: ParamsInput, run = true) {
     // A value of a family the project file's `js.codecs` gives another type takes that type alone,
     // wherever it stands in the parameter, a structured parameter's members among them, and is
     // bound as the text or the bytes its type reads (src/codecs.ts).
-    if (input?.codec !== undefined) bound.values[i] = encodePlan(input.codec, bound.values[i], name, query.dialect, query.libraries);
+    if (input?.codec !== undefined) bound.values[i] = codecsOf(query).encodePlan(input.codec, bound.values[i], name, query.dialect, query.libraries);
     // A structured parameter is checked against its column list and written as the JSON the
     // statement reads; in an insert, its lists name only the keys the call carries. It refuses
     // null itself, saying what to pass.
@@ -624,47 +622,29 @@ function statement(query: QueryModule, params: ParamsInput, run = true) {
     // structured parameter's member keeps its NULL elements (src/rows.ts).
     // A ClickHouse array's type says whether an element may be NULL, and its binder holds each to it.
     if (type?.kind === "array" && Array.isArray(bound.values[i]) && query.dialect !== "clickhouse") {
-      const kind = columnKind(type, query.dialect);
-      const at = nullElement(bound.values[i] as unknown[], kind.endsWith("[]") ? columnKind(type.element.type, query.dialect) : undefined);
+      const kind = kindOf(query, name);
+      const at = nullElement(bound.values[i] as unknown[], kind.endsWith("[]") ? kind.slice(0, -2) : undefined);
       if (at !== undefined) throw new ParameterError(`Parameter "${name}" is an array whose elements may not be null, and the element at ${at} is. Leave it out of the array.`);
     }
     // A `::type` written on MySQL or SQLite, whose cast turns a value it cannot read into 0 or
     // NULL: the value is checked against the type as written.
     const cast = query.inputs?.[name]?.cast;
     if (cast !== undefined && type !== undefined) checksFor(query, name).checkCast(name, cast, type, bound.values[i], query.dialect);
-    checkTime(type, name, bound.values[i], query.dialect);
-    checkBinary(type, name, bound.values[i], query.dialect);
+    const kind = type === undefined ? undefined : kindOf(query, name);
+    if (kind !== undefined) {
+      checkTime(kind, name, bound.values[i]);
+      checkBinary(kind, name, bound.values[i]);
+    }
     checkNonFinite(type, name, bound.values[i], query.dialect);
-    bound.values[i] = jsonNull ? JSON_NULL : encode(type, bound.values[i], query.dialect, name);
+    const v = bound.values[i];
+    bound.values[i] = jsonNull ? JSON_NULL : type === undefined || kind === undefined || v == null ? v : query.runtime.encode(type, kind, v, name);
   });
   // Every MySQL and SQLite driver binds JSON text as text, which the database reads as JSON (a
   // structured parameter's is written already).
-  if (query.dialect !== "postgres") bound.values = bound.values.map((v, i) => (isJsonValue(query, bound.names[i]!, v) && query.inputs?.[bound.names[i]!]?.members === undefined ? jsonText(v, query.dialect, bound.names[i]!) : v));
-  // SQLite holds an INTEGER in 64 bits, so a BigInt outside them has no exact form there.
-  // better-sqlite3, node:sqlite, libSQL, Turso's engine and SQLite Wasm refuse one, but bun:sqlite
-  // and Bun.sql keep its low 64 bits where the statement reads numbers (2^63 was stored as -2^63,
-  // and 2^64 + 5 as 5), and sqlite3 binds any BigInt as NULL.
-  if (query.dialect === "sqlite")
-    bound.values.forEach((v, i) => {
-      if (typeof v === "bigint" && (v >= 2n ** 63n || v < -(2n ** 63n))) throw new ParameterError(`Parameter "${bound.names[i]}" is ${v}, outside the 64-bit integers SQLite holds (-2^63 to 2^63 - 1), so no SQLite driver binds it exactly.`);
-    });
-  // A number a SQLite driver binds as another value goes in at its mark as SQLite's literal for it,
-  // on every driver: sqlite3, Turso's engine, sql.js and SQLite Wasm bind -0 as the INTEGER 0, D1
-  // sends -0 as 0 and an infinity as null, and libSQL refuses an infinity, which a REAL holds. -0 is
-  // written so where the type takes a float, whose sign a REAL value keeps (a REAL column stores it
-  // as 0). Those drivers refuse one whose place isn't known (src/decode-sqlite.ts, `unplaced`), as
-  // mariadb and PlanetScale do on MySQL (src/decode-mysql.ts, `signedZeros`). A Standard Query's
-  // values bind to the module's own text (src/standard-query.ts), so they go as they are.
-  if (query.dialect === "sqlite" && run) {
-    Object.assign(
-      bound,
-      literalsAtMarks(bound, (v, i) => {
-        if (v === Infinity || v === -Infinity) return v > 0 ? "(9e999)" : "(-9e999)";
-        const type = query.inputs?.[bound.names[i]!]?.type;
-        return Object.is(v, -0) && type !== undefined && takesFloat(type, "sqlite") ? "(-0.0)" : undefined;
-      }),
-    );
-  }
+  if (query.dialect !== "postgres") bound.values = bound.values.map((v, i) => (isJsonValue(query, bound.names[i]!, v) && query.inputs?.[bound.names[i]!]?.members === undefined ? jsonText(query, v, bound.names[i]!) : v));
+  // What the database's drivers need of the bound values beyond each one's: SQLite's 64-bit
+  // integers, and the numbers it writes into the statement.
+  if (query.runtime.bind) Object.assign(bound, query.runtime.bind(query, bound, run));
   // The comment naming the file goes on last, after a structured parameter's lists are written. It
   // ends the statement on Postgres and MySQL, so every mark keeps its place; on SQLite and ClickHouse
   // it opens the statement, and every mark moves by its length.
@@ -675,10 +655,21 @@ function statement(query: QueryModule, params: ParamsInput, run = true) {
   return bound;
 }
 
-/** Whether a parameter's type takes a float, alone or as one of the types its value decides between, or is no type the run time knows, so that -0 keeps its sign there. */
-export function takesFloat(type: EngineType, dialect: Dialect): boolean {
-  const kinds = columnKind(type, dialect).split("|");
+/** Whether a parameter's kind takes a float, alone or as one of the kinds its value decides between, or is no kind the run time knows, so that -0 keeps its sign there. */
+export function takesFloat(kind: Kind): boolean {
+  const kinds = kind.split("|");
   return kinds.includes("float") || kinds.includes("unknown");
+}
+
+/**
+ * A parameter's kind (src/values.ts, `columnKind`), which a build step writes beside its type, so
+ * that the run time binds by it with no reading of the type: a query defined by hand with
+ * `defineQuery` has each one.
+ */
+export function kindOf(query: QueryModule, name: string): Kind {
+  const kind = query.inputs?.[name]?.kind;
+  if (kind !== undefined) return kind;
+  throw new TypeError(`${query.source ? `${query.source}: ` : ""}Parameter "${name}" names no kind, which a module a build step writes gives each parameter: build a module an earlier reylo wrote again (reylo generate typescript writes the files it wrote). A query defined by hand has each parameter's kind with defineQuery.`);
 }
 
 /**
@@ -724,16 +715,16 @@ export function rawStatement(query: QueryModule, params: unknown): { text: strin
   checkParams(query, params);
   const bound = statement(query, params, false);
   const { text, values, names } = bound;
-  if (query.dialect !== "postgres") return { text, values };
-  return { text, values: values.map((v, i) => postgresText(query, names[i]!, v)) };
+  const raw = query.runtime.rawValue;
+  return raw ? { text, values: values.map((v, i) => raw(query, names[i]!, v)) } : { text, values };
 }
 
 /** A bound value as the text Postgres's input function reads, as `.run()` sends it through pg. */
 export function postgresText(query: QueryModule, name: string, v: unknown): string | null {
   if (v == null) return null;
   const t = query.inputs?.[name]?.type;
-  if (isJsonValue(query, name, v)) return jsonText(v, "postgres", name) ?? null;
-  if (Array.isArray(v) && t?.kind === "array") return arrayLiteral(t.element.type.kind === "json" ? jsonElements(v, name) : v, query.inputs?.[name]?.delimiter);
+  if (isJsonValue(query, name, v)) return jsonText(query, v, name) ?? null;
+  if (Array.isArray(v) && t?.kind === "array") return arrayLiteral(t.element.type.kind === "json" ? jsonElements(query, v, name) : v, query.inputs?.[name]?.delimiter);
   if (Array.isArray(v)) return arrayLiteral(v);
   if (v instanceof Uint8Array) return asByteaHex(v) as string;
   if (typeof v === "boolean") return v ? "t" : "f";
@@ -743,8 +734,8 @@ export function postgresText(query: QueryModule, name: string, v: unknown): stri
 }
 
 /** A `json[]` or `jsonb[]` parameter's elements, each as its JSON text (`jsonText`) or NULL. */
-export function jsonElements(array: readonly unknown[], name: string): unknown[] {
-  return array.map((e, i) => (e == null ? e : jsonText(e, "postgres", name, `[${i}]`)));
+export function jsonElements(query: QueryModule, array: readonly unknown[], name: string): unknown[] {
+  return array.map((e, i) => (e == null ? e : jsonText(query, e, name, `[${i}]`)));
 }
 
 /** The checks a parameter needs (src/checks.ts): every build step passes them where its statement has such a parameter. */
@@ -810,15 +801,21 @@ const JSON_NULL: unique symbol = Symbol("JSON null");
 export const jsonValue = (v: unknown) => (v === JSON_NULL ? null : v);
 
 /** A JSON parameter's value as the JSON text a driver binds (src/values.ts, `writeJson`), refusing a number the database's JSON holds none for. */
-export const jsonText = (v: unknown, dialect: Dialect, name: string, at = "") =>
-  writeJson(
+export const jsonText = (query: QueryModule, v: unknown, name: string, at = "") =>
+  jsonWriterOf(query)(
     jsonValue(v),
-    dialect,
+    query.dialect,
     (message) => {
       throw new ParameterError(`Parameter "${name}" ${message}`);
     },
     at,
   );
+
+/** The writer of a JSON parameter's text (src/values.ts, `writeJson`), which every build step passes where a parameter is JSON. */
+function jsonWriterOf(query: QueryModule): typeof writeJson {
+  if (query.jsonWriter) return query.jsonWriter;
+  throw new TypeError(`${query.source ? `${query.source}: ` : ""}This statement takes a JSON parameter, whose text Reylo writes with jsonWriter, which a module a build step writes passes: build a module an earlier reylo wrote again (reylo generate typescript writes the files it wrote). A query defined by hand passes it with defineQuery.`);
+}
 
 // A date or time value's type says whether it has a zone (src/render.ts),
 // and a value that would be read in a zone nobody chose is refused before the
@@ -830,15 +827,14 @@ export const jsonText = (v: unknown, dialect: Dialect, name: string, at = "") =>
 // server sets, and a Date is refused too, as every other type's value is but a string,
 // with the call that writes it as one.
 
-export const isTime = (type: EngineType | undefined, dialect: Dialect) => type !== undefined && columnKind(type, dialect).split("|").every((part) => part === "timestamp" || part === "timestamptz" || part === "date");
+export const isTime = (kind: Kind) => kind.split("|").every((part) => part === "timestamp" || part === "timestamptz" || part === "date");
 
-function checkTime(type: EngineType | undefined, name: string, v: unknown, dialect: Dialect): void {
-  if (type === undefined || v == null) return;
-  if (type.kind === "array") {
-    if (Array.isArray(v)) for (const e of v) checkTime(Array.isArray(e) && !holdsWholeArrays(type) ? type : type.element.type, name, e, dialect);
+function checkTime(kind: Kind, name: string, v: unknown): void {
+  if (v == null) return;
+  if (kind.endsWith("[]")) {
+    if (Array.isArray(v)) for (const e of v) checkTime(element(kind, e), name, e);
     return;
   }
-  const kind = columnKind(type, dialect);
   if (kind === "timestamptz") {
     if (v instanceof Date) {
       throw new ParameterError(`Parameter "${name}" is a timestamptz, which takes the instant as a string that names its zone, as \`.run()\` returns one, not a Date: pass date.toISOString() ("2026-10-12T19:06:48.282Z").`);
@@ -851,18 +847,30 @@ function checkTime(type: EngineType | undefined, name: string, v: unknown, diale
   }
 }
 
+/**
+ * The kind an element `e` of an array of `kind` has: an array inside one that holds no whole arrays
+ * is another level of it, of its kind; anything else is an element, and a whole array (a domain
+ * over an array type, `{int[]}`) is an array of its own kind.
+ */
+function element(kind: Kind, e: unknown): Kind {
+  const inner = kind.slice(0, -2);
+  const whole = wholeArrayKind(inner);
+  if (Array.isArray(e) && whole === undefined) return kind;
+  return whole ?? inner;
+}
+
 // A binary parameter takes a Uint8Array (a Buffer is one), as `.run()` returns binary data and
 // as a structured parameter's binary member does (src/rows.ts). Anything else would reach the
 // driver as it is, and a string means something different on each database: Postgres reads it
 // as bytea's hex or escape text, MySQL stores the bytes of its UTF-8, and SQLite stores it as
 // TEXT, which comes back a string. So base64 text was stored as its own letters.
-function checkBinary(type: EngineType | undefined, name: string, v: unknown, dialect: Dialect): void {
-  if (type === undefined || v == null) return;
-  if (type.kind === "array" && columnKind(type, dialect).endsWith("[]")) {
-    if (Array.isArray(v)) for (const e of v) checkBinary(Array.isArray(e) && !holdsWholeArrays(type) ? type : type.element.type, name, e, dialect);
+function checkBinary(kind: Kind, name: string, v: unknown): void {
+  if (v == null) return;
+  if (kind.endsWith("[]")) {
+    if (Array.isArray(v)) for (const e of v) checkBinary(element(kind, e), name, e);
     return;
   }
-  if (columnKind(type, dialect) !== "bytes" || v instanceof Uint8Array) return;
+  if (kind !== "bytes" || v instanceof Uint8Array) return;
   throw new ParameterError(`Parameter "${name}" is binary data, so it takes a Uint8Array (a Buffer is one), as \`.run()\` returns one; got ${describe(v)}. ${v instanceof ArrayBuffer ? "Wrap an ArrayBuffer in one: new Uint8Array(buffer)." : "Decode base64 or hex text into one first."}`);
 }
 
@@ -883,64 +891,8 @@ function checkNonFinite(type: EngineType | undefined, name: string, v: unknown, 
   if (!(Number.isNaN(v) ? type.nan : type.infinity)) throw new ParameterError(`Parameter "${name}" is ${v}, which its type${type.kind === "decimal" ? ", a numeric with a precision," : ""} holds no value for.`);
 }
 
-// What `run` returns goes back in as the database reads it (the round-trip rule, src/render.ts):
-// on Postgres a date or time with an extended or BC year in Postgres's own form, which refuses
-// `+010000` and `0000`, and a negative interval with each part signed (`-P1D` as `P-1D`), since
-// Postgres refuses a sign before the `P`, and a float of -0 as the text `-0`, since pg's family,
-// postgres.js, PGlite, Neon and Drizzle's driver write that number as `0`; on SQLite a truth value, which a BOOLEAN column returns, as 1 or 0, since
-// better-sqlite3 refuses a boolean ("SQLite3 can only bind numbers, strings, bigints, buffers, and
-// null") and libSQL binds `true` as the REAL 1.0. A query without `inputs` gets neither. On MySQL
-// a VECTOR, MySQL's one array, as the text of its floats, `[1,2.5]`, which the engine's
-// `to_vector(?)` reads: drivers left to themselves sent an array as the text "1,2,3" (mysql2's
-// execute() before 3.24) or expanded it into a list of values (mysql2's query(), mariadb). On Postgres a
-// pgvector vector the same way, as the text its input reads, and an array of vectors as an array
-// of those texts.
-function encode(type: EngineType | undefined, v: unknown, dialect: Dialect, name: string): unknown {
-  if (type === undefined || v == null) return v;
-  // A ClickHouse value is written as its type's text where the statement runs (src/decode-clickhouse.ts).
-  if (dialect === "clickhouse") return v;
-  if (dialect === "sqlite") return typeof v === "boolean" ? (v ? 1 : 0) : v;
-  if (dialect === "mysql") {
-    // A SET goes as its members joined by commas, in the order its column declares them: MySQL
-    // stores a SET in that order, and compares one with a parameter's text as it is written.
-    if (type.kind === "array" && isMysqlSet(type) && v instanceof Set) {
-      const labels = type.element.type.kind === "enum" ? type.element.type.values.map((l) => l.value) : undefined;
-      return (labels === undefined ? [...v] : [...v].sort((a, b) => labels.indexOf(a as string) - labels.indexOf(b as string))).join(",");
-    }
-    return type.kind === "array" && bareName(type) === "vector" && Array.isArray(v) ? vectorParameter(v, name, "a VECTOR") : v;
-  }
-  const kind = columnKind(type, dialect);
-  // A row value, a geometric type and a range go as the text Postgres reads, from the object
-  // `.run()` returns for them, and an array of them as an array of those texts (below).
-  if (!kind.endsWith("[]") && (isRowKind(kind) || GEOMETRIC_KINDS.has(kind) || isRangeKind(kind) || isMultirangeKind(kind))) return postgresLiteral(type, v, (message) => {
-    throw new ParameterError(`Parameter "${name}" is ${message}`);
-  });
-  // An array of whole arrays (of a domain over an array type) goes as an array of each one's text.
-  if (type.kind === "array" && holdsWholeArrays(type) && Array.isArray(v)) return v.map((e) => (e == null ? e : postgresLiteral(type.element.type, e, (message) => {
-    throw new ParameterError(`Parameter "${name}" is an array of arrays, each element ${message}`);
-  })));
-  if (type.kind === "array" && kind.endsWith("[]")) return Array.isArray(v) ? v.map((e) => encode(Array.isArray(e) && isLevel(columnKind(type.element.type, dialect), e) ? type : type.element.type, e, dialect, name)) : v;
-  if (kind === "vector" && Array.isArray(v)) {
-    if (!v.length) throw new ParameterError(`Parameter "${name}" is a pgvector ${bareName(type)}, which has one dimension at least; got an empty array.`);
-    return vectorParameter(v, name, `a pgvector ${bareName(type)}`);
-  }
-  if (kind === "hstore" && typeof v === "object") return hstoreText(v, (message) => {
-    throw new ParameterError(`Parameter "${name}" ${message}`);
-  });
-  // A money holds cents in the C locale Reylo reads it in, and Postgres rounds a value past them
-  // without an error.
-  if (kind === "money" && (typeof v !== "string" || !/^-?\d+(?:\.\d{1,2}0*)?$/.test(v))) throw new ParameterError(`Parameter "${name}" is a Postgres money, which holds cents: pass its decimal text, with two digits after the point at most (1234.56); got ${describe(v)}.`);
-  if (Object.is(v, -0) && takesFloat(type, dialect)) return "-0";
-  if (typeof v !== "string") return v;
-  if (isTime(type, dialect)) return postgresYear(v);
-  return kind === "interval" ? postgresInterval(v) : v;
-}
-
-/** Postgres's geometric types' kinds (src/values.ts). */
-const GEOMETRIC_KINDS: ReadonlySet<string> = new Set(["point", "line", "lseg", "box", "path", "polygon", "circle"]);
-
 /** A vector's floats as the text a VECTOR's `to_vector` and pgvector's input read (src/values.ts), which hold no NaN or infinity, so those are refused. */
-function vectorParameter(v: readonly unknown[], name: string, what: string): string {
+export function vectorParameter(v: readonly unknown[], name: string, what: string): string {
   v.forEach((e, i) => {
     if (typeof e !== "number" || !Number.isFinite(e)) {
       throw new ParameterError(`Parameter "${name}" is ${what}, an array of finite numbers, and the element at [${i}] is ${typeof e === "string" ? JSON.stringify(e) : typeof e === "number" ? e : typeof e}.`);
@@ -999,14 +951,7 @@ export function compile(query: QueryModule): { text: string; order: readonly str
   return { text: query.sql, order: query.params, marks: query.marks };
 }
 
-const accepted: Record<Dialect, string> = {
-  postgres: "query(text, values) as on pg, PGlite, Neon, @vercel/postgres, pg-promise and Drizzle's Postgres driver; unsafe(text, values) as on postgres.js and Bun.sql; Neon's neon() function; a Slonik pool, connection or transaction; or a Drizzle database or Knex instance over one of them",
-  clickhouse: "a client of @clickhouse/client or @clickhouse/client-web, whose exec() runs the statement",
-  mysql: "execute(text, values) as on mysql2 and PlanetScale; query(text, values) as on mariadb's pool or connection, from its promise or callback API; unsafe(text, values) as on Bun.sql; a mysql2 callback pool or connection; or a Drizzle database or Knex instance over one of them",
-  sqlite: "prepare(sql) as on better-sqlite3, node:sqlite, bun:sqlite, Turso's @tursodatabase/database, Cloudflare D1, the oo1 Database of @sqlite.org/sqlite-wasm and sql.js; exec(sql, ...values) as on a Durable Object's ctx.storage.sql; execute({ sql, args }) as on @libsql/client; all(sql, params) as on sqlite3 and sqlite; unsafe(text, values) as on Bun.sql; or a Drizzle database or Knex instance over one of them",
-};
-
-function unsupported(c: unknown, dialect: Dialect): TypeError {
+function unsupported(c: unknown, { dialect, runtime, drivers }: QueryModule): TypeError {
   let seen: string;
   if (c === null || (typeof c !== "object" && typeof c !== "function")) seen = String(c);
   else {
@@ -1032,7 +977,10 @@ function unsupported(c: unknown, dialect: Dialect): TypeError {
         : typeof o?.$queryRawUnsafe === "function"
           ? ` Prisma decodes the values of its queries itself${typeof o.$transaction !== "function" ? inTx : ": pass a client of your database's driver, such as the pool its driver adapter was made with."}`
           : dialect === "postgres" && (typeof c === "function" || typeof (o as { query?: unknown } | null)?.query === "function" || typeof (o as { unsafe?: unknown } | null)?.unsafe === "function")
-              ? " It is none of those drivers' clients. A wrapper around one hands back the values its driver already converted, a Date for a timestamp and a string for a bigint, which reylo cannot read back: pass the driver's own pool, client or transaction, or keep the wrapper one of them, as a subclass or a proxy."
+              ? " A wrapper around a driver's client hands back the values its driver already converted, a Date for a timestamp and a string for a bigint, which reylo cannot read back: pass the driver's own pool, client or transaction, or keep the wrapper one of them, as a subclass or a proxy."
               : "";
-  return new TypeError(`reylo cannot run a ${dialect} statement on ${seen}. It takes a client with ${accepted[dialect]}.${hint}`);
+  // The drivers' own clients first, then the wrappers over them.
+  const labels = drivers && [...drivers.filter((d) => d.run || d.atOnce), ...drivers.filter((d) => !d.run && !d.atOnce)].map((d) => d.label).concat("a Drizzle database over one of them");
+  const takes = labels ? `It takes ${labels.join("; ")}. A module a bundler builds takes the drivers its app depends on: add your client's driver to the app's package.json, or to a package of its workspace it depends on, and build again.` : `It takes a client with ${runtime.clients}.`;
+  return new TypeError(`reylo cannot run a ${dialect} statement on ${seen}. ${takes}${hint}`);
 }

@@ -38,10 +38,9 @@
 //   past 2^53 may be one, a column with no type included; a BIGINT's number within 2^53, or
 //   libSQL's BigInt or digits, is its BigInt.
 import { lastOfEach, namesInResult, rowOf } from "./row.ts";
-import { bigInteger, coerce, columnKind, DecodeError, exactInteger, ParameterError, refuseTruth, truth, type Columns, type Kind } from "./values.ts";
-import { EFFECT_SQL, isDurableObjectSql, isSqlJs, isSqliteWasm, isTurso, takesFloat, type AnyClient as Client, type Bound, type EffectSql, type QueryModule, type Runtime } from "./execute.ts";
+import { bigInteger, DecodeError, toBytes, exactInteger, ParameterError, refuseTruth, truth, type Columns, type Kind } from "./values.ts";
+import { driversOf, EFFECT_SQL, executeSync, isDurableObjectSql, kindOf, knexDriver, literalsAtMarks, takesFloat, type AnyClient as Client, type Bound, type DriverClient, type EffectSql, type QueryModule, type Runtime } from "./execute.ts";
 import { readSqliteError } from "./query-error.ts";
-import type { EngineType } from "./engine-type.ts";
 
 type AnyClient = Record<string, any>;
 type Statement = AnyClient;
@@ -363,7 +362,7 @@ function normalized(p: Plan, v: unknown, d1: boolean): unknown {
     case "object":
       if (p.blob) p.blob(v);
       // libSQL's ArrayBuffer, D1's array of numbers.
-      if (!(v instanceof Uint8Array) && (v instanceof ArrayBuffer || (d1 && Array.isArray(v)))) return coerce("bytes", v, p.name);
+      if (!(v instanceof Uint8Array) && (v instanceof ArrayBuffer || (d1 && Array.isArray(v)))) return toBytes(v);
       return v;
   }
   return v;
@@ -381,10 +380,10 @@ export function sqliteDecoder(name: string, kind: Kind): (v: unknown) => unknown
 // one goes as its digits to a parameter of a BIGINT column (the engine's int8), whose INTEGER
 // affinity reads the text as that integer in an insert and a comparison alike, and is refused
 // anywhere else, where the text would stay text.
-function numberOrDigits(v: unknown, type: EngineType | undefined, driver: "sqlite3" | "durable-object" | "d1"): unknown {
+function numberOrDigits(v: unknown, kind: Kind | undefined, driver: "sqlite3" | "durable-object" | "d1"): unknown {
   if (typeof v !== "bigint") return v;
   if (v >= BigInt(Number.MIN_SAFE_INTEGER) && v <= BigInt(Number.MAX_SAFE_INTEGER)) return Number(v);
-  if (type !== undefined && columnKind(type, "sqlite") === "int8") return String(v);
+  if (kind === "int8") return String(v);
   const digits = "pass it as a string of digits, which SQLite stores as that integer in an INTEGER column";
   if (driver === "durable-object") throw new ParameterError(`A Durable Object's SQL storage binds no BigInt, and ${v} is past 2^53 - 1, where a number stops being exact: ${digits}.`);
   if (driver === "d1") throw new ParameterError(`Cloudflare D1 binds no BigInt, and ${v} is past 2^53 - 1, where a number stops being exact: ${digits}.`);
@@ -396,61 +395,167 @@ function numberOrDigits(v: unknown, type: EngineType | undefined, driver: "sqlit
 // one still among the values is one whose place it doesn't know, which these drivers refuse.
 function unplaced(query: QueryModule<"sqlite">, names: readonly string[], values: readonly unknown[], driver: string, infinities = false): void {
   values.forEach((v, i) => {
-    const type = query.inputs?.[names[i]!]?.type;
-    const zero = Object.is(v, -0) && type !== undefined && takesFloat(type, "sqlite");
+    const zero = Object.is(v, -0) && query.inputs?.[names[i]!] !== undefined && takesFloat(kindOf(query, names[i]!));
     if (!zero && !(infinities && (v === Infinity || v === -Infinity))) return;
     throw new ParameterError(`Parameter "${names[i]}" is ${zero ? "-0" : v}, which ${driver} ${zero ? "binds as 0" : "sends as null"}, and Reylo writes it into the statement only where it knows the placeholder's place, which this query doesn't carry: pass ${zero ? "0" : "null"}, or build the query again so that it does.`);
   });
 }
 
-/** A SQLite statement's rows on each SQLite driver's client that answers through a promise, each value given its kind, or undefined on any other client. */
-async function runSqlite(c: Client, query: QueryModule<"sqlite">, { text, values, names }: Bound): Promise<unknown[] | undefined> {
-  const type = (i: number) => query.inputs?.[names[i]!]?.type;
-  const columns = query.columns;
-  const effect = (c as Partial<EffectSql>)[EFFECT_SQL];
-  if (effect?.dialect === "sqlite") {
-    // D1 and a Durable Object refuse a BigInt, through Effect as on their own clients.
-    const driver = effect.driver;
-    if (driver === "d1") unplaced(query, names, values, "D1", true);
-    const bound = driver === "d1" || driver === "sqlite-do" ? values.map((v, i) => numberOrDigits(v, type(i), driver === "d1" ? "d1" : "durable-object")) : values;
-    const options = { exact: effect.exact, d1: driver === "d1" };
-    // Effect's raw result is the driver's own, read by the driver's column names as `.run()` reads
-    // it: rows on node:sqlite, bun:sqlite and a Durable Object, libSQL's ResultSet, D1's result, and
-    // a write's count on node:sqlite.
-    const raw = (await effect.raw(text, bound)) as unknown[] | { rows?: unknown; columns?: unknown; results?: unknown } | null;
-    if (Array.isArray(raw)) return normalize(raw, columns, options);
-    if (Array.isArray(raw?.rows)) return normalize(libsqlRows(raw.rows, columns, Array.isArray(raw.columns) ? raw.columns : undefined), columns, options);
-    return normalize(Array.isArray(raw?.results) ? raw.results : [], columns, options);
-  }
-  if (isTurso(c)) {
-    tursoValues(names, values);
-    unplaced(query, names, values, "Turso's engine");
-  }
-  if (typeof c.unsafe === "function") return normalize(await c.unsafe(text, values), columns);
-  if (typeof c.execute === "function") {
-    const result = await c.execute({ sql: text, args: values });
-    return normalize(libsqlRows(result.rows, columns, Array.isArray(result.columns) ? result.columns : undefined), columns);
-  }
-  if (isTurso(c)) return await runTurso(c, text, values, columns);
-  if (typeof c.getDatabaseInstance === "function" || (typeof c.all === "function" && typeof c.exec === "function")) unplaced(query, names, values, "sqlite3");
-  // The sqlite package wraps sqlite3, and sqlite3 binds a BigInt as NULL.
-  if (typeof c.getDatabaseInstance === "function") return normalize(await c.all(text, values.map((v, i) => numberOrDigits(v, type(i), "sqlite3"))), columns);
-  if (typeof c.all === "function" && typeof c.exec === "function") {
-    const bound = values.map((v, i) => numberOrDigits(v, type(i), "sqlite3"));
-    return normalize(
-      await new Promise<unknown[]>((resolve, reject) => c.all(text, bound, (error: Error | null, rows: unknown[]) => (error ? reject(error) : resolve(rows)))),
-      columns,
-    );
-  }
-  if (typeof c.prepare === "function") {
-    const prepared = c.prepare(text);
-    // D1 refuses a BigInt, which `.run()` returns for a BIGINT column.
-    if (typeof prepared.first === "function") unplaced(query, names, values, "D1", true);
-    if (typeof prepared.first === "function") return normalize((await prepared.bind(...values.map((v, i) => numberOrDigits(v, type(i), "d1"))).all()).results, columns, { d1: true });
-    return normalize(await prepared.all(...values), columns);
+/** A SQLite statement's rows on the first of the module's drivers that takes `c` and answers through a promise, or undefined where none does. */
+async function runSqlite(c: Client, query: QueryModule<"sqlite">, bound: Bound): Promise<unknown[] | undefined> {
+  const prepared: Prepared = { query, bound };
+  for (const driver of driversOf(query)) {
+    const rows = driver.run?.(c, prepared);
+    if (rows !== undefined) return await rows;
   }
   return undefined;
 }
+
+/** A SQLite statement bound for its drivers (src/execute.ts, `DriverClient`). */
+type Prepared = { readonly query: QueryModule<"sqlite">; readonly bound: Bound };
+
+/** A SQLite driver's way of running a statement. */
+type SqliteDriver = DriverClient<"sqlite", Prepared>;
+
+/** Each parameter's kind, by its place in the bound values; undefined for a query without inputs. */
+const typeAt = (query: QueryModule<"sqlite">, names: readonly string[]) => (i: number) => (query.inputs?.[names[i]!] === undefined ? undefined : kindOf(query, names[i]!));
+
+/**
+ * Effect SQL's SQLite client (src/effect.ts). D1 and a Durable Object refuse a BigInt, through
+ * Effect as on their own clients. Effect's raw result is the driver's own, read by the driver's
+ * column names as `.run()` reads it: rows on node:sqlite, bun:sqlite and a Durable Object, libSQL's
+ * ResultSet, D1's result, and a write's count on node:sqlite.
+ */
+export const effectSqliteDriver: SqliteDriver = {
+  label: "the client effect(query, params) from reylo/effect passes",
+  run(c, { query, bound: { text, values, names } }) {
+    const effect = (c as Partial<EffectSql>)[EFFECT_SQL];
+    if (effect?.dialect !== "sqlite") return undefined;
+    const driver = effect.driver;
+    if (driver === "d1") unplaced(query, names, values, "D1", true);
+    const type = typeAt(query, names);
+    const bound = driver === "d1" || driver === "sqlite-do" ? values.map((v, i) => numberOrDigits(v, type(i), driver === "d1" ? "d1" : "durable-object")) : values;
+    const options = { exact: effect.exact, d1: driver === "d1" };
+    return effect.raw(text, bound).then((result) => {
+      const raw = result as unknown[] | { rows?: unknown; columns?: unknown; results?: unknown } | null;
+      if (Array.isArray(raw)) return normalize(raw, query.columns, options);
+      if (Array.isArray(raw?.rows)) return normalize(libsqlRows(raw.rows, query.columns, Array.isArray(raw.columns) ? raw.columns : undefined), query.columns, options);
+      return normalize(Array.isArray(raw?.results) ? raw.results : [], query.columns, options);
+    });
+  },
+};
+
+/** Bun.sql on SQLite, whose clients have unsafe(). */
+export const bunSqliteDriver: SqliteDriver = {
+  label: "unsafe(text, values) as on Bun.sql",
+  run: (c, { query, bound }) => (typeof c.unsafe === "function" && !isTurso(c) ? c.unsafe(bound.text, bound.values).then((rows: unknown[]) => normalize(rows, query.columns)) : undefined),
+};
+
+/** @libsql/client's Client and Transaction: execute({ sql, args }). */
+export const libsqlDriver: SqliteDriver = {
+  label: "execute({ sql, args }) as on @libsql/client",
+  run(c, { query, bound }) {
+    if (typeof c.unsafe === "function" || typeof c.execute !== "function" || isTurso(c)) return undefined;
+    return c.execute({ sql: bound.text, args: bound.values }).then((result: { rows: unknown[]; columns?: unknown }) => normalize(libsqlRows(result.rows, query.columns, Array.isArray(result.columns) ? result.columns : undefined), query.columns));
+  },
+};
+
+/** Turso's promise API, `@tursodatabase/database`: a Database `connect()` resolves to, and a Transaction `transactionAsync()` hands its callback. */
+export const tursoDriver: SqliteDriver = {
+  label: "prepare(sql) as on Turso's @tursodatabase/database",
+  run(c, { query, bound: { text, values, names } }) {
+    if (!isTurso(c)) return undefined;
+    tursoValues(names, values);
+    unplaced(query, names, values, "Turso's engine");
+    return runTurso(c, text, values, query.columns);
+  },
+};
+
+/** The sqlite package's promise Database, which wraps sqlite3, and sqlite3 binds a BigInt as NULL. */
+export const sqlitePackageDriver: SqliteDriver = {
+  label: "all(sql, params) as on the sqlite package",
+  run(c, { query, bound: { text, values, names } }) {
+    if (typeof c.getDatabaseInstance !== "function" || typeof c.unsafe === "function" || typeof c.execute === "function" || isTurso(c)) return undefined;
+    unplaced(query, names, values, "sqlite3");
+    const type = typeAt(query, names);
+    return c.all(text, values.map((v, i) => numberOrDigits(v, type(i), "sqlite3"))).then((rows: unknown[]) => normalize(rows, query.columns));
+  },
+};
+
+/** The sqlite3 package's callback Database: all(sql, params, callback), and exec(). */
+export const sqlite3Driver: SqliteDriver = {
+  label: "all(sql, params) as on sqlite3",
+  run(c, { query, bound: { text, values, names } }) {
+    if (typeof c.getDatabaseInstance === "function" || typeof c.all !== "function" || typeof c.exec !== "function" || typeof c.unsafe === "function" || typeof c.execute === "function" || isTurso(c)) return undefined;
+    unplaced(query, names, values, "sqlite3");
+    const type = typeAt(query, names);
+    const bound = values.map((v, i) => numberOrDigits(v, type(i), "sqlite3"));
+    return new Promise<unknown[]>((resolve, reject) => c.all(text, bound, (error: Error | null, rows: unknown[]) => (error ? reject(error) : resolve(rows)))).then((rows) => normalize(rows, query.columns));
+  },
+};
+
+/** Cloudflare D1's database and sessions: prepare(sql).bind(...values).all(), and refuses a BigInt, which `.run()` returns for a BIGINT column. A database with prepare() that answers through a promise is read the same way. */
+export const d1Driver: SqliteDriver = {
+  label: "prepare(sql) as on Cloudflare D1",
+  run(c, { query, bound: { text, values, names } }) {
+    // A database that answers at once is its own driver's, which this module may not have: never D1's.
+    if (typeof c.prepare !== "function" || typeof c.unsafe === "function" || typeof c.execute === "function" || (typeof c.all === "function" && typeof c.exec === "function") || typeof c.getDatabaseInstance === "function" || isTurso(c) || isSyncSqlite(c) || isDurableObjectSql(c)) return undefined;
+    const prepared = c.prepare(text);
+    if (typeof prepared.first !== "function") return prepared.all(...values).then((rows: unknown[]) => normalize(rows, query.columns));
+    unplaced(query, names, values, "D1", true);
+    const type = typeAt(query, names);
+    return prepared.bind(...values.map((v, i) => numberOrDigits(v, type(i), "d1"))).all().then((r: { results: unknown[] }) => normalize(r.results, query.columns, { d1: true }));
+  },
+};
+
+/** A SQLite-backed Durable Object's SQL storage, whose exec() answers at once and refuses a BigInt ("Cannot convert a BigInt value to a number"). */
+export const durableObjectDriver: SqliteDriver = {
+  label: "exec(sql, ...values) as on a Durable Object's ctx.storage.sql",
+  atOnce: (c) => isDurableObjectSql(c),
+  runSync: (c, { query, bound: { text, values, names } }) => runDurableObject(c, text, values.map((v, i) => numberOrDigits(v, typeAt(query, names)(i), "durable-object")), query.columns),
+};
+
+/** SQLite Wasm's oo1 Database, and the OpfsDb and OpfsSAHPoolDb that keep one in the origin-private file system. */
+export const sqliteWasmDriver: SqliteDriver = {
+  label: "prepare(sql) as on the oo1 Database of @sqlite.org/sqlite-wasm",
+  atOnce: (c) => isSyncSqlite(c) && isSqliteWasm(c),
+  runSync(c, { query, bound: { text, values, names } }) {
+    unplaced(query, names, values, "SQLite Wasm");
+    return runSqliteWasm(c, text, sqliteWasmValues(names, values), query.columns);
+  },
+};
+
+/** sql.js's Database, refused where it is too old to bind a BigInt or to code its errors. */
+export const sqlJsDriver: SqliteDriver = {
+  label: "prepare(sql) as on sql.js",
+  atOnce(c) {
+    if (!isSyncSqlite(c) || !isSqlJs(c)) return false;
+    if (!sqlJsCurrent(c)) throw new TypeError(`This sql.js binds a BigInt as its text and throws SQLite's errors with no code, which .try() could not tell apart: reylo takes sql.js ${SQLJS_MIN} or later.`);
+    return true;
+  },
+  runSync(c, { query, bound: { text, values, names } }) {
+    unplaced(query, names, values, "sql.js");
+    return runSqlJs(c, text, values, query.columns);
+  },
+};
+
+/**
+ * A database with prepare() whose statements answer at once: better-sqlite3, node:sqlite,
+ * bun:sqlite and Turso's compat Database. Every Database of Turso's has maxWriteReplicationIndex(),
+ * and its compat Database has no sync() (nor batch() before 0.7); the libsql package's Database has
+ * both of the first two, and binds 2^63 as a REAL.
+ */
+export const syncSqliteDriver: SqliteDriver = {
+  label: "prepare(sql) as on better-sqlite3, node:sqlite, bun:sqlite and Turso's compat Database",
+  atOnce: (c) => isSyncSqlite(c) && !isSqliteWasm(c) && !isSqlJs(c),
+  runSync(c, { query, bound: { text, values, names } }) {
+    if (typeof c.maxWriteReplicationIndex === "function" && typeof c.sync !== "function") {
+      tursoValues(names, values);
+      unplaced(query, names, values, "Turso's engine");
+    }
+    return runSyncSqlite(c, text, values, query.columns);
+  },
+};
 
 // Turso's engine binds the whole number 2^63 as 2^63 - 1, the largest 64-bit integer, where every
 // other driver binds it as the REAL it is (a BigInt outside 64 bits is refused for every driver, in
@@ -470,26 +575,124 @@ function sqliteWasmValues(names: readonly string[], values: unknown[]): unknown[
   return values;
 }
 
-/** The rows of a synchronous client: a Durable Object's SQL storage, whose exec() refuses a BigInt ("Cannot convert a BigInt value to a number"), SQLite Wasm's oo1 Database (`runSqliteWasm`), sql.js's Database (`runSqlJs`), or a database with prepare() (`runSyncSqlite`). */
-function runSqliteSync(c: Client, query: QueryModule<"sqlite">, { text, values, names }: Bound): unknown[] | Promise<unknown[]> {
-  // Every Database of Turso's has maxWriteReplicationIndex(), and its compat Database has no sync()
-  // (nor batch() before 0.7); the libsql package's Database has both of the first two, and binds
-  // 2^63 as a REAL.
-  if (typeof c.maxWriteReplicationIndex === "function" && typeof c.sync !== "function") {
-    tursoValues(names, values);
-    unplaced(query, names, values, "Turso's engine");
+// SQLite Wasm's oo1 Database: prepare() and selectObjects(), which no other driver has. Its
+// statement has no all(), so it would otherwise be taken for better-sqlite3's.
+function isSqliteWasm(c: Client | null | undefined): boolean {
+  return c != null && typeof c.prepare === "function" && typeof c.selectObjects === "function";
+}
+
+// sql.js's Database, which getRowsModified() tells apart, answers at once as better-sqlite3's does.
+// Its statement has no all(), so it would otherwise be taken for better-sqlite3's.
+function isSqlJs(c: Client | null | undefined): boolean {
+  return c != null && typeof c.prepare === "function" && typeof c.getRowsModified === "function";
+}
+
+/** The first sql.js that binds a BigInt as an INTEGER and gives each SQLite error its code. */
+const SQLJS_MIN = "1.17.0";
+const sqlJsChecked = new WeakMap<object, boolean>();
+
+// Before SQLJS_MIN, sql.js bound a BigInt as its text, which an INTEGER compares unequal to, and
+// threw SQLite's errors with their message alone. Each database is asked once which its sql.js does:
+// a BigInt bound to typeof(?), and the code of a statement that does not parse.
+function sqlJsCurrent(db: Client): boolean {
+  let current = sqlJsChecked.get(db);
+  if (current !== undefined) return current;
+  const st = db.prepare("select typeof(?)");
+  try {
+    st.bind([BigInt(0)]);
+    st.step();
+    current = st.get()[0] === "integer";
+  } finally {
+    st.free();
   }
-  if (isDurableObjectSql(c)) return runDurableObject(c, text, values.map((v, i) => numberOrDigits(v, query.inputs?.[names[i]!]?.type, "durable-object")), query.columns);
-  if (isSqliteWasm(c)) {
-    unplaced(query, names, values, "SQLite Wasm");
-    return runSqliteWasm(c, text, sqliteWasmValues(names, values), query.columns);
+  if (current) {
+    try {
+      db.prepare("select from").free();
+    } catch (e) {
+      current = (e as { code?: unknown }).code === "SQLITE_ERROR";
+    }
   }
-  if (isSqlJs(c)) {
-    unplaced(query, names, values, "sql.js");
-    return runSqlJs(c, text, values, query.columns);
-  }
-  return runSyncSqlite(c, text, values, query.columns);
+  sqlJsChecked.set(db, current);
+  return current;
+}
+
+// A SQLite client with prepare() whose statements answer at once. D1 (batch()), sqlite3 and
+// sqlite (all() on the database), libSQL (execute()), Bun.sql (unsafe()) and Turso's promise API
+// are asynchronous. Turso's compat Database has batch() as D1 does, and answers at once; its
+// maxWriteReplicationIndex(), which every Database of Turso's has, tells it from D1's.
+function isSyncSqlite(c: Client | null | undefined): boolean {
+  return (
+    c != null &&
+    typeof c.prepare === "function" &&
+    (typeof c.batch !== "function" || typeof c.maxWriteReplicationIndex === "function") &&
+    typeof c.all !== "function" &&
+    typeof c.execute !== "function" &&
+    typeof c.unsafe !== "function" &&
+    !isTurso(c)
+  );
+}
+
+// Turso's promise API (@tursodatabase/database): a Database has connect() and
+// maxWriteReplicationIndex() in every release from 0.4 (0.4 has no all(), so it looked synchronous,
+// and from 0.6 its all() took it for sqlite3's, whose callback it never calls); the Transaction
+// that transactionAsync() hands its callback (0.7 and later) has all() beside batch(), which
+// sqlite3's database lacks. The compat Database has no connect().
+function isTurso(c: Client): boolean {
+  return typeof c.prepare === "function" && ((typeof c.connect === "function" && typeof c.maxWriteReplicationIndex === "function") || (typeof c.all === "function" && typeof c.batch === "function"));
+}
+
+/** The rows of a client that answers at once, by the first of the module's drivers that takes it. */
+function runSqliteSync(c: Client, query: QueryModule<"sqlite">, bound: Bound): unknown[] | Promise<unknown[]> {
+  const prepared: Prepared = { query, bound };
+  for (const driver of driversOf(query)) if (driver.runSync && driver.atOnce?.(c)) return driver.runSync(c, prepared);
+  throw new TypeError("reylo found no driver of this module's to run on this client, which answers at once.");
+}
+
+/** Whether `c` answers at once (`Runtime`), by the module's drivers. */
+function answersAtOnce(c: Client, query: QueryModule<"sqlite">): boolean {
+  return driversOf(query).some((d) => d.atOnce?.(c) === true);
+}
+
+/**
+ * The bound statement as SQLite's drivers take it. SQLite holds an INTEGER in 64 bits, so a BigInt
+ * outside them has no exact form there: better-sqlite3, node:sqlite, libSQL, Turso's engine and
+ * SQLite Wasm refuse one, but bun:sqlite and Bun.sql keep its low 64 bits where the statement reads
+ * numbers (2^63 was stored as -2^63, and 2^64 + 5 as 5), and sqlite3 binds any BigInt as NULL. A
+ * number a SQLite driver binds as another value goes in at its mark as SQLite's literal for it, on
+ * every driver: sqlite3, Turso's engine, sql.js and SQLite Wasm bind -0 as the INTEGER 0, D1 sends
+ * -0 as 0 and an infinity as null, and libSQL refuses an infinity, which a REAL holds. -0 is written
+ * so where the type takes a float, whose sign a REAL value keeps (a REAL column stores it as 0).
+ * Those drivers refuse one whose place isn't known (`unplaced`), as mariadb and PlanetScale do on
+ * MySQL (src/decode-mysql.ts, `signedZeros`). A Standard Query's values bind to the module's own
+ * text (src/standard-query.ts), so they go as they are.
+ */
+function bindSqlite(query: QueryModule<"sqlite">, bound: Bound, run: boolean): Bound {
+  bound.values.forEach((v, i) => {
+    if (typeof v === "bigint" && (v >= 2n ** 63n || v < -(2n ** 63n))) throw new ParameterError(`Parameter "${bound.names[i]}" is ${v}, outside the 64-bit integers SQLite holds (-2^63 to 2^63 - 1), so no SQLite driver binds it exactly.`);
+  });
+  if (!run) return bound;
+  return literalsAtMarks(bound, (v, i) => {
+    if (v === Infinity || v === -Infinity) return v > 0 ? "(9e999)" : "(-9e999)";
+    return Object.is(v, -0) && query.inputs?.[bound.names[i]!] !== undefined && takesFloat(kindOf(query, bound.names[i]!)) ? "(-0.0)" : undefined;
+  });
 }
 
 /** SQLite's half of the run time (src/execute.ts, `Runtime`), which `defineSqliteQuery` passes. */
-export const sqlite: Runtime<"sqlite"> = { dialect: "sqlite", run: runSqlite, runSync: runSqliteSync, readError: readSqliteError, readErrorSync: readSqliteError, decoder: sqliteDecoder };
+export const sqlite: Runtime<"sqlite"> = {
+  dialect: "sqlite",
+  run: runSqlite,
+  runSync: runSqliteSync,
+  executeSync,
+  answersAtOnce,
+  bind: bindSqlite,
+  readError: readSqliteError,
+  readErrorSync: readSqliteError,
+  decoder: sqliteDecoder,
+  // A truth value, which a BOOLEAN column returns, goes as 1 or 0: better-sqlite3 refuses a boolean
+  // ("SQLite3 can only bind numbers, strings, bigints, buffers, and null") and libSQL binds `true` as
+  // the REAL 1.0. A query without `inputs` gets neither.
+  encode: (_type, _kind, v) => (typeof v === "boolean" ? (v ? 1 : 0) : v),
+};
+
+/** Every SQLite driver, in the order they are tried, which `defineQuery` passes; a module passes the ones its project installs (src/loader.ts, `moduleDrivers`). */
+export const sqliteDrivers: readonly DriverClient<"sqlite", any>[] = [knexDriver, effectSqliteDriver, durableObjectDriver, sqliteWasmDriver, sqlJsDriver, syncSqliteDriver, bunSqliteDriver, libsqlDriver, tursoDriver, sqlitePackageDriver, sqlite3Driver, d1Driver];

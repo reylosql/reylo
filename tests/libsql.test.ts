@@ -6,7 +6,7 @@ import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { Session } from "../src/analyze.ts";
 import { sqlModule } from "../src/loader.ts";
-import { closeSessions, driver, DRIVERS, INDEX } from "./helpers.ts";
+import { closeSessions, driver, DRIVERS, INDEX, MODULE } from "./helpers.ts";
 
 // libSQL's own SQL, on a database file libSQL made: a vector column, its vector index (which adds
 // libSQL's own tables to the schema) and the functions and table-valued vector_top_k over them. The
@@ -87,7 +87,7 @@ test("on @libsql/client, .run() returns a vector as a Uint8Array, its distance a
     writeFileSync(file, raw);
     const { code } = await sqlModule(file, raw);
     const out = join(root, `q${files++}.mjs`);
-    writeFileSync(out, code.replace(`from "reylo"`, `from ${JSON.stringify(INDEX)}`));
+    writeFileSync(out, code.replace(`from "reylo/module"`, `from ${JSON.stringify(MODULE)}`));
     return (await import(pathToFileURL(out).href)).default;
   };
   const db = driver("@libsql/client").createClient({ url: `file:${join(root, "app.db")}` });

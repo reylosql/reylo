@@ -7,7 +7,7 @@ import { pathToFileURL } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import { Session } from "../src/analyze.ts";
 import { sqlModule } from "../src/loader.ts";
-import { pgLive, mysqlLive, INDEX, postgresDatabase, mysqlDatabase, closeSessions } from "./helpers.ts";
+import { pgLive, mysqlLive, INDEX, MODULE, postgresDatabase, mysqlDatabase, closeSessions } from "./helpers.ts";
 
 // A query's `.readOnly`: true only where the engine is certain the statement writes nothing. Each
 // statement is built into a module, as a build step builds it.
@@ -20,7 +20,7 @@ async function readOnly(url: string, sql: string): Promise<boolean> {
   writeFileSync(file, sql);
   const { code } = await sqlModule(file, sql);
   const out = join(root, "q.mjs");
-  writeFileSync(out, code.replace(`from "reylo"`, `from ${JSON.stringify(INDEX)}`));
+  writeFileSync(out, code.replace(`from "reylo/module"`, `from ${JSON.stringify(MODULE)}`));
   return (await import(pathToFileURL(out).href)).default.readOnly;
 }
 

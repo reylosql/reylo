@@ -9,7 +9,7 @@ import { sqlModule } from "../src/loader.ts";
 import { defineQuery } from "../src/index.ts";
 import { canonical, parseType, typeName } from "../src/clickhouse-types.ts";
 import { internals } from "../src/decode-clickhouse.ts";
-import { CLICKHOUSE, DRIVERS, INDEX, ROOT, clickhouseDatabase, clickhouseLive, declarations, driver, handWritten, transform } from "./helpers.ts";
+import { CLICKHOUSE, DRIVERS, INDEX, MODULE, ROOT, clickhouseDatabase, clickhouseLive, declarations, driver, handWritten, transform } from "./helpers.ts";
 
 // ClickHouse end to end, on the throwaway server REYLO_TEST_CLICKHOUSE names, each test in a
 // database of its own: the types the content mapper writes for a statement, read from the server's
@@ -33,7 +33,7 @@ async function built(root: string, name: string, sql: string) {
   try {
     const { code } = await sqlModule(file, sql);
     const out = join(root, `${name}.mjs`);
-    writeFileSync(out, code.replace(`from "reylo"`, `from ${JSON.stringify(INDEX)}`));
+    writeFileSync(out, code.replace(`from "reylo/module"`, `from ${JSON.stringify(MODULE)}`));
     return (await import(pathToFileURL(out).href)).default;
   } finally {
     for (const session of Session.opened()) await session.close();

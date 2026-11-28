@@ -805,7 +805,15 @@ function clickhouseDecoder(name: string, _kind: Kind): (v: unknown) => unknown {
 }
 
 /** ClickHouse's half of the run time (src/execute.ts, `Runtime`), which `defineClickhouseQuery` passes. */
-export const clickhouse: Runtime<"clickhouse"> = { dialect: "clickhouse", run: runClickhouse, readError: readClickhouseError, decoder: clickhouseDecoder };
+export const clickhouse: Runtime<"clickhouse"> = {
+  dialect: "clickhouse",
+  run: runClickhouse,
+  readError: readClickhouseError,
+  decoder: clickhouseDecoder,
+  // A value is written as its type's text where the statement runs (`runClickhouse`).
+  encode: (_type, _kind, v) => v,
+  clients: "a client of @clickhouse/client or @clickhouse/client-web, whose exec() runs the statement",
+};
 
 /** The parts of this module its tests hold to the server's own text and bytes. */
 export const internals = { rowsOf, valueText, typesOf, midStreamError, ipv6Text, decimalText };

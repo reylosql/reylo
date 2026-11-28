@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { sqlModule } from "../src/loader.ts";
 import { defineQuery } from "../src/index.ts";
-import { declarations, DRIVERS, handWritten, pgLive, mysqlLive, INDEX, plain, postgresDatabase, closeSessions, mysqlDatabase, ROOT } from "./helpers.ts";
+import { declarations, DRIVERS, handWritten, pgLive, mysqlLive, INDEX, MODULE, plain, postgresDatabase, closeSessions, mysqlDatabase, ROOT } from "./helpers.ts";
 
 // A query's `sql` is the statement as Reylo sends it to the database, the engine's compiled text,
 // and `raw` the file as written. Both are the module's exports too,
@@ -32,7 +32,7 @@ async function built(root: string, name: string, raw: string) {
   writeFileSync(file, raw);
   const { code } = await sqlModule(file, raw);
   const out = join(root, `${name}.mjs`);
-  writeFileSync(out, code.replace(`from "reylo"`, `from ${JSON.stringify(INDEX)}`));
+  writeFileSync(out, code.replace(`from "reylo/module"`, `from ${JSON.stringify(MODULE)}`));
   return (await import(pathToFileURL(out).href)) as { default: { sql: string; raw: string; "~standard": { query: { text: string; ordered?: true } }; run(client: unknown, params?: unknown): Promise<unknown> }; sql: string; raw: string };
 }
 

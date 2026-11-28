@@ -7,7 +7,7 @@ import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { sqlModule } from "../src/loader.ts";
 import { defineQuery } from "../src/index.ts";
-import { closeSessions, driver, DRIVERS, handWritten, INDEX, mysqlDatabase, mysqlLive, pgLive, postgresDatabase, sqliteWasm } from "./helpers.ts";
+import { closeSessions, driver, DRIVERS, handWritten, INDEX, MODULE, mysqlDatabase, mysqlLive, pgLive, postgresDatabase, sqliteWasm } from "./helpers.ts";
 
 // A row's keys are the columns its type declares, whatever a driver or the database makes of a column with no alias. Such a column takes its name from the text it runs as on SQLite and MySQL, so the name depends on what Reylo sends and on who writes it.
 
@@ -31,7 +31,7 @@ async function built(root: string, raw: string) {
   writeFileSync(file, raw);
   const { code } = await sqlModule(file, raw);
   const out = join(root, `${name}.mjs`);
-  writeFileSync(out, code.replace(`from "reylo"`, `from ${JSON.stringify(INDEX)}`));
+  writeFileSync(out, code.replace(`from "reylo/module"`, `from ${JSON.stringify(MODULE)}`));
   const query = (await import(pathToFileURL(out).href)).default;
   return { query, columns: query["~standard"].query.columns.map((c: { name: string }) => c.name) as string[] };
 }

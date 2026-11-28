@@ -25,9 +25,10 @@
 // other than 0 or 1 refused (`truth`).
 import { lastOfEach, namesInResult, rowOf } from "./row.ts";
 import { bigInteger, coerce, DecodeError, describe, ParameterError, truth, utf8, withFraction, type Columns, type Kind } from "./values.ts";
-import { bunRows } from "./decode.ts";
+import { BUN_MYSQL, bunRows } from "./decode.ts";
 import { readMysqlError } from "./query-error.ts";
-import { literalsAtMarks, takesFloat, type AnyClient as Client, type Bound, type Marks, type QueryModule, type Runtime } from "./execute.ts";
+import { driversOf, kindOf, knexDriver, literalsAtMarks, takesFloat, vectorParameter, type AnyClient as Client, type Bound, type DriverClient, type Marks, type QueryModule, type Runtime } from "./execute.ts";
+import { bareName, isMysqlSet, type EngineType } from "./engine-type.ts";
 import type { SqlMode } from "./engine-core.ts";
 
 type AnyClient = Record<string, any>;
@@ -830,8 +831,7 @@ function signedZeros(query: QueryModule<"mysql">, bound: Bound, driver: string):
   // A type its value decides between (`:i + :u`, a BIGINT or a DOUBLE) takes the DOUBLE -0 mysql2
   // binds, as a structured parameter's member does (src/rows.ts).
   const zero = (v: unknown, name: string) => {
-    const type = query.inputs?.[name]?.type;
-    return Object.is(v, -0) && type !== undefined && takesFloat(type, "mysql");
+    return Object.is(v, -0) && query.inputs?.[name] !== undefined && takesFloat(kindOf(query, name));
   };
   const written = query.sqlMode === undefined ? literalsAtMarks(bound, (v, i) => (zero(v, bound.names[i]!) ? "(-0e0)" : undefined)) : bound;
   // One left, where its place is unknown, would be written as 0.
@@ -879,44 +879,105 @@ function asMariadbValue(v: unknown): unknown {
   return JSON.stringify(v);
 }
 
-/** A MySQL statement's rows on each MySQL driver's client, or undefined on any other client. */
+/** A MySQL statement's rows on the first of the module's drivers that takes `c`, or undefined where none does. */
 async function runMysql(c: Client, query: QueryModule<"mysql">, bound: Bound): Promise<unknown[] | undefined> {
-  const { text, values, marks } = bound;
-  if (typeof c.unsafe === "function") return bunRows(await c.unsafe(text, values), query.columns);
-  // mariadb, checked before execute() because it has one too (returning rows, not a pair).
-  // Its callback API (mariadb/callback) answers through the callback and returns a command
-  // object; its promise API returns a promise and ignores the callback.
-  if (typeof c.batch === "function" && typeof c.query === "function") {
-    noLists("mariadb", bound);
-    const signed = signedZeros(query, bound, "mariadb");
-    return await mariadb(c, signed.text, signed.values.map((v) => asMariadbValue(asBuffer(v))), query.columns, query.sqlMode, marks);
-  }
-  // mysql2's callback API: the promise() wrapper runs on the same connection.
-  const m = typeof c.promise === "function" ? c.promise() : c;
-  if (typeof m.execute === "function") {
-    // mysql2 has query() beside execute(); PlanetScale's Connection, Client and transaction do not.
-    if (typeof m.query === "function") return await mysql2(m, text, values, query.columns, marks, query.sqlMode);
-    noLists("@planetscale/database", bound);
-    const signed = signedZeros(query, bound, "PlanetScale");
-    return await planetscale(m, signed.text, signed.values, query.columns, query.sqlMode);
+  const prepared: Prepared = { query, bound };
+  for (const driver of driversOf(query)) {
+    const rows = driver.run?.(c, prepared);
+    if (rows !== undefined) return await rows;
   }
   return undefined;
 }
+
+/** A MySQL statement bound for its drivers (src/execute.ts, `DriverClient`). */
+type Prepared = { readonly query: QueryModule<"mysql">; readonly bound: Bound };
+
+/** A MySQL driver's way of running a statement. */
+type MysqlDriver = DriverClient<"mysql", Prepared>;
+
+/** Bun.sql on MySQL, whose clients have unsafe(). */
+export const bunMysqlDriver: MysqlDriver = {
+  label: "unsafe(text, values) as on Bun.sql",
+  run: (c, { query, bound }) => (typeof c.unsafe === "function" ? c.unsafe(bound.text, bound.values).then((rows: unknown[]) => bunRows(rows, query.columns, BUN_MYSQL)) : undefined),
+};
+
+/**
+ * mariadb, checked before execute() because it has one too (returning rows, not a pair). Its
+ * callback API (mariadb/callback) answers through the callback and returns a command object; its
+ * promise API returns a promise and ignores the callback.
+ */
+export const mariadbDriver: MysqlDriver = {
+  label: "query(text, values) as on mariadb's pool or connection, from its promise or callback API",
+  run(c, { query, bound }) {
+    if (typeof c.unsafe === "function" || typeof c.batch !== "function" || typeof c.query !== "function") return undefined;
+    noLists("mariadb", bound);
+    const signed = signedZeros(query, bound, "mariadb");
+    return mariadb(c, signed.text, signed.values.map((v) => asMariadbValue(asBuffer(v))), query.columns, query.sqlMode, bound.marks);
+  },
+};
+
+/** The client a mysql2 callback pool or connection runs on: its promise() wrapper, on the same connection; any other client as it is. */
+const promised = (c: Client): Client => (typeof c.promise === "function" ? c.promise() : c);
+
+/** mysql2's Pool, Connection and PoolConnection, with query() beside execute(), and its callback API through promise(). */
+export const mysql2Driver: MysqlDriver = {
+  label: "execute(text, values) as on mysql2, or a mysql2 callback pool or connection",
+  run(c, { query, bound }) {
+    if (typeof c.unsafe === "function" || (typeof c.batch === "function" && typeof c.query === "function")) return undefined;
+    const m = promised(c);
+    return typeof m.execute === "function" && typeof m.query === "function" ? mysql2(m, bound.text, bound.values, query.columns, bound.marks, query.sqlMode) : undefined;
+  },
+};
+
+/** PlanetScale's Connection, Client and transaction from 1.x, which have execute() and no query(). */
+export const planetscaleDriver: MysqlDriver = {
+  label: "execute(text, values) as on PlanetScale",
+  run(c, { query, bound }) {
+    if (typeof c.unsafe === "function" || (typeof c.batch === "function" && typeof c.query === "function")) return undefined;
+    const m = promised(c);
+    if (typeof m.execute !== "function" || typeof m.query === "function") return undefined;
+    noLists("@planetscale/database", bound);
+    const signed = signedZeros(query, bound, "PlanetScale");
+    return planetscale(m, signed.text, signed.values, query.columns, query.sqlMode);
+  },
+};
 
 /** A column's raw value as its kind, from whatever form the driver read, as a Standard Query's `decode` takes it (src/standard-query.ts). */
 function mysqlDecoder(name: string, kind: Kind, delim: string | undefined): (v: unknown) => unknown {
   // A MySQL DATETIME's text takes a T between the date and the time, as `.run()` writes it, a
   // column that may be one included (`mariadb`).
-  if (kind.split("|").includes("timestamp")) return (v) => (typeof v === "string" ? v.replace(" ", "T") : coerce(kind, v, name, delim));
+  if (kind.split("|").includes("timestamp")) return (v) => (typeof v === "string" ? v.replace(" ", "T") : coerce(kind, v, name));
   // A MySQL GEOMETRY's raw value is its bytes, as `.run()` gives it. An object is a driver's own
   // reading of one (mysql2's `{ x, y }`, mariadb's GeoJSON), which the bytes cannot be had back from.
   if (kind.split("|").includes("geometry"))
     return (v) => {
       if (typeof v === "object" && v !== null && !(v instanceof Uint8Array)) throw new DecodeError(`Column "${name}" holds ${describe(v)}, which is no raw MySQL value: a GEOMETRY's raw value is its bytes, which a driver parses into an object unless its conversions are off (mysql2's typeCast returning \`field.buffer()\`).`);
-      return coerce(kind, v, name, delim);
+      return coerce(kind, v, name);
     };
-  return (v) => coerce(kind, v, name, delim);
+  return (v) => coerce(kind, v, name);
+}
+
+// A SET goes as its members joined by commas, in the order its column declares them: MySQL stores a
+// SET in that order, and compares one with a parameter's text as it is written. A VECTOR, MySQL's one
+// array, goes as the text of its floats, `[1,2.5]`, which the engine's `to_vector(?)` reads: drivers
+// left to themselves sent an array as the text "1,2,3" (mysql2's execute() before 3.24) or expanded
+// it into a list of values (mysql2's query(), mariadb).
+function mysqlValue(type: EngineType, _kind: Kind, v: unknown, name: string): unknown {
+  if (type.kind === "array" && isMysqlSet(type) && v instanceof Set) {
+    const labels = type.element.type.kind === "enum" ? type.element.type.values.map((l) => l.value) : undefined;
+    return (labels === undefined ? [...v] : [...v].sort((a, b) => labels.indexOf(a as string) - labels.indexOf(b as string))).join(",");
+  }
+  return type.kind === "array" && bareName(type) === "vector" && Array.isArray(v) ? vectorParameter(v, name, "a VECTOR") : v;
 }
 
 /** MySQL's half of the run time (src/execute.ts, `Runtime`), which `defineMysqlQuery` passes. */
-export const mysql: Runtime<"mysql"> = { dialect: "mysql", run: runMysql, readError: readMysqlError, decoder: mysqlDecoder };
+export const mysql: Runtime<"mysql"> = {
+  dialect: "mysql",
+  run: runMysql,
+  readError: readMysqlError,
+  decoder: mysqlDecoder,
+  encode: mysqlValue,
+};
+
+/** Every MySQL driver, in the order they are tried, which `defineQuery` passes; a module passes the ones its project installs (src/loader.ts, `moduleDrivers`). */
+export const mysqlDrivers: readonly DriverClient<"mysql", any>[] = [knexDriver, bunMysqlDriver, mariadbDriver, mysql2Driver, planetscaleDriver];

@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { Session } from "../src/analyze.ts";
+import { commonJs } from "../src/jest.ts";
 
 // Jest and Vitest are lab/jest's dependencies, never the package's own.
 const lab = fileURLToPath(new URL("../lab/jest", import.meta.url));
@@ -25,6 +26,11 @@ function run(bin: string, args: string[], nodeOptions = "", cwd = lab) {
 
 const cache = mkdtempSync(join(tmpdir(), "reylo-jest-"));
 const jest = (args: string[], nodeOptions?: string) => run("jest/bin/jest.js", ["--ci", `--cacheDirectory=${cache}`, ...args], nodeOptions);
+
+test("reylo/jest makes CommonJS of every import a module writes: its define function, with checks, codecRuntime, postgresTypes, its readers and its drivers", () => {
+  const code = `import { definePostgresQuery, checks, codecRuntime, postgresTypes, readInt8, pgDriver } from "reylo/module";\nexport const sql = "select 1";\nexport default definePostgresQuery({ sql, checks, codecRuntime, postgresTypes, readers: { int8: readInt8 }, drivers: [pgDriver] });\n`;
+  assert.equal(commonJs("q.sql", code), `Object.defineProperty(exports, "__esModule", { value: true });\nconst { definePostgresQuery, checks, codecRuntime, postgresTypes, readInt8, pgDriver } = require("reylo/module");\nconst sql = exports.sql = "select 1";\nexports.default = definePostgresQuery({ sql, checks, codecRuntime, postgresTypes, readers: { int8: readInt8 }, drivers: [pgDriver] });\n`);
+});
 
 test("setup", { skip }, () => {
   assert.equal(spawnSync(process.execPath, ["setup.mjs"], { cwd: lab }).status, 0);

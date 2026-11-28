@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import { execute, type QueryModule } from "./run.ts";
 import { renderParamType, renderType } from "../src/render.ts";
-import { coerce, columnKind, DecodeError, duration, hstore, hstoreText, instant, kindType, money, numbersInJson, parseRow, postgresInterval, postgresLiteral, postgresYear, RawJson, rowMasks, scalarKind, textDecoder, withinDimensions, writeJson } from "../src/values.ts";
+import { coerce, coercePostgres, columnKind, DecodeError, duration, hstore, hstoreText, instant, kindType, money, numbersInJson, parseRow, postgresInterval, postgresLiteral, postgresYear, RawJson, rowMasks, scalarKind, textDecoder, withinDimensions, writeJson } from "../src/values.ts";
 import { withBases, type EngineType } from "../src/engine-type.ts";
 import { array, field, lite, my, oneOf, pg, record } from "./descriptors.ts";
 import type { Columns } from "../src/values.ts";
@@ -65,7 +65,7 @@ test("a geometric type is an object of its fields, declared and decoded alike, a
     const kind = columnKind(t, "postgres");
     assert.equal(kind, name);
     assert.deepEqual(textDecoder(kind)(text), value, name);
-    assert.deepEqual(coerce(kind, text, "c"), value, `${name}: from the text a driver gave`);
+    assert.deepEqual(coercePostgres(kind, text, "c"), value, `${name}: from the text a driver gave`);
     assert.equal(postgresLiteral(t, value, (m) => assert.fail(m)), text.replace("1e+300", "1e+300"), `${name}: back as its text`);
     // The type the module declares and the parameter's say the same object.
     const declared = renderType(t, false, "postgres");
@@ -125,7 +125,7 @@ test("a range is an object of its bounds and their brackets, each bound in its s
     const t = pg(name);
     const kind = columnKind(t, "postgres");
     assert.deepEqual(textDecoder(kind)(text), value, `${name} ${text}`);
-    assert.deepEqual(coerce(kind, text, "c"), value, `${name} ${text}: from the text a driver gave`);
+    assert.deepEqual(coercePostgres(kind, text, "c"), value, `${name} ${text}: from the text a driver gave`);
     assert.equal(postgresLiteral(t, value, (m) => assert.fail(m)), literal, `${name} ${text}: back as text`);
   }
   // A parameter that leaves its brackets out takes Postgres's constructors' `[)`.
@@ -222,7 +222,7 @@ test("interval: an ISO 8601 duration with its sign in front, which Temporal read
   assert.equal(postgresInterval("-1 days"), "-1 days");
   assert.equal(postgresInterval("+P1D"), "P1D");
   assert.deepEqual(textDecoder("interval[]")('{"1 day",NULL,-00:00:03}'), ["P1D", null, "-PT3S"]);
-  assert.equal(coerce("interval", "-1 days", "span"), "-P1D", "a driver's text, as Bun.sql gives it");
+  assert.equal(coercePostgres("interval", "-1 days", "span"), "-P1D", "a driver's text, as Bun.sql gives it");
 });
 
 test("date and timestamp: a year outside 0000 to 9999 in ISO 8601's extended form, as timestamptz's, which Temporal reads and a parameter takes back", () => {
@@ -501,19 +501,19 @@ test("coerce: a value a driver decoded, given its kind; an integer a number cann
   // day, one after 13 September 275760, and before 1.4.4 one before 1 AD) as an Invalid Date (its
   // infinities are ±Infinity): refused, never read as infinity.
   for (const kind of ["date", "timestamp", "timestamptz", "timestamp|timestamptz"]) {
-    assert.throws(() => coerce(kind, new Date(Number.NaN), "born"), (e: Error) => e instanceof DecodeError && /^Column "born": the driver returned an Invalid Date/.test(e.message), kind);
+    assert.throws(() => coercePostgres(kind, new Date(Number.NaN), "born"), (e: Error) => e instanceof DecodeError && /^Column "born": the driver returned an Invalid Date/.test(e.message), kind);
   }
-  assert.equal(coerce("timestamptz", Infinity, "c"), "infinity");
-  assert.equal(coerce("timestamptz", -Infinity, "c"), "-infinity");
+  assert.equal(coercePostgres("timestamptz", Infinity, "c"), "infinity");
+  assert.equal(coercePostgres("timestamptz", -Infinity, "c"), "-infinity");
   assert.equal(coerce("timestamp", new Date("2026-10-20T10:00:00.500Z"), "c"), "2026-10-20T10:00:00.5");
-  assert.equal(coerce("timestamptz", new Date("2026-10-20T10:00:00.500Z"), "c"), "2026-10-20T10:00:00.500000Z", "Bun.sql's Date, to its millisecond");
-  assert.equal(coerce("timestamptz", new Date("2026-10-20T10:00:00Z"), "c"), "2026-10-20T10:00:00.000000Z");
+  assert.equal(coercePostgres("timestamptz", new Date("2026-10-20T10:00:00.500Z"), "c"), "2026-10-20T10:00:00.500000Z", "Bun.sql's Date, to its millisecond");
+  assert.equal(coercePostgres("timestamptz", new Date("2026-10-20T10:00:00Z"), "c"), "2026-10-20T10:00:00.000000Z");
   // A Postgres timestamp from a Date takes six digits too; a MySQL DATETIME keeps the driver's.
-  assert.equal(coerce("timestamp", new Date("2026-10-20T10:00:00.500Z"), "c", ",", true), "2026-10-20T10:00:00.500000");
-  assert.equal(coerce("timestamptz", "2026-10-20 10:00:00.123456+02", "c"), "2026-10-20T08:00:00.123456Z");
-  assert.equal(coerce("timestamptz", -Infinity, "c"), "-infinity");
+  assert.equal(coerce("timestamp", new Date("2026-10-20T10:00:00.500Z"), "c", true), "2026-10-20T10:00:00.500000");
+  assert.equal(coercePostgres("timestamptz", "2026-10-20 10:00:00.123456+02", "c"), "2026-10-20T08:00:00.123456Z");
+  assert.equal(coercePostgres("timestamptz", -Infinity, "c"), "-infinity");
   assert.deepEqual(coerce("int[]", Int32Array.of(1, 2), "c"), [1, 2]);
-  assert.deepEqual(coerce("text[]", "{a,NULL}", "c"), ["a", null]);
+  assert.deepEqual(coercePostgres("text[]", "{a,NULL}", "c"), ["a", null]);
   assert.equal(coerce("text", ["x", "z"], "c"), "x,z", "mariadb's SET");
   assert.deepEqual(coerce("bytes", true, "c"), Uint8Array.of(1), "Bun.sql's and mariadb's BIT(1) where it is no boolean (a view's)");
   assert.deepEqual(coerce("bytes", [1, 2], "c"), Uint8Array.of(1, 2), "D1's BLOB");
@@ -844,8 +844,8 @@ test("an hstore's text is an object of its keys, and an object goes back in as t
   // An array of hstores, as Postgres quotes each element.
   assert.deepEqual(textDecoder("hstore[]")(String.raw`{"\"a\"=>\"1\"","\"k\"=>NULL",NULL}`), [{ a: "1" }, { k: null }, null]);
   // Bun.sql hands the text over; an object a driver parsed stays as it is.
-  assert.deepEqual(coerce("hstore", String.raw`"a"=>"1"`, "h"), { a: "1" });
-  assert.deepEqual(coerce("hstore", { a: "1" }, "h"), { a: "1" });
+  assert.deepEqual(coercePostgres("hstore", String.raw`"a"=>"1"`, "h"), { a: "1" });
+  assert.deepEqual(coercePostgres("hstore", { a: "1" }, "h"), { a: "1" });
   const fail = (message: string): never => {
     throw new TypeError(message);
   };
@@ -940,21 +940,21 @@ test("Postgres: an array of a domain over an array type holds each element as a 
     ['[0:0]={"[2:3]={1,2}"}', [[1, 2]]],
   ] as const) {
     assert.deepEqual(decode(text), value, text);
-    assert.deepEqual(coerce(kind, text, "x"), value, text);
+    assert.deepEqual(coercePostgres(kind, text, "x"), value, text);
   }
   assert.deepEqual(withinDimensions(decode('{"{1,2}",NULL,"{}"}'), kind, "x"), [[1, 2], null, []]);
   // Two dimensions of the array, or of one of its elements, are refused, though both read [[[1, 2]]],
   // and so are two of NULL elements, which read as one element holding NULL.
   for (const text of ['{{"{1,2}"}}', '{"{{1,2}}"}', "{{NULL},{NULL}}"]) {
-    for (const value of [decode(text), coerce(kind, text, "x")]) assert.throws(() => withinDimensions(value, kind, "x"), /Column "x" holds an array of 2 dimensions, and its type has one/, text);
+    for (const value of [decode(text), coercePostgres(kind, text, "x")]) assert.throws(() => withinDimensions(value, kind, "x"), /Column "x" holds an array of 2 dimensions, and its type has one/, text);
   }
   // An array a driver parsed, as PGlite's own parser does, holds each element's text: its arrays are its levels.
-  assert.deepEqual(withinDimensions(coerce(kind, ["{1,2}", null], "x"), kind, "x"), [[1, 2], null]);
+  assert.deepEqual(withinDimensions(coercePostgres(kind, ["{1,2}", null], "x"), kind, "x"), [[1, 2], null]);
   // Each element's text reads as the server's, as it does unparsed.
   const floats = withBases(array(array(pg("float8"), true, "public.floats"), true, "public._floats"), { "public.floats": "_float8" });
-  assert.deepEqual(coerce(columnKind(floats, "postgres"), ["{NaN,1}"], "x"), textDecoder(columnKind(floats, "postgres"))('{"{NaN,1}"}'));
-  assert.deepEqual(coerce(columnKind(floats, "postgres"), ["{NaN,1}"], "x"), [[NaN, 1]]);
-  for (const parsed of [[["{1,2}"]], [[null]]]) assert.throws(() => withinDimensions(coerce(kind, parsed, "x"), kind, "x"), /holds an array of 2 dimensions/, JSON.stringify(parsed));
+  assert.deepEqual(coercePostgres(columnKind(floats, "postgres"), ["{NaN,1}"], "x"), textDecoder(columnKind(floats, "postgres"))('{"{NaN,1}"}'));
+  assert.deepEqual(coercePostgres(columnKind(floats, "postgres"), ["{NaN,1}"], "x"), [[NaN, 1]]);
+  for (const parsed of [[["{1,2}"]], [[null]]]) assert.throws(() => withinDimensions(coercePostgres(kind, parsed, "x"), kind, "x"), /holds an array of 2 dimensions/, JSON.stringify(parsed));
   // Each element is held to its own dimensions by its text, whatever its elements are: segments, or JSON.
   for (const [base, ok, deep] of [["lseg", '{"{\\"[(1,2),(3,4)]\\"}"}', '{"{{NULL}}"}'], ["jsonb", '{"{\\"[1,2]\\"}"}', '{"{{\\"[1]\\"}}"}']] as const) {
     const t = withBases(array(array(pg(base), true, `public.${base}s`), true, `public._${base}s`), { [`public.${base}s`]: `_${base}` });
@@ -979,7 +979,7 @@ test("Postgres: an array of a domain over an array type holds each element as a 
 test("an array of arrays decodes its innermost elements by their kind, from text or a driver's arrays", () => {
   // The kind of array_agg over an int8[] column: two levels, whose text nests them itself.
   assert.deepEqual(textDecoder("int8[][]")("{{1,2},{3,NULL}}"), [[1n, 2n], [3n, null]]);
-  assert.deepEqual(coerce("int8[][]", "{{1,2}}", "c"), [[1n, 2n]]);
+  assert.deepEqual(coercePostgres("int8[][]", "{{1,2}}", "c"), [[1n, 2n]]);
   assert.deepEqual(coerce("int8[][]", [["1", "2"], ["3", null]], "c"), [[1n, 2n], [3n, null]]);
 });
 
@@ -1011,7 +1011,7 @@ test("a Postgres money is its exact decimal text, read from the C locale's, and 
   for (const [text, decimal] of [["$1.50", "1.50"], ["-$1,234.56", "-1234.56"], ["$92,233,720,368,547,758.07", "92233720368547758.07"], ["$0.00", "0.00"], ["$12", "12"]] as const) {
     assert.equal(money(text), decimal, text);
     assert.equal(textDecoder("money")(text), decimal, text);
-    assert.equal(coerce("money", text, "fee"), decimal, text);
+    assert.equal(coercePostgres("money", text, "fee"), decimal, text);
   }
   assert.deepEqual(textDecoder("money[]")('{"$1.50",NULL,"-$1,000.00"}'), ["1.50", null, "-1000.00"]);
   for (const text of ["1.234,56 €", "€1,234.56", "1234.56", "$1,23.45", "($1.50)"]) assert.throws(() => money(text), (e: Error) => e instanceof DecodeError && e.message.startsWith(`The database wrote a money value as ${JSON.stringify(text)}, which is not the C locale's form ($1,234.56)`), text);
@@ -1074,9 +1074,9 @@ test("a JSON parameter's BigInt is written as its digits, whatever toJSON an app
 
 test("a driver's own array of JSON keeps its levels where each JSON value is still its text, so a deeper one is refused as from text", () => {
   // As Slonik's tag hands an array of JSON over: pg's array parser, each element its text.
-  assert.deepEqual(withinDimensions(coerce("json[]", ["[1, 2]", "[3, 4]"], "docs", ",", true, "text"), "json[]", "docs"), [[1, 2], [3, 4]]);
-  assert.throws(() => withinDimensions(coerce("json[]", [["1", "2"], ["3", "4"]], "docs", ",", true, "text"), "json[]", "docs"), /Column "docs" holds an array of 2 dimensions, and its type has one/);
-  assert.throws(() => withinDimensions(coerce("json[]", [["1"]], "docs", ",", true, "text"), "json[]", "docs", undefined, true), /Column "docs" holds an array of 2 dimensions/);
+  assert.deepEqual(withinDimensions(coercePostgres("json[]", ["[1, 2]", "[3, 4]"], "docs", ",", "text"), "json[]", "docs"), [[1, 2], [3, 4]]);
+  assert.throws(() => withinDimensions(coercePostgres("json[]", [["1", "2"], ["3", "4"]], "docs", ",", "text"), "json[]", "docs"), /Column "docs" holds an array of 2 dimensions, and its type has one/);
+  assert.throws(() => withinDimensions(coercePostgres("json[]", [["1"]], "docs", ",", "text"), "json[]", "docs", undefined, true), /Column "docs" holds an array of 2 dimensions/);
   // Bun.sql's own decoder gives each JSON value decoded, so a JSON string that looks like a number stays a string.
-  assert.deepEqual(coerce("json[]", [["1"], { k: "2" }], "docs", ",", true, "decoded"), [["1"], { k: "2" }]);
+  assert.deepEqual(coercePostgres("json[]", [["1"], { k: "2" }], "docs", ",", "decoded"), [["1"], { k: "2" }]);
 });

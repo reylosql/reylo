@@ -13,11 +13,10 @@
 // mysql2's binary protocol drops trailing zeros (`.000`) that `.run()` writes back from the
 // column's metadata. A ClickHouse query alone maps no values: it binds none in a list and reads
 // none raw, so its `encode`, `decode` and `output` throw and it has no `columns` (`standardQuery`).
-import { decodePlan } from "./codecs.ts";
-import { compile, rawStatement, sentText, type Dialect, type QueryModule } from "./execute.ts";
+import { codecsOf, compile, jsonNumbersOf, rawStatement, sentText, type Dialect, type QueryModule } from "./execute.ts";
 import type { StandardTypedV1 } from "./standard.ts";
 import { lastOfEach, rowOf, type RowBuilder } from "./row.ts";
-import { DecodeError, numbersInJson } from "./values.ts";
+import { DecodeError } from "./values.ts";
 
 /** The Standard Query interface: a statement a driver can execute, as a typed function from an input to an output. */
 export interface StandardQueryV1<Input = unknown, Output = Input, D extends StandardQueryV1.Dialect = StandardQueryV1.Dialect>
@@ -157,19 +156,25 @@ export function standardQuery<D extends Dialect, Output>(module: QueryModule<D>,
   // the driver read. SQLite's is `.run()`'s own reading, its refusals of a storage class the
   // column's type does not allow included. Its default suits a driver whose integer mode is
   // unknown: a BigInt is read exact, and a number past 2^53 in an INTEGER column is refused as a
-  // rounded one.
-  // A column a later one of its name replaces in the row is never returned, so, as in `.run()`, it is held to no dimensions.
-  const kept = new Set(lastOfEach((module.columns ?? []).map(([name], i) => [name, i] as const)).map(([, i]) => i));
-  const decoders = (mapped ? module.columns : undefined)?.map(([name, kind, delim], i): ((v: never) => unknown) => {
-    const at = module.nonFinite?.[i] ?? undefined;
-    const read = module.runtime.decoder(name, kind, delim, at, module.nestedArrays, !kept.has(i));
-    // Postgres's decoder reads a document's plan itself; on MySQL and SQLite it is read here, as `.run()` reads it.
-    const decode = at === undefined || dialect === "postgres" ? read : (v: never) => numbersInJson(read(v), at, name);
-    // A family the project file's `js.codecs` gives another type takes it here too, as in `.run()` (src/codecs.ts).
-    const plan = module.codecs?.[name];
-    return plan === undefined ? decode : (v) => decodePlan(plan, decode(v), name, module.libraries);
-  });
-  const columns = decoders && module.columns?.map(([name], i) => Object.freeze({ name, decode: decoders[i]! }) as StandardQueryV1.Column<D>);
+  // rounded one. They are built on first use, not when the query is defined, so that defining one
+  // costs nothing and refuses nothing. A column a later one of its name replaces in the row is never
+  // returned, so, as in `.run()`, it is held to no dimensions.
+  let decoders: ((v: never) => unknown)[] | undefined;
+  const decodersOf = () => {
+    if (decoders) return decoders;
+    const kept = new Set(lastOfEach(module.columns!.map(([name], i) => [name, i] as const)).map(([, i]) => i));
+    return (decoders = module.columns!.map(([name, kind, delim], i): ((v: never) => unknown) => {
+      const at = module.nonFinite?.[i] ?? undefined;
+      const inJson = at === undefined ? undefined : (v: unknown) => jsonNumbersOf(module)(v, at, name);
+      // Postgres's decoder reads a document's plan itself, before an array's dimensions; on MySQL and SQLite it is read here, as `.run()` reads it.
+      const read = module.runtime.decoder(name, kind, delim, dialect === "postgres" ? inJson : undefined, module.nestedArrays, !kept.has(i));
+      const decode = inJson === undefined || dialect === "postgres" ? read : (v: never) => inJson(read(v));
+      // A family the project file's `js.codecs` gives another type takes it here too, as in `.run()` (src/codecs.ts).
+      const plan = module.codecs?.[name];
+      return plan === undefined ? decode : (v) => codecsOf(module).decodePlan(plan, decode(v), name, module.libraries);
+    }));
+  };
+  const columns = mapped ? module.columns?.map(([name], i) => Object.freeze({ name, decode: (v: never) => decodersOf()[i]!(v) }) as StandardQueryV1.Column<D>) : undefined;
   // A closure, not `this`: a driver may take `encode` off the object.
   // The statement as Reylo sends it, the comment naming its file included, as `.run()` sends it.
   const statementText = () => (text ??= sentText(module, compile(module).text));
@@ -194,9 +199,9 @@ export function standardQuery<D extends Dialect, Output>(module: QueryModule<D>,
     decode(rows) {
       if (!mapped) unmapped();
       const names = module.columns;
-      if (names === undefined || decoders === undefined) throw new TypeError("A query defined by hand without its columns cannot map rows to its output: a module a build step writes carries them.");
+      if (names === undefined) throw new TypeError("A query defined by hand without its columns cannot map rows to its output: a module a build step writes carries them.");
       const n = names.length;
-      const fns = decoders as ((v: unknown) => unknown)[];
+      const fns = decodersOf() as ((v: unknown) => unknown)[];
       // Each row's values, decoded into one array the builder copies from.
       const values = new Array<unknown>(n);
       build ??= module.row ?? rowOf(names.map(([name]) => name));

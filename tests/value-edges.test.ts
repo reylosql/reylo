@@ -7,9 +7,10 @@ import { pathToFileURL } from "node:url";
 import { Session } from "../src/analyze.ts";
 import { sqlModule } from "../src/loader.ts";
 import { renderType } from "../src/render.ts";
-import { columnKind, textDecoder } from "../src/values.ts";
+import { allReaders, columnKind, installPostgresTypes, installReaders, textDecoder } from "../src/values.ts";
+import { postgresTypes } from "../src/postgres-types.ts";
 import { pg as pgType } from "./descriptors.ts";
-import { DRIVERS, INDEX, MYSQL, driver, mysqlDatabase, mysqlLive, pgLive, postgresDatabase } from "./helpers.ts";
+import { DRIVERS, INDEX, MODULE, MYSQL, driver, mysqlDatabase, mysqlLive, pgLive, postgresDatabase } from "./helpers.ts";
 
 // Values at the edges of what each type holds, as `.run()` gives them.
 
@@ -25,6 +26,10 @@ const EDGES: Record<string, string[]> = {
   interval: ["-178000000 years", "178000000 years", "-00:00:00.000001", "infinity", "-infinity"],
   bytea: ["\\x"], text: [""], uuid: ["00000000-0000-0000-0000-000000000000"],
 };
+
+// Postgres's rarer types (a money, a range among them) and every reader, as the modules of these types install them.
+installPostgresTypes(postgresTypes);
+installReaders(allReaders);
 
 test("every Postgres type's values at its edges decode as the type the module declares", () => {
   for (const [name, texts] of Object.entries(EDGES)) {
@@ -55,7 +60,7 @@ test("Postgres: a date or a timestamptz outside 0000–9999 comes back in ISO 86
     writeFileSync(file, sql);
     const { code } = await sqlModule(file, sql);
     const out = join(root, `${name}.mjs`);
-    writeFileSync(out, code.replace(`from "reylo"`, `from ${JSON.stringify(INDEX)}`));
+    writeFileSync(out, code.replace(`from "reylo/module"`, `from ${JSON.stringify(MODULE)}`));
     return (await import(pathToFileURL(out).href)).default;
   };
   try {
@@ -117,7 +122,7 @@ test("MySQL: a CHAR comes back without its padding, or with it where the session
     writeFileSync(file, sql);
     const { code } = await sqlModule(file, sql);
     const out = join(root, `${name}.mjs`);
-    writeFileSync(out, code.replace(`from "reylo"`, `from ${JSON.stringify(INDEX)}`));
+    writeFileSync(out, code.replace(`from "reylo/module"`, `from ${JSON.stringify(MODULE)}`));
     return (await import(pathToFileURL(out).href)).default;
   };
   const u = new URL(MYSQL!);

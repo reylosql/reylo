@@ -613,6 +613,8 @@ When the query fires no trigger, its error type is narrowed. A unique, not-null 
 
 Reylo decodes its query results itself, so your connection's settings don't affect Reylo's queries, or the reverse. Type checking needs no driver. It reads your schema from the database file.
 
+A bundled query holds the code of the drivers your app depends on, and no other.
+
 Each example below runs this query:
 
 ```sql file="lite_get_user.sql" dialect="sqlite"

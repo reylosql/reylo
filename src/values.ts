@@ -28,6 +28,7 @@
 // This module runs in every generated module's process, so it names no Node type: a Buffer is
 // reached through `globalThis` where one exists.
 import { bareName, holdsWholeArrays, isMysqlSet, type EngineType } from "./engine-type.ts";
+import type { AnyClient, QueryModule } from "./execute.ts";
 import { lastOfEach } from "./row.ts";
 
 export type Dialect = "postgres" | "mysql" | "sqlite" | "clickhouse";
@@ -282,8 +283,6 @@ function isRawJson(v: unknown): v is { rawJSON: string } {
   return typeof is === "function" && is(v);
 }
 
-const POINT = "{ x: number; y: number }";
-
 /** The TypeScript type of each scalar kind: what a value of that kind is at run time. */
 const TS_TYPE: Readonly<Record<ScalarKind, string>> = {
   bool: "boolean",
@@ -303,13 +302,13 @@ const TS_TYPE: Readonly<Record<ScalarKind, string>> = {
   vector: "number[]",
   hstore: "Record<string, string | null>",
   // The geometric types' fields, as the type descriptor names them (engine/postgres pgtypes.rs).
-  point: POINT,
+  point: "{ x: number; y: number }",
   line: "{ a: number; b: number; c: number }",
-  lseg: `${POINT}[]`,
-  box: `{ high: ${POINT}; low: ${POINT} }`,
-  path: `{ closed: boolean; points: ${POINT}[] }`,
-  polygon: `${POINT}[]`,
-  circle: `{ center: ${POINT}; radius: number }`,
+  lseg: "{ x: number; y: number }[]",
+  box: "{ high: { x: number; y: number }; low: { x: number; y: number } }",
+  path: "{ closed: boolean; points: { x: number; y: number }[] }",
+  polygon: "{ x: number; y: number }[]",
+  circle: "{ center: { x: number; y: number }; radius: number }",
   // A MySQL ENUM's label, whose union its descriptor says (src/render.ts).
   enum: "string",
   // A MySQL SET's members, which MySQL keeps once each, in the order the column declares them.
@@ -530,6 +529,12 @@ export function columnKind(t: EngineType, dialect: Dialect): Kind {
     default:
       return "text";
   }
+}
+
+/** Each parameter with its kind beside its type (`columnKind`), as a build step writes it, for a query defined by hand. */
+export function withKinds<I extends Readonly<Record<string, { readonly type: EngineType; readonly kind?: Kind }>>>(inputs: I | undefined, dialect: Dialect): I | undefined {
+  if (inputs === undefined) return undefined;
+  return Object.fromEntries(Object.entries(inputs).map(([name, input]) => [name, input.kind === undefined ? { ...input, kind: columnKind(input.type, dialect) } : input])) as unknown as I;
 }
 
 /** The TypeScript type of a scalar kind, `a|b` as the union of both; `unknown` where any part is. */
@@ -797,11 +802,11 @@ const NodeBuffer = (globalThis as { Buffer?: BufferClass }).Buffer;
 // TextDecoder is a global in every runtime Reylo supports; it is typed here rather than through
 // the DOM lib or Node's, which a project that type-checks Reylo's sources need not have.
 const Utf8 = (globalThis as unknown as { TextDecoder: new (label?: string) => { decode(bytes: Uint8Array): string } }).TextDecoder;
-const utf8Decoder = new Utf8("utf-8");
+let utf8Decoder: { decode(bytes: Uint8Array): string } | undefined;
 
 /** UTF-8 bytes as text: a Buffer's own toString where the bytes are one. */
 export function utf8(bytes: Uint8Array): string {
-  return NodeBuffer?.isBuffer(bytes) ? (bytes as Uint8Array & { toString(encoding: string): string }).toString("utf8") : utf8Decoder.decode(bytes);
+  return NodeBuffer?.isBuffer(bytes) ? (bytes as Uint8Array & { toString(encoding: string): string }).toString("utf8") : (utf8Decoder ??= new Utf8("utf-8")).decode(bytes);
 }
 const fromHex = (Uint8Array as unknown as { fromHex?: (hex: string) => Uint8Array }).fromHex;
 
@@ -884,21 +889,6 @@ export function hstoreText(v: object, fail: (message: string) => never): string 
 type Point = { x: number; y: number };
 const POINTS = /\(([^,()]+),([^,()]+)\)/g;
 const points = (x: string): Point[] => Array.from(x.matchAll(POINTS), (m) => ({ x: +m[1]!, y: +m[2]! }));
-const GEOMETRIC_DECODERS: Readonly<Record<Geometric, Decoder>> = {
-  point: (x) => points(x)[0],
-  line: (x) => {
-    const [a, b, c] = x.slice(1, -1).split(",").map(Number);
-    return { a, b, c };
-  },
-  lseg: points,
-  box: (x) => {
-    const [high, low] = points(x);
-    return { high, low };
-  },
-  path: (x) => ({ closed: x[0] === "(", points: points(x) }),
-  polygon: points,
-  circle: (x) => ({ center: points(x)[0], radius: +x.slice(x.lastIndexOf(",") + 1, -1) }),
-};
 
 /**
  * The text of each field of a Postgres row value, `(1,"a b",,"x""y")` (record_out), null where a
@@ -1211,28 +1201,81 @@ export function postgresLiteral(t: EngineType, v: unknown, fail: (message: strin
 /** A MySQL SET from its text, its members joined by commas (`a,c`), none for an empty one. */
 const members = (x: string): Set<string> => new Set(x === "" ? [] : x.split(","));
 
-const TEXT_DECODERS: Readonly<Record<ScalarKind, Decoder>> = {
-  bool: (x) => x === "t",
-  int: number,
-  float: number,
-  int8: (x) => BigInt(x),
-  decimal: identity,
+/** Postgres's readers of the kinds whose text is not the value itself, each its own export, so that a module imports the ones its columns read (src/loader.ts, `moduleReaders`). */
+export const readBool: Decoder = (x) => x === "t";
+export const readNumber: Decoder = number;
+export const readInt8: Decoder = (x) => BigInt(x);
+export const readDate: Decoder = date;
+export const readTimestamp: Decoder = timestamp;
+export const readTimestamptz: Decoder = instant;
+export const readInterval: Decoder = duration;
+export const readJson: Decoder = (x) => JSON.parse(x);
+export const readBytes: Decoder = bytea;
+// pgvector prints the shortest text of each float, `[1,2.5,1e-07]`, which JSON reads exactly.
+export const readVector: Decoder = (x) => JSON.parse(x);
+export const readSet: Decoder = (x) => members(x);
+
+/** The kinds whose text is not the value itself, each read by its own reader (`allReaders`). */
+export const READ_KINDS = /^(?:bool|int|float|int8|date|timestamp|timestamptz|interval|json|bytes|vector|set)$/;
+
+/** Readers by kind: each kind whose text is not its value, with its reader. A kind left out is read as its text. */
+export type Readers = Readonly<Partial<Record<Kind, Decoder>>>;
+
+/** Every reader, by kind, which `defineQuery` passes and a module that reads none of them never names. */
+export const allReaders: Readers = { bool: readBool, int: readNumber, float: readNumber, int8: readInt8, date: readDate, timestamp: readTimestamp, timestamptz: readTimestamptz, interval: readInterval, json: readJson, bytes: readBytes, vector: readVector, set: readSet };
+
+/** The export of each reader, by its kind, which a module imports (src/loader.ts). */
+export const READER_EXPORTS: Readonly<Record<string, string>> = { bool: "readBool", int: "readNumber", float: "readNumber", int8: "readInt8", date: "readDate", timestamp: "readTimestamp", timestamptz: "readTimestamptz", interval: "readInterval", json: "readJson", bytes: "readBytes", vector: "readVector", set: "readSet" };
+
+/**
+ * The readers the queries of this process passed, by kind: a define function installs each
+ * query's, so that a value of a kind no query declares (a column a migration added under
+ * `select *`) is read as its text, as one no reader names is.
+ */
+const readers: Record<Kind, Decoder> = {};
+
+/** A query's readers, for every query of the process (src/index.ts, `define`). */
+export function installReaders(r: Readers): void {
+  // Each kind has one reader for the process: the first query's, which every module's is.
+  for (const [kind, reader] of Object.entries(r)) if (reader && !(kind in readers)) readers[kind] = reader;
+}
+
+/** The kinds a kind holds a scalar of: itself, an array's or a whole array's elements, a row value's fields, a range's bounds, and an either's members. */
+export function scalarKinds(kind: Kind, into = new Set<Kind>()): Set<Kind> {
+  const whole = wholeArrayKind(kind);
+  if (whole !== undefined) return scalarKinds(whole, into);
+  if (kind.endsWith("[]")) return scalarKinds(elementKind(kind), into);
+  if (isRowKind(kind)) {
+    for (const [, k] of rowFields(kind)) scalarKinds(k, into);
+    return into;
+  }
+  if (isRangeKind(kind) || isMultirangeKind(kind)) return scalarKinds(subtypeKind(kind), into);
+  if (kind.includes("|")) {
+    for (const k of kind.split("|")) scalarKinds(k, into);
+    return into;
+  }
+  into.add(kind);
+  return into;
+}
+
+/** Postgres's kinds whose readers come with its rarer types (`postgresTypes`): the geometric types, hstore and money. */
+type RareKind = Geometric | "hstore" | "money";
+const RARE_DECODERS: Readonly<Record<RareKind, Decoder>> = {
   money,
-  text: identity,
-  date,
-  timestamp,
-  timestamptz: instant,
-  interval: duration,
-  json: (x) => JSON.parse(x),
-  bytes: bytea,
-  // pgvector prints the shortest text of each float, `[1,2.5,1e-07]`, which JSON reads exactly.
-  vector: (x) => JSON.parse(x),
   hstore,
-  ...GEOMETRIC_DECODERS,
-  enum: identity,
-  set: (x) => members(x),
-  geometry: identity,
-  unknown: identity,
+  point: (x) => points(x)[0],
+  line: (x) => {
+    const [a, b, c] = x.slice(1, -1).split(",").map(Number);
+    return { a, b, c };
+  },
+  lseg: points,
+  box: (x) => {
+    const [high, low] = points(x);
+    return { high, low };
+  },
+  path: (x) => ({ closed: x[0] === "(", points: points(x) }),
+  polygon: points,
+  circle: (x) => ({ center: points(x)[0], radius: +x.slice(x.lastIndexOf(",") + 1, -1) }),
 };
 
 /**
@@ -1386,7 +1429,7 @@ export function elementKind(kind: Kind): Kind {
 }
 
 /** The decoder of an array of row values: parseArray, in one pass over a flat array's text, which is nearly every array of rows. An element is quoted, a backslash escaping within it, unless it is `NULL` or a row with no character to quote. */
-function rowsDecoder(element: Decoder): Decoder {
+export function rowsDecoder(element: Decoder): Decoder {
   return (x) => {
     if (x.charCodeAt(0) !== LEFT_BRACE || x.charCodeAt(1) === LEFT_BRACE) return parseArray(x, element);
     const out: unknown[] = [];
@@ -1431,8 +1474,31 @@ export function textDecoder(kind: Kind, delim = ","): Decoder {
     const element = textDecoder(elementKind(kind), delim);
     // An array of whole arrays, or of JSON, which may be arrays themselves: only the text tells its levels from its elements'.
     if (wholeArrayKind(elementKind(kind)) !== undefined || elementKind(kind) === "json") return (x) => recordDepth(x, parseArray(x, element, delim));
-    return isRowKind(elementKind(kind)) && delim === "," ? rowsDecoder(element) : (x) => parseArray(x, element, delim);
+    return isRowKind(elementKind(kind)) && delim === "," ? rare(kind, (types) => types.rowsDecoder(element)) : (x) => parseArray(x, element, delim);
   }
+  if (isRareKind(kind)) return rare(kind, (types) => types.decoder(kind));
+  // A kind with a reader no query of the process has installed yet is looked up again as it reads:
+  // a decoder built for a result's type, which a driver's table keeps by oid, would otherwise read
+  // its text for good, past the module a later import defines.
+  const reader = readers[kind];
+  if (reader) return reader;
+  return READ_KINDS.test(kind) ? (x) => (readers[kind] ?? identity)(x) : identity;
+}
+
+/**
+ * A decoder of Postgres's rarer types, `of` the installed ones; where none are installed yet, taken
+ * from them on the first value it reads, and refused then if there are still none. Building one
+ * never throws: a driver's table of every built-in type's decoder (PGlite's, pg's) is built for
+ * statements that read none of them.
+ */
+function rare(kind: Kind, of: (types: PostgresTypes) => Decoder): Decoder {
+  if (installed) return of(installed);
+  let decode: Decoder | undefined;
+  return (x) => (decode ??= of(postgresTypesFor(kind)))(x);
+}
+
+/** The text decoder of a kind of Postgres's rarer types (`isRareKind`). */
+export function rareDecoder(kind: Kind): Decoder {
   if (isRowKind(kind)) return rowDecoder(kind);
   if (isRangeKind(kind)) {
     const bound = textDecoder(subtypeKind(kind));
@@ -1442,7 +1508,46 @@ export function textDecoder(kind: Kind, delim = ","): Decoder {
     const bound = textDecoder(subtypeKind(kind));
     return (x) => multirangeParts(x).map((r) => parseRange(r, bound));
   }
-  return TEXT_DECODERS[kind as ScalarKind] ?? identity;
+  return RARE_DECODERS[kind as RareKind];
+}
+
+// ---------------------------------------------------------------------------------------------
+// Postgres's rarer types: row values, ranges and multiranges, the geometric types, hstore and
+// money. A build step's module passes them,
+// `postgresTypes` from "reylo" (src/postgres-types.ts), where its statement reads or binds one, and
+// its define function installs them, so that an app none of whose statements holds one bundles
+// none of their readers and writers. They are installed once for the process rather than handed
+// down with each query, since every driver's path reads values by kind alone.
+
+/** A kind of Postgres's rarer types, itself and not in an array's elements: a row value, a range, a multirange, a geometric type, an hstore or a money. */
+export const isRareKind = (kind: Kind): boolean => isRowKind(kind) || isRangeKind(kind) || isMultirangeKind(kind) || RARE_KIND.test(kind);
+const RARE_KIND = /^(?:point|line|lseg|box|path|polygon|circle|hstore|money)$/;
+
+/** Whether a kind holds one of Postgres's rarer types anywhere: in its elements, a row value's fields, or a range's bounds. What the module a build step writes imports them for (src/loader.ts). */
+export const holdsRareKind = (kind: Kind): boolean => /\(|range:|\b(?:point|line|lseg|box|path|polygon|circle|hstore|money)\b/.test(kind);
+
+/** Postgres's rarer types' readers and writers, `postgresTypes` (src/postgres-types.ts). */
+export type PostgresTypes = {
+  readonly decoder: (kind: Kind) => Decoder;
+  readonly rowsDecoder: (element: Decoder) => Decoder;
+  readonly literal: (t: EngineType, v: unknown, fail: (message: string) => never) => string;
+  readonly hstoreText: (v: object, fail: (message: string) => never) => string;
+  /** The check that a session writes a `money` in the C locale's form, before a statement with a `money` parameter, `name`, runs. */
+  readonly checkMoney: (c: AnyClient, query: QueryModule<"postgres">, name: string) => Promise<void>;
+};
+
+let installed: PostgresTypes | undefined;
+
+/** Postgres's rarer types for every query of the process, as a define function is handed them. */
+export function installPostgresTypes(types: PostgresTypes): void {
+  installed = types;
+}
+
+/** Postgres's rarer types, which a value of `kind` needs; refused where no query installed them, naming the query's file where it is known. */
+export function postgresTypesFor(kind: Kind, source?: string): PostgresTypes {
+  if (installed) return installed;
+  const base = kind.replace(/(?:\[\])+$/, "");
+  throw new TypeError(`${source ? `${source}: ` : ""}Reylo reads and writes a Postgres ${isRowKind(base) ? "row value" : isRangeKind(base) ? "range" : isMultirangeKind(base) ? "multirange" : base} with Reylo's postgresTypes, which a module a build step writes passes where its statement holds one: build a module an earlier reylo wrote again (reylo generate typescript writes the files it wrote). A query defined by hand has them with defineQuery({ dialect: "postgres", … }).`);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1476,8 +1581,6 @@ export function describe(v: unknown): string {
   return String(v);
 }
 
-const MAX_SAFE = Number.MAX_SAFE_INTEGER;
-
 /** An integer as a number, refused where a number cannot hold it exactly. */
 export function exactInteger(v: number | bigint, column: string): number {
   if (typeof v === "bigint") {
@@ -1486,10 +1589,10 @@ export function exactInteger(v: number | bigint, column: string): number {
     // row with a SQLite BIGINT, beside which better-sqlite3 reads every integer as a BigInt, from
     // 3.3 to 5.2 ms per 10,000 rows.
     const n = Number(v);
-    if (n > MAX_SAFE || n < -MAX_SAFE) throw outOfRange(String(v), column);
+    if (n > Number.MAX_SAFE_INTEGER || n < -Number.MAX_SAFE_INTEGER) throw outOfRange(String(v), column);
     return n;
   }
-  if (v > MAX_SAFE || v < -MAX_SAFE) throw outOfRange(String(v), column, true);
+  if (v > Number.MAX_SAFE_INTEGER || v < -Number.MAX_SAFE_INTEGER) throw outOfRange(String(v), column, true);
   return v;
 }
 
@@ -1600,54 +1703,15 @@ export function float32s(bytes: Uint8Array, column: string): number[] {
 }
 
 /**
- * `v` as a value of `kind`, from the form a driver decoded it to; `column` names it in an error. A
- * number past ±(2^53 - 1) in an integer column is one the driver already rounded, and is refused.
- * `delim` is an array's, where its text is what the driver gave; `postgres` says the value is a
- * Postgres one, whose `timestamp` takes six fraction digits.
+ * `v` as a value of `kind`, from the form a MySQL or SQLite driver decoded it to; `column` names it
+ * in an error. A number past ±(2^53 - 1) in an integer column is one the driver already rounded, and
+ * is refused. `postgres` says the value is a Postgres one, whose `timestamp` takes six fraction
+ * digits: a kind only Postgres has goes through `coercePostgres`, so that no other database's
+ * bundle holds its readers.
  */
-/**
- * How a driver's own array of JSON holds each value: `text`, its text, so that the array's levels
- * are its dimensions (Slonik's tag); `decoded`, a value the driver read, which may be an array
- * itself (Bun.sql's own decoder); unknown otherwise, where each string is read as JSON text and the
- * levels are taken as they are.
- */
-export type JsonElements = "text" | "decoded" | undefined;
-
-export function coerce(kind: Kind, v: unknown, column: string, delim = ",", postgres = false, jsonElements?: JsonElements): unknown {
+export function coerce(kind: Kind, v: unknown, column: string, postgres = false): unknown {
   if (v === null || v === undefined) return null;
-  const whole = wholeArrayKind(kind);
-  // A whole array still in its text is the server's text, which a driver that parsed the array
-  // around it left as it was.
-  if (whole !== undefined) return typeof v === "string" ? textDecoder(kind)(v) : coerce(whole, v, column, ",", postgres);
-  if (kind.endsWith("[]")) {
-    const element = elementKind(kind);
-    if (typeof v === "string") {
-      const parsed = parseArray(v, (s) => coerce(element, s, column, ",", postgres), delim);
-      return wholeArrayKind(element) === undefined && element !== "json" ? parsed : recordDepth(v, parsed);
-    }
-    if (Array.isArray(v)) {
-      // A driver's own array, as PGlite's parser gives one, whose arrays are its levels: each whole
-      // array in it is still its text.
-      // A driver that decoded each JSON value itself gives them as values, a string among them a JSON string, never text to read again.
-      if (element === "json" && jsonElements === "decoded") return v;
-      const out = v.map((e) => (Array.isArray(e) ? coerce(kind, e, column, delim, postgres, jsonElements) : coerce(element, e, column, ",", postgres)));
-      // Its levels are the array's where each whole array, or each JSON value, is still its text, as the caller that passes `text` knows.
-      if (wholeArrayKind(element) !== undefined || (element === "json" && jsonElements === "text")) {
-        let depth = 0;
-        for (let level: unknown = v; Array.isArray(level); level = level.find((e) => e !== null)) depth++;
-        wholeDepths.set(out, depth);
-      }
-      return out;
-    }
-    // A MySQL VECTOR's bytes: no driver gives any other array of floats as bytes.
-    if (element === "float" && isBytes(v)) return float32s(v, column);
-    // Bun.sql's int4[] and float4[] are typed arrays.
-    if (ArrayBuffer.isView(v) && !(v instanceof DataView)) return Array.from(v as unknown as ArrayLike<unknown>, (e) => coerce(element, e, column));
-    return v;
-  }
-  // A row value, and a geometric type, are their text where no driver parses them.
-  if (isRowKind(kind) || isRangeKind(kind) || isMultirangeKind(kind)) return typeof v === "string" ? textDecoder(kind)(v) : v;
-  if (GEOMETRIC.has(kind)) return typeof v === "string" ? GEOMETRIC_DECODERS[kind as Geometric](v) : v;
+  if (kind.endsWith("[]")) return coerceArray(kind, v, column, (k, e) => coerce(k, e, column, postgres));
   if (kind.includes("|")) return coerceEither(kind, v, column);
   switch (kind as ScalarKind) {
     case "bool":
@@ -1664,35 +1728,17 @@ export function coerce(kind: Kind, v: unknown, column: string, delim = ",", post
     case "decimal":
       if (typeof v === "bigint" || typeof v === "number") return String(v);
       return v;
-    case "money":
-      return typeof v === "string" ? money(v) : v;
     case "date":
     case "timestamp":
       if (v instanceof Date) return utcText(v, kind as "date" | "timestamp", column, postgres);
       // Bun.sql's `infinity`.
       if (v === Infinity || v === -Infinity) return v > 0 ? "infinity" : "-infinity";
       return v;
-    case "timestamptz":
-      if (typeof v === "string") return instant(v);
-      if (v instanceof Date) return instantOfDate(v, column);
-      // Bun.sql's `infinity`.
-      if (v === Infinity || v === -Infinity) return v > 0 ? "infinity" : "-infinity";
-      return v;
-    case "interval":
-      return typeof v === "string" ? duration(v) : v;
     case "json":
     case "vector":
       return typeof v === "string" ? JSON.parse(v) : v;
-    case "hstore":
-      return typeof v === "string" ? hstore(v) : v;
     case "bytes":
-      if (isBytes(v)) return v;
-      if (v instanceof ArrayBuffer) return new Uint8Array(v);
-      // D1's BLOB is an array of numbers; mariadb's and Bun.sql's BIT(1) a truth value.
-      if (Array.isArray(v)) return Uint8Array.from(v as number[]);
-      if (typeof v === "boolean") return Uint8Array.of(v ? 1 : 0);
-      if (typeof v === "string") return bytea(v);
-      return v;
+      return toBytes(v);
     case "enum":
       // MySQL stores `''` for a value an ENUM does not list, under INSERT IGNORE or outside strict
       // mode, which the column's union does not admit.
@@ -1711,6 +1757,84 @@ export function coerce(kind: Kind, v: unknown, column: string, delim = ",", post
       return v;
     default:
       return v;
+  }
+}
+
+/** Binary data as a Uint8Array, from whatever a driver read: D1's BLOB is an array of numbers, mariadb's and Bun.sql's BIT(1) a truth value, and a string Postgres's text of it. */
+export function toBytes(v: unknown): unknown {
+  if (isBytes(v)) return v;
+  if (v instanceof ArrayBuffer) return new Uint8Array(v);
+  if (Array.isArray(v)) return Uint8Array.from(v as number[]);
+  if (typeof v === "boolean") return Uint8Array.of(v ? 1 : 0);
+  if (typeof v === "string") return bytea(v);
+  return v;
+}
+
+/** An array's elements as values of its element kind, `each` reading each one; a nested array is a level of the same array. */
+function coerceArray(kind: Kind, v: unknown, column: string, each: (kind: Kind, v: unknown) => unknown): unknown {
+  const element = elementKind(kind);
+  if (Array.isArray(v)) return v.map((e) => (Array.isArray(e) ? coerceArray(kind, e, column, each) : each(element, e)));
+  // A MySQL VECTOR's bytes: no driver gives any other array of floats as bytes.
+  if (element === "float" && isBytes(v)) return float32s(v, column);
+  // Bun.sql's int4[] and float4[] are typed arrays.
+  if (ArrayBuffer.isView(v) && !(v instanceof DataView)) return Array.from(v as unknown as ArrayLike<unknown>, (e) => each(element, e));
+  return v;
+}
+
+/**
+ * How a driver's own array of JSON holds each value: `text`, its text, so that the array's levels
+ * are its dimensions (Slonik's tag); `decoded`, a value the driver read, which may be an array
+ * itself (Bun.sql's own decoder); unknown otherwise, where each string is read as JSON text and the
+ * levels are taken as they are.
+ */
+export type JsonElements = "text" | "decoded" | undefined;
+
+/**
+ * `v` as a Postgres value of `kind`, from the form a driver decoded it to (`coerce`): the kinds only
+ * Postgres has, and an array's text, which `delim` separates; `jsonElements` says how a driver's own
+ * array of JSON holds each value.
+ */
+export function coercePostgres(kind: Kind, v: unknown, column: string, delim = ",", jsonElements?: JsonElements): unknown {
+  if (v === null || v === undefined) return null;
+  const whole = wholeArrayKind(kind);
+  // A whole array still in its text is the server's text, which a driver that parsed the array
+  // around it left as it was.
+  if (whole !== undefined) return typeof v === "string" ? textDecoder(kind)(v) : coercePostgres(whole, v, column);
+  if (kind.endsWith("[]")) {
+    const element = elementKind(kind);
+    if (typeof v === "string") {
+      const parsed = parseArray(v, (s) => coercePostgres(element, s, column), delim);
+      return wholeArrayKind(element) === undefined && element !== "json" ? parsed : recordDepth(v, parsed);
+    }
+    // A driver that decoded each JSON value itself gives them as values, a string among them a JSON string, never text to read again.
+    if (Array.isArray(v) && element === "json" && jsonElements === "decoded") return v;
+    if (Array.isArray(v) && (wholeArrayKind(element) !== undefined || element === "json")) {
+      // A driver's own array, as PGlite's parser gives one, whose arrays are its levels: each whole
+      // array in it is still its text.
+      const out = v.map((e) => (Array.isArray(e) ? coercePostgres(kind, e, column, delim, jsonElements) : coercePostgres(element, e, column)));
+      // Its levels are the array's where each whole array, or each JSON value, is still its text, as the caller that passes `text` knows.
+      if (wholeArrayKind(element) !== undefined || jsonElements === "text") {
+        let depth = 0;
+        for (let level: unknown = v; Array.isArray(level); level = level.find((e) => e !== null)) depth++;
+        wholeDepths.set(out, depth);
+      }
+      return out;
+    }
+    return coerceArray(kind, v, column, (k, e) => coercePostgres(k, e, column));
+  }
+  // A row value, a range, a geometric type, an hstore and a money are their text where no driver parses them.
+  if (isRareKind(kind)) return typeof v === "string" ? textDecoder(kind)(v) : v;
+  switch (kind) {
+    case "timestamptz":
+      if (typeof v === "string") return instant(v);
+      if (v instanceof Date) return instantOfDate(v, column);
+      // Bun.sql's `infinity`.
+      if (v === Infinity || v === -Infinity) return v > 0 ? "infinity" : "-infinity";
+      return v;
+    case "interval":
+      return typeof v === "string" ? duration(v) : v;
+    default:
+      return coerce(kind, v, column, true);
   }
 }
 

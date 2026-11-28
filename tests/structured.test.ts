@@ -10,7 +10,7 @@ import { pathToFileURL } from "node:url";
 import { Session } from "../src/analyze.ts";
 import { sqlModule } from "../src/loader.ts";
 import { moduleTypes } from "../src/module-types.ts";
-import { DRIVERS, PG, MYSQL, pgLive, mysqlLive, INDEX, postgresDatabase, closeSessions, plain, mysqlDatabase, driver } from "./helpers.ts";
+import { DRIVERS, PG, MYSQL, pgLive, mysqlLive, INDEX, MODULE, postgresDatabase, closeSessions, plain, mysqlDatabase, driver } from "./helpers.ts";
 
 // Structured parameters (wiki/structured-params.md): a parameter cast to `rows(…)` or `row(…)` is
 // typed by its column list and written for its position; the run time checks each value, and a key
@@ -36,7 +36,7 @@ async function built(root: string, url: string, name: string, sql: string) {
   writeFileSync(join(root, ".env"), `DATABASE_URL=${url}\n`);
   const { code } = await sqlModule(file, sql);
   const out = join(root, `${name}.mjs`);
-  writeFileSync(out, code.replace(`from "reylo"`, `from ${JSON.stringify(INDEX)}`));
+  writeFileSync(out, code.replace(`from "reylo/module"`, `from ${JSON.stringify(MODULE)}`));
   return (await import(pathToFileURL(out).href)).default;
 }
 

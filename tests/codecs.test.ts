@@ -12,12 +12,13 @@ import { pathToFileURL } from "node:url";
 import { Decimal } from "decimal.js";
 import { BigNumber } from "bignumber.js";
 import { Big } from "big.js";
-import { DRIVERS, INDEX, mysqlDatabase, mysqlLive, pgLive, postgresDatabase, ROOT, transform } from "./helpers.ts";
+import { DRIVERS, INDEX, MODULE, mysqlDatabase, mysqlLive, pgLive, postgresDatabase, ROOT, transform } from "./helpers.ts";
 import { array, field, lite, my, pg, record } from "./descriptors.ts";
 import { decodeCodec, decodeCodecs, decodePlan, encodeCodec, encodePlan, leafCodec, planLibraries, planOf, type Codecs, type DecimalClass } from "../src/codecs.ts";
 import { execute, executeSync, type QueryModule } from "./run.ts";
 import { postgresJsSql } from "./stand-ins.ts";
-import { defineQuery } from "../src/index.ts";
+import { codecRuntime, definePostgresQuery, defineQuery } from "../src/index.ts";
+import { readTimestamptz } from "../src/values.ts";
 import { moduleTypes, standardColumnsType } from "../src/module-types.ts";
 import { renderParamType, renderType } from "../src/render.ts";
 import { DecodeError, ParameterError } from "../src/values.ts";
@@ -263,7 +264,7 @@ test("run gives a codec's columns their type and binds its parameters, on a real
 });
 
 test("a Standard Query gives a codec's columns the same type as run, by decode and by each column's decoder", () => {
-  const q = defineQuery<{}, { at: unknown; n: unknown }, "many", "postgres">({ dialect: "postgres", sql: "select at, n from t", params: [], cardinality: "many", columns: [["at", "timestamptz"], ["n", "decimal"]], codecs: { at: "instant", n: "decimal:number" } })["~standard"].query;
+  const q = defineQuery<{}, { at: unknown; n: unknown }, "many", "postgres">({ dialect: "postgres", sql: "select at, n from t", params: [], cardinality: "many", columns: [["at", "timestamptz"], ["n", "decimal"]], codecs: { at: "instant", n: "decimal:number" }, codecRuntime })["~standard"].query;
   const [row] = q.decode([["2026-10-20 10:00:00+02", "19.50"]]) as { at: unknown; n: unknown }[];
   assert.ok(row!.at instanceof Temporal.Instant);
   assert.equal(String(row!.at), "2026-10-20T08:00:00Z");
@@ -271,6 +272,15 @@ test("a Standard Query gives a codec's columns the same type as run, by decode a
   assert.ok(q.columns![0]!.decode("2026-10-20 10:00:00+02") instanceof Temporal.Instant);
   assert.equal(q.columns![1]!.decode("19.50"), 19.5);
   assert.equal(standardColumnsType([{ name: "at", type: pg("timestamptz"), nullable: false }] as any, "postgres", every), `readonly [{ readonly name: "at"; decode(value: string): Temporal.Instant }]`);
+});
+
+test("a query defined by its dialect's define function whose columns name a codec is refused without the codecs' run time, which defineQuery passes itself", async () => {
+  const q = definePostgresQuery<{}, { at: unknown }, "many">({ sql: "select at from t", params: [], cardinality: "many", columns: [["at", "timestamptz"]], codecs: { at: "instant" }, readers: { timestamptz: readTimestamptz }, source: "at.sql" });
+  assert.throws(() => q["~standard"].query.decode([["2026-10-20 10:00:00+02"]]), { name: "TypeError", message: /^at\.sql: This statement holds a value js\.codecs gives another type, which the run time converts with Reylo's codecRuntime, which a module a build step writes passes: build a module an earlier reylo wrote again \(reylo generate typescript writes the files it wrote\)\. A query defined by hand has it with defineQuery\(\{ dialect: "postgres", … \}\)\.$/ });
+  // `.run()` refuses it before the statement runs, so a write that returns such a column never commits.
+  const calls: unknown[] = [];
+  await assert.rejects(q.run({ query: async (...args: unknown[]) => (calls.push(args), { rows: [] }) } as never), { name: "TypeError", message: /^at\.sql: This statement holds a value js\.codecs gives another type/ });
+  assert.deepEqual(calls, []);
 });
 
 test("decodeCodecs leaves the columns it names no plan for as they are", () => {
@@ -301,6 +311,9 @@ test("a project's js.codecs reach the module a build writes and the types it dec
     assert.match(types.params, /id: number \| bigint/);
     const { code } = await sqlModule(file, sql);
     assert.match(code, /, codecs: \{"at":"datetime","data":"bytes:string"\}/);
+    // The module passes the codecs' run time, which it alone imports.
+    assert.match(code, /^import \{ defineSqliteQuery, codecRuntime, [\w, ]+ \} from "reylo\/module";$/m);
+    assert.match(code, /, codecRuntime,/);
   } finally {
     for (const session of Session.opened()) await session.close();
   }
@@ -460,7 +473,7 @@ test("a project whose js.codecs.decimal names a library types each decimal as it
     assert.doesNotMatch((await sqlModule(join(dir, "names.sql"), "select name from items")).code, /ReyloDecimal/);
     // Run, the module gives the class's values and binds one back.
     const out = join(dir, "get.mjs");
-    writeFileSync(out, code.replace(`from "reylo"`, `from ${JSON.stringify(INDEX)}`));
+    writeFileSync(out, code.replace(`from "reylo/module"`, `from ${JSON.stringify(MODULE)}`));
     const query = (await import(pathToFileURL(out).href)).default as { run(client: unknown, params: unknown): Promise<{ price: InstanceType<typeof Decimal>; prices: unknown[] }[]> };
     const [row] = await query.run(own.sql, { min: new Decimal("1") });
     assert.ok(row!.price instanceof Decimal);
@@ -472,7 +485,7 @@ test("a project whose js.codecs.decimal names a library types each decimal as it
     const fees = join(dir, "fees.sql");
     const feesSql = "select fee from items where fee = :fee";
     writeFileSync(fees, feesSql);
-    writeFileSync(join(dir, "fees.mjs"), (await sqlModule(fees, feesSql)).code.replace(`from "reylo"`, `from ${JSON.stringify(INDEX)}`));
+    writeFileSync(join(dir, "fees.mjs"), (await sqlModule(fees, feesSql)).code.replace(`from "reylo/module"`, `from ${JSON.stringify(MODULE)}`));
     const byFee = (await import(pathToFileURL(join(dir, "fees.mjs")).href)).default as { run(client: unknown, params: unknown): Promise<{ fee: InstanceType<typeof Decimal> }[]> };
     const [fee] = await byFee.run(own.sql, { fee: new Decimal("1234.50") });
     assert.ok(fee!.fee instanceof Decimal);
@@ -687,7 +700,7 @@ async function codecModule(dir: string, name: string, sql: string) {
   const file = join(dir, `${name}.sql`);
   writeFileSync(file, sql);
   const out = join(dir, `${name}.mjs`);
-  writeFileSync(out, (await sqlModule(file, sql)).code.replace(`from "reylo"`, `from ${JSON.stringify(INDEX)}`));
+  writeFileSync(out, (await sqlModule(file, sql)).code.replace(`from "reylo/module"`, `from ${JSON.stringify(MODULE)}`));
   return { code: (await import("node:fs")).readFileSync(out, "utf8"), query: (await import(pathToFileURL(out).href)).default as { run(client: unknown, params?: unknown): Promise<any[]> } };
 }
 
