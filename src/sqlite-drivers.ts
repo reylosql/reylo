@@ -367,7 +367,7 @@ function schemaDdl(db: DatabaseSync): string[] {
   ).map((r) => r.sql);
 }
 
-/** Starts the D1 child of the project in `dir`; `ended` is called when it ends after it started. */
+/** Starts the D1 child of the project in `dir`; `ended` is called when it ends or fails after it started, before what waits on it is settled. */
 async function startD1(entry: string, dir: string, ended: () => void): Promise<D1Process> {
   const version = wranglerVersion(entry);
   const extension = import.meta.url.slice(import.meta.url.lastIndexOf("."));
@@ -419,6 +419,7 @@ async function startD1(entry: string, dir: string, ended: () => void): Promise<D
     settleAll();
   });
   child.on("error", () => {
+    if (running) ended();
     settleAll();
     child.kill();
   });
