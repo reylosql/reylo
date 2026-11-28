@@ -53,14 +53,10 @@ thread_local! {
     static YEAR_REACHED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// Whether the session reaches a YEAR anywhere a statement may read one, in any schema it sees but
-/// Reylo Migrate's other shadows: a column of a table or a view, a stored function that returns
-/// one, or a view whose definition names the word, as `year(d)` and `cast(… as year)` do, or that
-/// the account may not read, whose definition is empty to it. A YEAR in a table the account sees
-/// nothing of is not seen. Asked once a session, for what [`cut_years`] cannot trace.
-const YEARS_QUERY: &str = "select 1 from information_schema.columns where data_type = 'year' and (table_schema = database() or left(table_schema, 13) <> 'reylo_shadow_') \
-    union all select 1 from information_schema.routines where data_type = 'year' and (routine_schema = database() or left(routine_schema, 13) <> 'reylo_shadow_') \
-    union all select 1 from information_schema.views where (view_definition like '%year%' or coalesce(view_definition, '') = '') and (table_schema = database() or left(table_schema, 13) <> 'reylo_shadow_') limit 1";
+/// Whether the session sees a stored function that returns a YEAR, in any schema but Reylo
+/// Migrate's other shadows, which any call may reach. Asked once a session, for what [`cut_years`]
+/// cannot trace, beside what the statement reads ([`Keys::years`]).
+const YEARS_QUERY: &str = "select 1 from information_schema.routines where data_type = 'year' and (routine_schema = database() or left(routine_schema, 13) <> 'reylo_shadow_') limit 1";
 
 /// The server [`crate::structured::MYSQL_SERVER_QUERY`] answered for (`None` where it has not):
 /// whether it is MariaDB, and its major and minor version where its text gives them.
@@ -292,7 +288,6 @@ pub fn analyze(sql: &str, lexed: &Lexed, text: Option<MysqlText>, host: &Host, m
     let years = years.map_or(true, |rows| !rows.is_empty());
     let merges = merges_year(server.as_deref().ok());
     MERGES_YEAR.with(|cell| cell.set(merges));
-    YEAR_REACHED.with(|cell| cell.set(merges && (years || names_year(sql, lexed))));
     let misread = misread.or_else(|| pipes.clone().err());
     // The tree again where the session reads `||` or a spaced built-in otherwise than the default.
     let session = SessionDialect(dialect.0, !matches!(pipes, Ok(false)), ignore_space);
@@ -462,6 +457,14 @@ pub fn analyze(sql: &str, lexed: &Lexed, text: Option<MysqlText>, host: &Host, m
     // What the engine knows of each column being NULL: the server's flags, read where merging
     // could make them wrong with every derived table materialized, and what the engine proves
     // beyond them.
+    // Whether a YEAR may reach the statement: one its code names, a stored function that returns
+    // one, or one among what it reads ([`Keys::years`]), where the engine reads it; asked beside
+    // the copy's probes, and awaited after them.
+    let reads_year = match &parsed {
+        Some(Statement::Query(q)) => catalog(host, q).map(|keys| keys.years),
+        _ => Some(true),
+    };
+    YEAR_REACHED.with(|cell| cell.set(merges && (years || names_year(sql, lexed) || reads_year.unwrap_or(true))));
     let proven = match &parsed {
         Some(Statement::Query(q)) => {
             // The views of every schema, which the copy reads through derived tables of their
@@ -475,6 +478,7 @@ pub fn analyze(sql: &str, lexed: &Lexed, text: Option<MysqlText>, host: &Host, m
         _ if unread => Proven { flags: vec![false; raw.columns.len()], ..Proven::default() },
         _ => Proven { flags: raw.columns.iter().map(|c| c.flags & 1 != 0).collect(), ..Proven::default() },
     };
+    reads_year?;
     // The unique keys, columns and views of the tables the query reads, which its cardinality
     // reads, and whose views' own calls the flags below may miss.
     let keys = match &parsed {
@@ -3068,6 +3072,10 @@ pub(crate) struct Keys {
     pub(crate) rebound: crate::mysql_derived::Rebound,
     /// The names the catalog's rows of each name asked came back under ([`Keys::name`]).
     answers: crate::mysql_names::Answers,
+    /// Whether a YEAR may be among what the query reads ([`cut_years`]): a table's or a view's
+    /// YEAR column, a view whose definition names the word or is empty to the account, or a name
+    /// the catalog lists no columns of, as a temporary table or another schema's.
+    pub(crate) years: bool,
 }
 
 /// What a value compares as. MySQL compares a string with a number as two doubles, so `'01'`,
@@ -3505,13 +3513,16 @@ fn catalog(host: &Host, q: &Query) -> Lazy<Keys> {
         keys.answers.extend(answers);
         for row in columns {
             if let (Some(table), Some(column), Some(ty)) = (row.first().and_then(as_str), row.get(1).and_then(as_str), row.get(2).and_then(as_str)) {
+                keys.years |= ty.eq_ignore_ascii_case("year");
                 answered.entry(table.to_string()).or_default().push((column.to_ascii_lowercase(), class_of(ty)));
             }
         }
+        keys.years |= names.iter().any(|name| !answered.keys().any(|table| table.eq_ignore_ascii_case(name)));
         keys.columns.extend(answered);
         let mut next = Vec::new();
         for row in views.unwrap_or_default() {
             let (Some(name), Some(definition), Some(schema)) = (row.first().and_then(as_str), row.get(1).and_then(as_str), row.get(2).and_then(as_str)) else { continue };
+            keys.years |= definition.trim().is_empty() || definition.to_ascii_lowercase().contains("year");
             // A definition the session may not read is empty, and reads as nothing. One the parser
             // does not read keeps its text, which may still name a call.
             let Ok(mut parsed) = parse(&SessionDialect::default(), definition) else {
@@ -4865,6 +4876,7 @@ mod tests {
                 let (id, answer) = match need {
                     crate::api::Need::Describe { id, .. } => (id, json!({ "mysql": described })),
                     crate::api::Need::Query { id, sql, .. } if sql == VIEWS_QUERY => (id, json!({ "rows": [["recent"]] })),
+                    crate::api::Need::Query { id, sql, .. } if sql == KEY_COLUMNS_QUERY => (id, json!({ "rows": [["recent", "active", "tinyint"]] })),
                     crate::api::Need::Query { id, .. } => (id, json!({ "rows": [] })),
                 };
                 answers.insert(id, serde_json::from_value(answer).unwrap());
@@ -5051,14 +5063,22 @@ mod tests {
             };
             json!({ "columns": columns, "params": [] })
         };
-        let years = |rows: Value| move |sql: &str| (sql == YEARS_QUERY).then(|| rows.clone());
+        // The catalog's columns of the tables the statements read, with a YEAR column or without.
+        let columns = |year: bool| {
+            let mut rows = vec![json!(["x", "ti", "tinyint"]), json!(["x", "tu", "tinyint"]), json!(["x", "d", "date"]), json!(["vw", "v", "tinyint"])];
+            if year {
+                rows.push(json!(["x", "y", "year"]));
+            }
+            Value::Array(rows)
+        };
+        let years = |year: bool| move |sql: &str| (sql == KEY_COLUMNS_QUERY).then(|| columns(year));
         let version = |v: &'static str| move |sql: &str| match sql {
-            _ if sql == YEARS_QUERY => Some(json!([[1]])),
+            _ if sql == KEY_COLUMNS_QUERY => Some(columns(true)),
             _ if sql == crate::structured::MYSQL_SERVER_QUERY => Some(json!([[v, "utf8mb4", "utf8mb4_0900_ai_ci"]])),
             _ => None,
         };
         let ty = |sql: &str, query: &dyn Fn(&str) -> Option<Value>| analyzed_with(sql, &describe, query).columns[0].ty.short();
-        let some = years(json!([[1]]));
+        let some = years(true);
         assert_eq!(ty("select coalesce(y, ti) as v from x", &some), "unknown");
         assert_eq!(ty("select if(id > 0, ti, y) as v from x", &some), "unknown");
         assert_eq!(ty("select max(coalesce(ti, y)) as v from x", &some), "unknown");
@@ -5078,11 +5098,13 @@ mod tests {
         // A YEAR among the values is found whatever the session holds, where a column computed
         // elsewhere is cut only where a YEAR may reach it; a server that merges them into a
         // SMALLINT cuts nothing.
-        let none = years(json!([]));
+        let none = years(false);
         assert_eq!(ty("select coalesce(y, ti) as v from x", &none), "unknown");
         assert_eq!(ty("select coalesce(year(d), ti) as v from x", &none), "unknown");
         assert_eq!(ty("select coalesce(cast(2026 as year), ti) as v from x", &none), "unknown");
         assert_eq!(ty("select v from vw", &none), "tinyint");
+        // A table the catalog lists no columns of, as a temporary table, may hold a YEAR.
+        assert_eq!(ty("select v from (select max(ti) as v from scratch) d", &none), "unknown");
         assert_eq!(ty("select coalesce(y, ti) as v from x", &version("9.7.2")), "tinyint");
         assert_eq!(ty("select coalesce(y, ti) as v from x", &version("8.4.13")), "unknown");
     }
