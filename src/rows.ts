@@ -123,8 +123,15 @@ function jsonMember(f: RowField, v: unknown, dialect: Dialect, fail: (message: s
   return dialect !== "postgres" && f.type.kind === "json" ? new Raw(writeJson(v, dialect, fail)!) : v;
 }
 
-/** What a thrown value says: an error's message, anything else as its text. */
-const thrown = (e: unknown) => (e instanceof Error ? e.message : String(e));
+/** What a thrown value says: an error's message, anything else as its text, or its type where it has none. */
+function thrown(e: unknown): string {
+  if (e instanceof Error) return e.message;
+  try {
+    return String(e);
+  } catch {
+    return `a thrown ${typeof e}`;
+  }
+}
 
 /**
  * An element of a jsonb[] member as the JSON text the database receives, written once by Reylo's
