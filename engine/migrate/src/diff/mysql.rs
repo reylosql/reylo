@@ -300,7 +300,8 @@ impl Column {
             let end = end + rest[end..].len() - rest[end..].trim_start().len();
             rest.replace_range(start..end, "");
         }
-        Column { rest: format!("not null {}", rest.trim()).trim_end().to_string(), ..self.clone() }
+        // Last, which MySQL takes after any attribute, a generation's included, where it takes none before one.
+        Column { rest: format!("{} not null", rest.trim()).trim_start().to_string(), ..self.clone() }
     }
 
     fn written(&self, table_collation: Option<&str>) -> String {
@@ -1908,7 +1909,7 @@ mod tests {
         // Renamed as it counts: made NOT NULL as it was, under the name it had; a comment's words
         // are no attribute.
         let plan = alter_table(&table(column("seq", "comment 'not null until rollout'")), &to, &[("seq".into(), "ticket".into())], &BTreeSet::new());
-        assert_eq!(plan.first().map(String::as_str), Some("alter table t modify column seq int not null comment 'not null until rollout'"), "{plan:?}");
+        assert_eq!(plan.first().map(String::as_str), Some("alter table t modify column seq int comment 'not null until rollout' not null"), "{plan:?}");
         // NOT NULL already: nothing before.
         let plan = alter_table(&table(column("ticket", "not null comment 'x'")), &to, &[], &BTreeSet::new());
         assert_eq!(plan.len(), 1, "{plan:?}");
