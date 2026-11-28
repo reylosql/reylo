@@ -26,7 +26,7 @@
 // those oids are arrays, cached in a WeakMap keyed by the app's object. A row value the module knows
 // the fields of has the kind of its column whatever its oid: `record` is one oid for every shape of
 // row, and a built-in catalog table's row type is below 10000 too.
-import { civilFromDays, coerce, coercePostgres, columnKind, DecodeError, describe, elementKind, holdsRareKind, instantOfDate, isLevel, isRareKind, isRowKind, ParameterError, postgresInterval, postgresTypesFor, postgresYear, scalarKind, textDecoder, utf8, wholeArrayKind, withFraction, withinDimensions, type Columns, type Decoder, type Kind } from "./values.ts";
+import { civilFromDays, coerce, coercePostgres, DecodeError, describe, elementKind, holdsRareKind, instantOfDate, isLevel, isRareKind, isRowKind, ParameterError, postgresInterval, postgresTypesFor, postgresYear, scalarKind, textDecoder, utf8, wholeArrayKind, withFraction, withinDimensions, type Columns, type Decoder, type Kind } from "./values.ts";
 import { bareName, holdsWholeArrays, type EngineType } from "./engine-type.ts";
 import { lastOfEach, namesInResult, rowOf, type RowBuilder } from "./row.ts";
 import { arrayLiteral, asByteaHex, drizzleDriver, driversOf, EFFECT_SQL, knexDriver, isJsonValue, isTime, jsonElements, takesFloat, jsonText, postgresText, vectorParameter, type AnyClient as Client, type Bound, type EffectSql, type Marks, type QueryModule, type Runtime, type DriverClient } from "./execute.ts";
@@ -1160,8 +1160,7 @@ async function beforePostgres(c: Client, query: QueryModule<"postgres">): Promis
 // the `P`, a float of -0 as the text `-0`, since pg's family, postgres.js, PGlite, Neon and
 // Drizzle's driver write that number as `0`, and a pgvector vector as the text its input reads, an
 // array of vectors as an array of those texts.
-function postgresValue(type: EngineType, v: unknown, name: string): unknown {
-  const kind = columnKind(type, "postgres");
+function postgresValue(type: EngineType, kind: Kind, v: unknown, name: string): unknown {
   // A row value, a geometric type and a range go as the text Postgres reads, from the object
   // `.run()` returns for them, and an array of them as an array of those texts (below).
   if (!kind.endsWith("[]") && kind !== "hstore" && kind !== "money" && isRareKind(kind)) return postgresTypesFor(kind).literal(type, v, (message) => {
@@ -1174,7 +1173,10 @@ function postgresValue(type: EngineType, v: unknown, name: string): unknown {
       throw new ParameterError(`Parameter "${name}" is an array of arrays, each element ${message}`);
     })));
   }
-  if (type.kind === "array" && kind.endsWith("[]")) return Array.isArray(v) ? v.map((e) => (e == null ? e : postgresValue(Array.isArray(e) && isLevel(columnKind(type.element.type, "postgres"), e) ? type : type.element.type, e, name))) : v;
+  if (type.kind === "array" && kind.endsWith("[]")) {
+    const element = kind.slice(0, -2);
+    return Array.isArray(v) ? v.map((e) => (e == null ? e : Array.isArray(e) && isLevel(element, e) ? postgresValue(type, kind, e, name) : postgresValue(type.element.type, element, e, name))) : v;
+  }
   if (kind === "vector" && Array.isArray(v)) {
     if (!v.length) throw new ParameterError(`Parameter "${name}" is a pgvector ${bareName(type)}, which has one dimension at least; got an empty array.`);
     return vectorParameter(v, name, `a pgvector ${bareName(type)}`);
@@ -1185,9 +1187,9 @@ function postgresValue(type: EngineType, v: unknown, name: string): unknown {
   // A money holds cents in the C locale Reylo reads it in, and Postgres rounds a value past them
   // without an error.
   if (kind === "money" && (typeof v !== "string" || !/^-?\d+(?:\.\d{1,2}0*)?$/.test(v))) throw new ParameterError(`Parameter "${name}" is a Postgres money, which holds cents: pass its decimal text, with two digits after the point at most (1234.56); got ${describe(v)}.`);
-  if (Object.is(v, -0) && takesFloat(type, "postgres")) return "-0";
+  if (Object.is(v, -0) && takesFloat(kind)) return "-0";
   if (typeof v !== "string") return v;
-  if (isTime(type, "postgres")) return postgresYear(v);
+  if (isTime(kind)) return postgresYear(v);
   return kind === "interval" ? postgresInterval(v) : v;
 }
 

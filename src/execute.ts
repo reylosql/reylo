@@ -10,8 +10,8 @@
 // the databases its queries are written for.
 
 import type { QueryError } from "./query-error.ts";
-import { columnKind, describe, given, isLevel, ParameterError, type numbersInJson, rowMasks, vectorText, writeJson, zoned, type Columns, type JsonNumbers, type Kind } from "./values.ts";
-import { holdsWholeArrays, schemaOf, type EngineType } from "./engine-type.ts";
+import { describe, given, isLevel, ParameterError, wholeArrayKind, type numbersInJson, rowMasks, vectorText, writeJson, zoned, type Columns, type JsonNumbers, type Kind } from "./values.ts";
+import { schemaOf, type EngineType } from "./engine-type.ts";
 import { withSqlcommenter } from "./sqlcommenter.ts";
 import type { JsonSchema } from "./engine-type.ts";
 import type { SqlMode } from "./engine-core.ts";
@@ -309,7 +309,7 @@ export type Runtime<D extends Dialect = Dialect> = {
   /** The rows of an asynchronous client as `.run()` returns them, where the driver's need more (Postgres's numbers inside JSON, and its arrays' dimensions). */
   after?(query: QueryModule<D>, rows: unknown[]): unknown[];
   /** A parameter's value of the engine's type `type`, checked, as the database's drivers bind it (`statement`): neither is null or undefined. */
-  encode(type: EngineType, v: unknown, name: string): unknown;
+  encode: (type: EngineType, kind: Kind, v: unknown, name: string) => unknown;
   /** A bound value as the database reads it with no declared type, which a Standard Query's `encode` returns (Postgres's text, `rawStatement`); every other database's as it is bound. */
   rawValue?(query: QueryModule<D>, name: string, v: unknown): unknown;
   /** The clients `.run()` takes, in the refusal of any other (`unsupported`), for a dialect whose module names no drivers. */
@@ -338,7 +338,7 @@ export type Bound = { text: string; values: unknown[]; names: readonly string[];
  * then refuses, given or left out, except that a JSON parameter's null there is JSON's null; a
  * query defined by hand without it binds what it is given.
  */
-export type Inputs = Readonly<Record<string, { readonly type: EngineType; readonly schema?: JsonSchema; readonly cast?: string; readonly members?: Members; readonly delimiter?: string; readonly nullable?: boolean; readonly codec?: Plan }>>;
+export type Inputs = Readonly<Record<string, { readonly type: EngineType; readonly kind?: Kind; readonly schema?: JsonSchema; readonly cast?: string; readonly members?: Members; readonly delimiter?: string; readonly nullable?: boolean; readonly codec?: Plan }>>;
 
 export type AnyClient = Record<string, any> & ((...args: any[]) => any);
 
@@ -627,19 +627,22 @@ function statement(query: QueryModule, params: ParamsInput, run = true) {
     // structured parameter's member keeps its NULL elements (src/rows.ts).
     // A ClickHouse array's type says whether an element may be NULL, and its binder holds each to it.
     if (type?.kind === "array" && Array.isArray(bound.values[i]) && query.dialect !== "clickhouse") {
-      const kind = columnKind(type, query.dialect);
-      const at = nullElement(bound.values[i] as unknown[], kind.endsWith("[]") ? columnKind(type.element.type, query.dialect) : undefined);
+      const kind = kindOf(query, name);
+      const at = nullElement(bound.values[i] as unknown[], kind.endsWith("[]") ? kind.slice(0, -2) : undefined);
       if (at !== undefined) throw new ParameterError(`Parameter "${name}" is an array whose elements may not be null, and the element at ${at} is. Leave it out of the array.`);
     }
     // A `::type` written on MySQL or SQLite, whose cast turns a value it cannot read into 0 or
     // NULL: the value is checked against the type as written.
     const cast = query.inputs?.[name]?.cast;
     if (cast !== undefined && type !== undefined) checksFor(query, name).checkCast(name, cast, type, bound.values[i], query.dialect);
-    checkTime(type, name, bound.values[i], query.dialect);
-    checkBinary(type, name, bound.values[i], query.dialect);
+    const kind = type === undefined ? undefined : kindOf(query, name);
+    if (kind !== undefined) {
+      checkTime(kind, name, bound.values[i]);
+      checkBinary(kind, name, bound.values[i]);
+    }
     checkNonFinite(type, name, bound.values[i], query.dialect);
     const v = bound.values[i];
-    bound.values[i] = jsonNull ? JSON_NULL : type === undefined || v == null ? v : query.runtime.encode(type, v, name);
+    bound.values[i] = jsonNull ? JSON_NULL : type === undefined || kind === undefined || v == null ? v : query.runtime.encode(type, kind, v, name);
   });
   // Every MySQL and SQLite driver binds JSON text as text, which the database reads as JSON (a
   // structured parameter's is written already).
@@ -664,8 +667,8 @@ function statement(query: QueryModule, params: ParamsInput, run = true) {
       bound,
       literalsAtMarks(bound, (v, i) => {
         if (v === Infinity || v === -Infinity) return v > 0 ? "(9e999)" : "(-9e999)";
-        const type = query.inputs?.[bound.names[i]!]?.type;
-        return Object.is(v, -0) && type !== undefined && takesFloat(type, "sqlite") ? "(-0.0)" : undefined;
+        const input = query.inputs?.[bound.names[i]!];
+        return Object.is(v, -0) && input !== undefined && takesFloat(kindOf(query, bound.names[i]!)) ? "(-0.0)" : undefined;
       }),
     );
   }
@@ -679,10 +682,21 @@ function statement(query: QueryModule, params: ParamsInput, run = true) {
   return bound;
 }
 
-/** Whether a parameter's type takes a float, alone or as one of the types its value decides between, or is no type the run time knows, so that -0 keeps its sign there. */
-export function takesFloat(type: EngineType, dialect: Dialect): boolean {
-  const kinds = columnKind(type, dialect).split("|");
+/** Whether a parameter's kind takes a float, alone or as one of the kinds its value decides between, or is no kind the run time knows, so that -0 keeps its sign there. */
+export function takesFloat(kind: Kind): boolean {
+  const kinds = kind.split("|");
   return kinds.includes("float") || kinds.includes("unknown");
+}
+
+/**
+ * A parameter's kind (src/values.ts, `columnKind`), which a build step writes beside its type, so
+ * that the run time binds by it with no reading of the type: a query defined by hand with
+ * `defineQuery` has each one.
+ */
+export function kindOf(query: QueryModule, name: string): Kind {
+  const kind = query.inputs?.[name]?.kind;
+  if (kind !== undefined) return kind;
+  throw new TypeError(`${query.source ? `${query.source}: ` : ""}Parameter "${name}" names no kind, which a module a build step writes gives each parameter: build a module an earlier reylo wrote again (reylo generate typescript writes the files it wrote). A query defined by hand has each parameter's kind with defineQuery.`);
 }
 
 /**
@@ -834,15 +848,14 @@ export const jsonText = (v: unknown, dialect: Dialect, name: string, at = "") =>
 // server sets, and a Date is refused too, as every other type's value is but a string,
 // with the call that writes it as one.
 
-export const isTime = (type: EngineType | undefined, dialect: Dialect) => type !== undefined && columnKind(type, dialect).split("|").every((part) => part === "timestamp" || part === "timestamptz" || part === "date");
+export const isTime = (kind: Kind) => kind.split("|").every((part) => part === "timestamp" || part === "timestamptz" || part === "date");
 
-function checkTime(type: EngineType | undefined, name: string, v: unknown, dialect: Dialect): void {
-  if (type === undefined || v == null) return;
-  if (type.kind === "array") {
-    if (Array.isArray(v)) for (const e of v) checkTime(Array.isArray(e) && !holdsWholeArrays(type) ? type : type.element.type, name, e, dialect);
+function checkTime(kind: Kind, name: string, v: unknown): void {
+  if (v == null) return;
+  if (kind.endsWith("[]")) {
+    if (Array.isArray(v)) for (const e of v) checkTime(element(kind, e), name, e);
     return;
   }
-  const kind = columnKind(type, dialect);
   if (kind === "timestamptz") {
     if (v instanceof Date) {
       throw new ParameterError(`Parameter "${name}" is a timestamptz, which takes the instant as a string that names its zone, as \`.run()\` returns one, not a Date: pass date.toISOString() ("2026-10-12T19:06:48.282Z").`);
@@ -855,18 +868,30 @@ function checkTime(type: EngineType | undefined, name: string, v: unknown, diale
   }
 }
 
+/**
+ * The kind an element `e` of an array of `kind` has: an array inside one that holds no whole arrays
+ * is another level of it, of its kind; anything else is an element, and a whole array (a domain
+ * over an array type, `{int[]}`) is an array of its own kind.
+ */
+function element(kind: Kind, e: unknown): Kind {
+  const inner = kind.slice(0, -2);
+  const whole = wholeArrayKind(inner);
+  if (Array.isArray(e) && whole === undefined) return kind;
+  return whole ?? inner;
+}
+
 // A binary parameter takes a Uint8Array (a Buffer is one), as `.run()` returns binary data and
 // as a structured parameter's binary member does (src/rows.ts). Anything else would reach the
 // driver as it is, and a string means something different on each database: Postgres reads it
 // as bytea's hex or escape text, MySQL stores the bytes of its UTF-8, and SQLite stores it as
 // TEXT, which comes back a string. So base64 text was stored as its own letters.
-function checkBinary(type: EngineType | undefined, name: string, v: unknown, dialect: Dialect): void {
-  if (type === undefined || v == null) return;
-  if (type.kind === "array" && columnKind(type, dialect).endsWith("[]")) {
-    if (Array.isArray(v)) for (const e of v) checkBinary(Array.isArray(e) && !holdsWholeArrays(type) ? type : type.element.type, name, e, dialect);
+function checkBinary(kind: Kind, name: string, v: unknown): void {
+  if (v == null) return;
+  if (kind.endsWith("[]")) {
+    if (Array.isArray(v)) for (const e of v) checkBinary(element(kind, e), name, e);
     return;
   }
-  if (columnKind(type, dialect) !== "bytes" || v instanceof Uint8Array) return;
+  if (kind !== "bytes" || v instanceof Uint8Array) return;
   throw new ParameterError(`Parameter "${name}" is binary data, so it takes a Uint8Array (a Buffer is one), as \`.run()\` returns one; got ${describe(v)}. ${v instanceof ArrayBuffer ? "Wrap an ArrayBuffer in one: new Uint8Array(buffer)." : "Decode base64 or hex text into one first."}`);
 }
 

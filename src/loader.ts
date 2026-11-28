@@ -135,7 +135,7 @@ function moduleInputs({ analysis, dialect, codecs }: ModuleInput) {
       const codec = planOf(p.type, dialect, codecs, true);
       return [
         p.name,
-        { type: p.type, ...(p.schema === undefined ? {} : { schema: p.schema }), ...(p.cast === undefined ? {} : { cast: p.cast }), ...(p.members === undefined ? {} : { members: p.members }), ...(p.delimiter === undefined ? {} : { delimiter: p.delimiter }), nullable: p.nullable === true, ...(codec === undefined ? {} : { codec }) },
+        { type: p.type, kind: columnKind(p.type, dialect), ...(p.schema === undefined ? {} : { schema: p.schema }), ...(p.cast === undefined ? {} : { cast: p.cast }), ...(p.members === undefined ? {} : { members: p.members }), ...(p.delimiter === undefined ? {} : { delimiter: p.delimiter }), nullable: p.nullable === true, ...(codec === undefined ? {} : { codec }) },
       ];
     }),
   );

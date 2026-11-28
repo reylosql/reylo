@@ -38,10 +38,9 @@
 //   past 2^53 may be one, a column with no type included; a BIGINT's number within 2^53, or
 //   libSQL's BigInt or digits, is its BigInt.
 import { lastOfEach, namesInResult, rowOf } from "./row.ts";
-import { bigInteger, coerce, columnKind, DecodeError, exactInteger, ParameterError, refuseTruth, truth, type Columns, type Kind } from "./values.ts";
-import { drizzleDriver, driversOf, EFFECT_SQL, executeSync, isDurableObjectSql, knexDriver, takesFloat, type AnyClient as Client, type Bound, type DriverClient, type EffectSql, type QueryModule, type Runtime } from "./execute.ts";
+import { bigInteger, coerce, DecodeError, exactInteger, ParameterError, refuseTruth, truth, type Columns, type Kind } from "./values.ts";
+import { drizzleDriver, driversOf, EFFECT_SQL, executeSync, isDurableObjectSql, kindOf, knexDriver, takesFloat, type AnyClient as Client, type Bound, type DriverClient, type EffectSql, type QueryModule, type Runtime } from "./execute.ts";
 import { readSqliteError } from "./query-error.ts";
-import type { EngineType } from "./engine-type.ts";
 
 type AnyClient = Record<string, any>;
 type Statement = AnyClient;
@@ -381,10 +380,10 @@ export function sqliteDecoder(name: string, kind: Kind): (v: unknown) => unknown
 // one goes as its digits to a parameter of a BIGINT column (the engine's int8), whose INTEGER
 // affinity reads the text as that integer in an insert and a comparison alike, and is refused
 // anywhere else, where the text would stay text.
-function numberOrDigits(v: unknown, type: EngineType | undefined, driver: "sqlite3" | "durable-object" | "d1"): unknown {
+function numberOrDigits(v: unknown, kind: Kind | undefined, driver: "sqlite3" | "durable-object" | "d1"): unknown {
   if (typeof v !== "bigint") return v;
   if (v >= BigInt(Number.MIN_SAFE_INTEGER) && v <= BigInt(Number.MAX_SAFE_INTEGER)) return Number(v);
-  if (type !== undefined && columnKind(type, "sqlite") === "int8") return String(v);
+  if (kind === "int8") return String(v);
   const digits = "pass it as a string of digits, which SQLite stores as that integer in an INTEGER column";
   if (driver === "durable-object") throw new ParameterError(`A Durable Object's SQL storage binds no BigInt, and ${v} is past 2^53 - 1, where a number stops being exact: ${digits}.`);
   if (driver === "d1") throw new ParameterError(`Cloudflare D1 binds no BigInt, and ${v} is past 2^53 - 1, where a number stops being exact: ${digits}.`);
@@ -396,8 +395,7 @@ function numberOrDigits(v: unknown, type: EngineType | undefined, driver: "sqlit
 // one still among the values is one whose place it doesn't know, which these drivers refuse.
 function unplaced(query: QueryModule<"sqlite">, names: readonly string[], values: readonly unknown[], driver: string, infinities = false): void {
   values.forEach((v, i) => {
-    const type = query.inputs?.[names[i]!]?.type;
-    const zero = Object.is(v, -0) && type !== undefined && takesFloat(type, "sqlite");
+    const zero = Object.is(v, -0) && query.inputs?.[names[i]!] !== undefined && takesFloat(kindOf(query, names[i]!));
     if (!zero && !(infinities && (v === Infinity || v === -Infinity))) return;
     throw new ParameterError(`Parameter "${names[i]}" is ${zero ? "-0" : v}, which ${driver} ${zero ? "binds as 0" : "sends as null"}, and Reylo writes it into the statement only where it knows the placeholder's place, which this query doesn't carry: pass ${zero ? "0" : "null"}, or build the query again so that it does.`);
   });
@@ -419,8 +417,8 @@ type Prepared = { readonly query: QueryModule<"sqlite">; readonly bound: Bound }
 /** A SQLite driver's way of running a statement. */
 type SqliteDriver = DriverClient<"sqlite", Prepared>;
 
-/** Each parameter's engine type, by its place in the bound values. */
-const typeAt = (query: QueryModule<"sqlite">, names: readonly string[]) => (i: number) => query.inputs?.[names[i]!]?.type;
+/** Each parameter's kind, by its place in the bound values; undefined for a query without inputs. */
+const typeAt = (query: QueryModule<"sqlite">, names: readonly string[]) => (i: number) => (query.inputs?.[names[i]!] === undefined ? undefined : kindOf(query, names[i]!));
 
 /**
  * Effect SQL's SQLite client (src/effect.ts). D1 and a Durable Object refuse a BigInt, through
@@ -513,7 +511,7 @@ export const d1Driver: SqliteDriver = {
 export const durableObjectDriver: SqliteDriver = {
   label: "exec(sql, ...values) as on a Durable Object's ctx.storage.sql",
   atOnce: (c) => isDurableObjectSql(c),
-  runSync: (c, { query, bound: { text, values, names } }) => runDurableObject(c, text, values.map((v, i) => numberOrDigits(v, query.inputs?.[names[i]!]?.type, "durable-object")), query.columns),
+  runSync: (c, { query, bound: { text, values, names } }) => runDurableObject(c, text, values.map((v, i) => numberOrDigits(v, typeAt(query, names)(i), "durable-object")), query.columns),
 };
 
 /** SQLite Wasm's oo1 Database, and the OpfsDb and OpfsSAHPoolDb that keep one in the origin-private file system. */
@@ -667,7 +665,7 @@ export const sqlite: Runtime<"sqlite"> = {
   // A truth value, which a BOOLEAN column returns, goes as 1 or 0: better-sqlite3 refuses a boolean
   // ("SQLite3 can only bind numbers, strings, bigints, buffers, and null") and libSQL binds `true` as
   // the REAL 1.0. A query without `inputs` gets neither.
-  encode: (_type, v) => (typeof v === "boolean" ? (v ? 1 : 0) : v),
+  encode: (_type, _kind, v) => (typeof v === "boolean" ? (v ? 1 : 0) : v),
 };
 
 /** Every SQLite driver, in the order they are tried, which `defineQuery` passes; a module passes the ones its project installs (src/loader.ts, `moduleDrivers`). */

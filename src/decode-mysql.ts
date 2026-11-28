@@ -27,7 +27,7 @@ import { lastOfEach, namesInResult, rowOf } from "./row.ts";
 import { bigInteger, coerce, DecodeError, describe, ParameterError, truth, utf8, withFraction, type Columns, type Kind } from "./values.ts";
 import { BUN_MYSQL, bunRows } from "./decode.ts";
 import { readMysqlError } from "./query-error.ts";
-import { drizzleDriver, driversOf, knexDriver, literalsAtMarks, takesFloat, vectorParameter, type AnyClient as Client, type Bound, type DriverClient, type Marks, type QueryModule, type Runtime } from "./execute.ts";
+import { drizzleDriver, driversOf, kindOf, knexDriver, literalsAtMarks, takesFloat, vectorParameter, type AnyClient as Client, type Bound, type DriverClient, type Marks, type QueryModule, type Runtime } from "./execute.ts";
 import { bareName, isMysqlSet, type EngineType } from "./engine-type.ts";
 import type { SqlMode } from "./engine-core.ts";
 
@@ -831,8 +831,7 @@ function signedZeros(query: QueryModule<"mysql">, bound: Bound, driver: string):
   // A type its value decides between (`:i + :u`, a BIGINT or a DOUBLE) takes the DOUBLE -0 mysql2
   // binds, as a structured parameter's member does (src/rows.ts).
   const zero = (v: unknown, name: string) => {
-    const type = query.inputs?.[name]?.type;
-    return Object.is(v, -0) && type !== undefined && takesFloat(type, "mysql");
+    return Object.is(v, -0) && query.inputs?.[name] !== undefined && takesFloat(kindOf(query, name));
   };
   const written = query.sqlMode === undefined ? literalsAtMarks(bound, (v, i) => (zero(v, bound.names[i]!) ? "(-0e0)" : undefined)) : bound;
   // One left, where its place is unknown, would be written as 0.
@@ -963,7 +962,7 @@ function mysqlDecoder(name: string, kind: Kind, delim: string | undefined): (v: 
 // array, goes as the text of its floats, `[1,2.5]`, which the engine's `to_vector(?)` reads: drivers
 // left to themselves sent an array as the text "1,2,3" (mysql2's execute() before 3.24) or expanded
 // it into a list of values (mysql2's query(), mariadb).
-function mysqlValue(type: EngineType, v: unknown, name: string): unknown {
+function mysqlValue(type: EngineType, _kind: Kind, v: unknown, name: string): unknown {
   if (type.kind === "array" && isMysqlSet(type) && v instanceof Set) {
     const labels = type.element.type.kind === "enum" ? type.element.type.values.map((l) => l.value) : undefined;
     return (labels === undefined ? [...v] : [...v].sort((a, b) => labels.indexOf(a as string) - labels.indexOf(b as string))).join(",");

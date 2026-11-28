@@ -8,7 +8,7 @@ import { standardQuery, type StandardQueryV1 } from "./standard-query.ts";
 import type { Structured } from "./rows.ts";
 import type { RowBuilder } from "./row.ts";
 import type { Checks } from "./checks.ts";
-import { allReaders, DecodeError, numbersInJson, READ_KINDS, installPostgresTypes, installReaders, ParameterError, scalarKinds, type Columns, type JsonNumbers, type PostgresTypes, type Readers } from "./values.ts";
+import { allReaders, DecodeError, numbersInJson, READ_KINDS, withKinds, installPostgresTypes, installReaders, ParameterError, scalarKinds, type Columns, type JsonNumbers, type PostgresTypes, type Readers } from "./values.ts";
 import { postgresTypes } from "./postgres-types.ts";
 import { codecRuntime } from "./codecs.ts";
 import type { QueryError } from "./query-error.ts";
@@ -239,11 +239,14 @@ export function defineQuery<Params, Row, C extends Cardinality, D extends Dialec
   if (def.dialect === "postgres") installPostgresCatalog(postgresCatalog);
   const drivers = def.drivers ?? DRIVERS[def.dialect];
   const postgres = def.dialect === "postgres" ? { postgresTypes: def.postgresTypes ?? postgresTypes, readers: def.readers ?? allReaders } : {};
-  return define(RUNTIMES[def.dialect] as Runtime<D>, { ...def, codecRuntime: def.codecRuntime ?? codecRuntime, jsonNumbers: def.jsonNumbers ?? numbersInJson, ...(drivers ? { drivers } : {}), ...postgres });
+  if (def.dialect === "postgres") installReaders(postgres.readers!);
+  const inputs = withKinds(def.inputs, def.dialect);
+  return define(RUNTIMES[def.dialect] as Runtime<D>, { ...def, ...(inputs ? { inputs } : {}), codecRuntime: def.codecRuntime ?? codecRuntime, jsonNumbers: def.jsonNumbers ?? numbersInJson, ...(drivers ? { drivers } : {}), ...postgres });
 }
 
 /** A Postgres query, as a module a build step writes defines one (`defineQuery`). */
 export function definePostgresQuery<Params, Row, C extends Cardinality>(def: Omit<QueryDefinition, "dialect"> & { cardinality?: C }): Query<Params, Row, C, "postgres"> {
+  checkReaders(def.columns, def.readers, def.source);
   return define(postgres, def);
 }
 
@@ -265,7 +268,6 @@ export function defineClickhouseQuery<Params, Row, C extends Cardinality>(def: O
 function define<Params, Row, C extends Cardinality, D extends Dialect>(runtime: Runtime<D>, def: Omit<QueryDefinition, "dialect"> & { cardinality?: C }): Query<Params, Row, C, D> {
   const dialect = runtime.dialect;
   if (def.postgresTypes) installPostgresTypes(def.postgresTypes);
-  if (dialect === "postgres") checkReaders(def.columns, def.readers, def.source);
   const cardinality = (def.cardinality ?? "many") as C;
   // Reylo's own errors about the query start with its file.
   const where = def.source ? `${def.source}: ` : "";

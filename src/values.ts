@@ -530,6 +530,12 @@ export function columnKind(t: EngineType, dialect: Dialect): Kind {
   }
 }
 
+/** Each parameter with its kind beside its type (`columnKind`), as a build step writes it, for a query defined by hand. */
+export function withKinds<I extends Readonly<Record<string, { readonly type: EngineType; readonly kind?: Kind }>>>(inputs: I | undefined, dialect: Dialect): I | undefined {
+  if (inputs === undefined) return undefined;
+  return Object.fromEntries(Object.entries(inputs).map(([name, input]) => [name, input.kind === undefined ? { ...input, kind: columnKind(input.type, dialect) } : input])) as unknown as I;
+}
+
 /** The TypeScript type of a scalar kind, `a|b` as the union of both; `unknown` where any part is. */
 export function kindType(kind: Kind): string {
   const parts = kind.split("|").map((k) => TS_TYPE[k as ScalarKind] ?? "unknown");

@@ -10,7 +10,7 @@ import { sqlite, sqliteDrivers } from "../src/decode-sqlite.ts";
 import { clickhouse } from "../src/decode-clickhouse.ts";
 import { codecRuntime } from "../src/codecs.ts";
 import { postgresTypes } from "../src/postgres-types.ts";
-import { allReaders, installPostgresTypes, installReaders, numbersInJson } from "../src/values.ts";
+import { allReaders, installPostgresTypes, installReaders, numbersInJson, withKinds } from "../src/values.ts";
 import type { ClientFor, Dialect, ParamsInput, SyncClientFor } from "../src/execute.ts";
 import { handWritten } from "./helpers.ts";
 
@@ -32,7 +32,7 @@ function runnable<D extends Dialect>(q: QueryModule<D>): run.QueryModule<D> {
   let m = withRuntime.get(q);
   if (!m) {
     const compiled = q.text && q.order ? q : handWritten(q.sql, q.dialect, q.params);
-    withRuntime.set(q, (m = { ...q, text: compiled.text, order: compiled.order, marks: compiled.marks, runtime: RUNTIMES[q.dialect], codecRuntime, jsonNumbers: numbersInJson, drivers: DRIVERS[q.dialect] } as run.QueryModule));
+    withRuntime.set(q, (m = { ...q, inputs: withKinds(q.inputs, q.dialect), text: compiled.text, order: compiled.order, marks: compiled.marks, runtime: RUNTIMES[q.dialect], codecRuntime, jsonNumbers: numbersInJson, drivers: DRIVERS[q.dialect] } as run.QueryModule));
   }
   return m as run.QueryModule<D>;
 }

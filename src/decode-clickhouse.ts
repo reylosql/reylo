@@ -811,7 +811,7 @@ export const clickhouse: Runtime<"clickhouse"> = {
   readError: readClickhouseError,
   decoder: clickhouseDecoder,
   // A value is written as its type's text where the statement runs (`runClickhouse`).
-  encode: (_type, v) => v,
+  encode: (_type, _kind, v) => v,
   clients: "a client of @clickhouse/client or @clickhouse/client-web, whose exec() runs the statement",
 };
 
