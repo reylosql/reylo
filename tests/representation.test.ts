@@ -10,7 +10,7 @@ import { Session } from "../src/analyze.ts";
 import { sqlModule } from "../src/loader.ts";
 import { renderType } from "../src/render.ts";
 import { defineQuery } from "../src/index.ts";
-import { DRIVERS, PG, MYSQL, INDEX, MODULE, driver, sqliteWasmCopy, linkDriver } from "./helpers.ts";
+import { DRIVERS, PG, MYSQL, INDEX, MODULE, driver, sqliteWasmCopy, linkDriver, linkDrivers } from "./helpers.ts";
 
 // Reylo's one representation per SQL type (src/values.ts), on the real drivers, each set up by the
 // app against it: the module a build step writes, run on each, must give the same rows, and each
@@ -27,6 +27,8 @@ function project(...linked: string[]): string {
   writeFileSync(join(root, "package.json"), "{}");
   mkdirSync(join(root, "node_modules"));
   for (const driver of linked) linkDriver(join(root, "node_modules"), driver);
+  // A SQLite test runs on every SQLite driver.
+  if (!linked.length) linkDrivers(join(root, "node_modules"), "sqlite");
   return root;
 }
 

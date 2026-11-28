@@ -248,6 +248,10 @@ export type DriverClient<D extends Dialect = Dialect, P = Bound> = {
   readonly label: string;
   /** The rows of the statement on `c`, or undefined where `c` is not this driver's. */
   run?(c: AnyClient, prepared: P): Promise<unknown[]> | undefined;
+  /** Whether `c` is this driver's and answers at once (SQLite's synchronous clients), which `runSync` then runs on. */
+  atOnce?(c: AnyClient): boolean;
+  /** The rows of the statement on a client `atOnce` took: at once, or a promise where its statement answers with one. */
+  runSync?(c: AnyClient, prepared: P): unknown[] | Promise<unknown[]>;
   /** The driver's client a wrapper runs on (a Drizzle database's), or undefined where `c` is no such wrapper. */
   unwrap?(c: AnyClient): AnyClient | undefined;
   /** The rows of `run` on a connection a wrapper lends (a Knex instance's), or undefined where `c` is no such wrapper. */
@@ -295,7 +299,7 @@ export type Runtime<D extends Dialect = Dialect> = {
   /** SQLite's synchronous clients (better-sqlite3, node:sqlite, bun:sqlite, Turso's compat Database, SQLite Wasm's and sql.js's Database, a Durable Object's SQL storage): the rows at once, or a promise where a statement answers with one. */
   runSync?(c: AnyClient, query: QueryModule<D>, bound: Bound): unknown[] | Promise<unknown[]>;
   /** Whether `c` is one of the clients `runSync` takes, which `.run()` hands to it too. */
-  answersAtOnce?(c: AnyClient): boolean;
+  answersAtOnce?(c: AnyClient, query: QueryModule<D>): boolean;
   /** `.runSync()`'s whole path (`executeSync`), for the database whose clients answer at once: any other database's refuses (`refuseSync`). */
   executeSync?(client: SyncClientFor<D>, query: QueryModule<D>, params: ParamsInput): unknown[];
   /** The clients Drizzle and Knex wrap, for the databases they run on (`wrappers`). */
@@ -385,7 +389,7 @@ export function execute<D extends Dialect>(
   const c = unwrapped(query, client as AnyClient);
   const onConnection = lent(query, c, (connection) => execute(connection as ClientFor<D>, query, params));
   if (onConnection) return onConnection;
-  if (runtime.answersAtOnce?.(c)) return withCodecs(query, syncRows(c, query, params));
+  if (runtime.answersAtOnce?.(c, query)) return withCodecs(query, syncRows(c, query, params));
   const rows = executeAsync(c, query, params);
   const plans = jsonPlans(query);
   const after = runtime.after;
@@ -506,7 +510,7 @@ export const knexDriver: DriverClient = {
 export function executeSync<D extends Dialect>(client: SyncClientFor<D>, query: QueryModule<D>, params: ParamsInput = {}): unknown[] {
   const c = unwrapped(query, client as unknown as AnyClient);
   if (!query.runtime.runSync) throw refuseSync(`a ${query.dialect} statement has none`);
-  if (!query.runtime.answersAtOnce?.(c)) throw refuseSync("this client answers through a promise");
+  if (!query.runtime.answersAtOnce?.(c, query)) throw refuseSync("this client answers through a promise");
   const rows = syncRows(c, query, params);
   if (Array.isArray(rows)) return withCodecs(query, rows) as unknown[];
   rows.catch(() => {});

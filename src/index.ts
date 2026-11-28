@@ -13,8 +13,8 @@ import { postgresTypes } from "./postgres-types.ts";
 import { codecRuntime } from "./codecs.ts";
 import type { QueryError } from "./query-error.ts";
 import { installPostgresCatalog, postgres, postgresCatalog, postgresDrivers } from "./decode.ts";
-import { mysql } from "./decode-mysql.ts";
-import { sqlite } from "./decode-sqlite.ts";
+import { mysql, mysqlDrivers } from "./decode-mysql.ts";
+import { sqlite, sqliteDrivers } from "./decode-sqlite.ts";
 import { clickhouse } from "./decode-clickhouse.ts";
 import { listening, type QueryTrace } from "./trace.ts";
 import { buildTime, type AnalyzeInput, type StatementDescriptor } from "./build-time.ts";
@@ -222,6 +222,9 @@ function checkReaders(columns: Columns | undefined, readers: Readers | undefined
   }
 }
 
+/** Each dialect's drivers, every one, for a query defined by hand; a dialect whose module names none runs on its runtime's own. */
+const DRIVERS: { readonly [D in Dialect]: readonly DriverClient<D, any>[] | undefined } = { postgres: postgresDrivers, mysql: mysqlDrivers, sqlite: sqliteDrivers, clickhouse: undefined };
+
 /** Each dialect's half of the run time, for a query defined by hand, which names its dialect. */
 const RUNTIMES: { readonly [D in Dialect]: Runtime<D> } = { postgres, mysql, sqlite, clickhouse };
 
@@ -234,7 +237,9 @@ const RUNTIMES: { readonly [D in Dialect]: Runtime<D> } = { postgres, mysql, sql
 export function defineQuery<Params, Row, C extends Cardinality, D extends Dialect>(def: QueryDefinition & { dialect: D; cardinality?: C }): Query<Params, Row, C, D> {
   // A query defined by hand may name no columns, whose created types the catalog says.
   if (def.dialect === "postgres") installPostgresCatalog(postgresCatalog);
-  return define(RUNTIMES[def.dialect] as Runtime<D>, { ...def, codecRuntime: def.codecRuntime ?? codecRuntime, jsonNumbers: def.jsonNumbers ?? numbersInJson, ...(def.dialect === "postgres" ? { postgresTypes: def.postgresTypes ?? postgresTypes, readers: def.readers ?? allReaders, drivers: def.drivers ?? postgresDrivers } : {}) });
+  const drivers = def.drivers ?? DRIVERS[def.dialect];
+  const postgres = def.dialect === "postgres" ? { postgresTypes: def.postgresTypes ?? postgresTypes, readers: def.readers ?? allReaders } : {};
+  return define(RUNTIMES[def.dialect] as Runtime<D>, { ...def, codecRuntime: def.codecRuntime ?? codecRuntime, jsonNumbers: def.jsonNumbers ?? numbersInJson, ...(drivers ? { drivers } : {}), ...postgres });
 }
 
 /** A Postgres query, as a module a build step writes defines one (`defineQuery`). */

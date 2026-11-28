@@ -5,8 +5,8 @@
 // by the engine's lexer (`handWritten`): the run time takes a statement without it as written.
 import * as run from "../src/execute.ts";
 import { installPostgresCatalog, postgres, postgresCatalog, postgresDrivers } from "../src/decode.ts";
-import { mysql } from "../src/decode-mysql.ts";
-import { sqlite } from "../src/decode-sqlite.ts";
+import { mysql, mysqlDrivers } from "../src/decode-mysql.ts";
+import { sqlite, sqliteDrivers } from "../src/decode-sqlite.ts";
 import { clickhouse } from "../src/decode-clickhouse.ts";
 import { codecRuntime } from "../src/codecs.ts";
 import { postgresTypes } from "../src/postgres-types.ts";
@@ -18,6 +18,7 @@ import { handWritten } from "./helpers.ts";
 export type QueryModule<D extends Dialect = Dialect> = Omit<run.QueryModule<D>, "runtime" | "codecRuntime">;
 
 const RUNTIMES: { readonly [D in Dialect]: run.Runtime<D> } = { postgres, mysql, sqlite, clickhouse };
+const DRIVERS: { readonly [D in Dialect]: readonly run.DriverClient<D, any>[] | undefined } = { postgres: postgresDrivers, mysql: mysqlDrivers, sqlite: sqliteDrivers, clickhouse: undefined };
 
 // Postgres's rarer types and every reader, as `defineQuery` installs them.
 installPostgresTypes(postgresTypes);
@@ -31,7 +32,7 @@ function runnable<D extends Dialect>(q: QueryModule<D>): run.QueryModule<D> {
   let m = withRuntime.get(q);
   if (!m) {
     const compiled = q.text && q.order ? q : handWritten(q.sql, q.dialect, q.params);
-    withRuntime.set(q, (m = { ...q, text: compiled.text, order: compiled.order, marks: compiled.marks, runtime: RUNTIMES[q.dialect], codecRuntime, jsonNumbers: numbersInJson, ...(q.dialect === "postgres" ? { drivers: postgresDrivers } : {}) } as run.QueryModule));
+    withRuntime.set(q, (m = { ...q, text: compiled.text, order: compiled.order, marks: compiled.marks, runtime: RUNTIMES[q.dialect], codecRuntime, jsonNumbers: numbersInJson, drivers: DRIVERS[q.dialect] } as run.QueryModule));
   }
   return m as run.QueryModule<D>;
 }

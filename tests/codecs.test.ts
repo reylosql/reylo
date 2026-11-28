@@ -312,7 +312,7 @@ test("a project's js.codecs reach the module a build writes and the types it dec
     const { code } = await sqlModule(file, sql);
     assert.match(code, /, codecs: \{"at":"datetime","data":"bytes:string"\}/);
     // The module passes the codecs' run time, which it alone imports.
-    assert.match(code, /^import \{ defineSqliteQuery, codecRuntime \} from "reylo\/module";$/m);
+    assert.match(code, /^import \{ defineSqliteQuery, codecRuntime, [\w, ]+ \} from "reylo\/module";$/m);
     assert.match(code, /, codecRuntime,/);
   } finally {
     for (const session of Session.opened()) await session.close();

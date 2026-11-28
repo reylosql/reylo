@@ -27,7 +27,7 @@ import { lastOfEach, namesInResult, rowOf } from "./row.ts";
 import { bigInteger, coerce, DecodeError, describe, ParameterError, truth, utf8, withFraction, type Columns, type Kind } from "./values.ts";
 import { BUN_MYSQL, bunRows } from "./decode.ts";
 import { readMysqlError } from "./query-error.ts";
-import { literalsAtMarks, takesFloat, vectorParameter, wrappers, type AnyClient as Client, type Bound, type Marks, type QueryModule, type Runtime } from "./execute.ts";
+import { drizzleDriver, driversOf, knexDriver, literalsAtMarks, takesFloat, vectorParameter, type AnyClient as Client, type Bound, type DriverClient, type Marks, type QueryModule, type Runtime } from "./execute.ts";
 import { bareName, isMysqlSet, type EngineType } from "./engine-type.ts";
 import type { SqlMode } from "./engine-core.ts";
 
@@ -880,29 +880,68 @@ function asMariadbValue(v: unknown): unknown {
   return JSON.stringify(v);
 }
 
-/** A MySQL statement's rows on each MySQL driver's client, or undefined on any other client. */
+/** A MySQL statement's rows on the first of the module's drivers that takes `c`, or undefined where none does. */
 async function runMysql(c: Client, query: QueryModule<"mysql">, bound: Bound): Promise<unknown[] | undefined> {
-  const { text, values, marks } = bound;
-  if (typeof c.unsafe === "function") return bunRows(await c.unsafe(text, values), query.columns, BUN_MYSQL);
-  // mariadb, checked before execute() because it has one too (returning rows, not a pair).
-  // Its callback API (mariadb/callback) answers through the callback and returns a command
-  // object; its promise API returns a promise and ignores the callback.
-  if (typeof c.batch === "function" && typeof c.query === "function") {
-    noLists("mariadb", bound);
-    const signed = signedZeros(query, bound, "mariadb");
-    return await mariadb(c, signed.text, signed.values.map((v) => asMariadbValue(asBuffer(v))), query.columns, query.sqlMode, marks);
-  }
-  // mysql2's callback API: the promise() wrapper runs on the same connection.
-  const m = typeof c.promise === "function" ? c.promise() : c;
-  if (typeof m.execute === "function") {
-    // mysql2 has query() beside execute(); PlanetScale's Connection, Client and transaction do not.
-    if (typeof m.query === "function") return await mysql2(m, text, values, query.columns, marks, query.sqlMode);
-    noLists("@planetscale/database", bound);
-    const signed = signedZeros(query, bound, "PlanetScale");
-    return await planetscale(m, signed.text, signed.values, query.columns, query.sqlMode);
+  const prepared: Prepared = { query, bound };
+  for (const driver of driversOf(query)) {
+    const rows = driver.run?.(c, prepared);
+    if (rows !== undefined) return await rows;
   }
   return undefined;
 }
+
+/** A MySQL statement bound for its drivers (src/execute.ts, `DriverClient`). */
+type Prepared = { readonly query: QueryModule<"mysql">; readonly bound: Bound };
+
+/** A MySQL driver's way of running a statement. */
+type MysqlDriver = DriverClient<"mysql", Prepared>;
+
+/** Bun.sql on MySQL, whose clients have unsafe(). */
+export const bunMysqlDriver: MysqlDriver = {
+  label: "unsafe(text, values) as on Bun.sql",
+  run: (c, { query, bound }) => (typeof c.unsafe === "function" ? c.unsafe(bound.text, bound.values).then((rows: unknown[]) => bunRows(rows, query.columns, BUN_MYSQL)) : undefined),
+};
+
+/**
+ * mariadb, checked before execute() because it has one too (returning rows, not a pair). Its
+ * callback API (mariadb/callback) answers through the callback and returns a command object; its
+ * promise API returns a promise and ignores the callback.
+ */
+export const mariadbDriver: MysqlDriver = {
+  label: "query(text, values) as on mariadb's pool or connection, from its promise or callback API",
+  run(c, { query, bound }) {
+    if (typeof c.unsafe === "function" || typeof c.batch !== "function" || typeof c.query !== "function") return undefined;
+    noLists("mariadb", bound);
+    const signed = signedZeros(query, bound, "mariadb");
+    return mariadb(c, signed.text, signed.values.map((v) => asMariadbValue(asBuffer(v))), query.columns, query.sqlMode, bound.marks);
+  },
+};
+
+/** The client a mysql2 callback pool or connection runs on: its promise() wrapper, on the same connection; any other client as it is. */
+const promised = (c: Client): Client => (typeof c.promise === "function" ? c.promise() : c);
+
+/** mysql2's Pool, Connection and PoolConnection, with query() beside execute(), and its callback API through promise(). */
+export const mysql2Driver: MysqlDriver = {
+  label: "execute(text, values) as on mysql2, or a mysql2 callback pool or connection",
+  run(c, { query, bound }) {
+    if (typeof c.unsafe === "function" || (typeof c.batch === "function" && typeof c.query === "function")) return undefined;
+    const m = promised(c);
+    return typeof m.execute === "function" && typeof m.query === "function" ? mysql2(m, bound.text, bound.values, query.columns, bound.marks, query.sqlMode) : undefined;
+  },
+};
+
+/** PlanetScale's Connection, Client and transaction from 1.x, which have execute() and no query(). */
+export const planetscaleDriver: MysqlDriver = {
+  label: "execute(text, values) as on PlanetScale",
+  run(c, { query, bound }) {
+    if (typeof c.unsafe === "function" || (typeof c.batch === "function" && typeof c.query === "function")) return undefined;
+    const m = promised(c);
+    if (typeof m.execute !== "function" || typeof m.query === "function") return undefined;
+    noLists("@planetscale/database", bound);
+    const signed = signedZeros(query, bound, "PlanetScale");
+    return planetscale(m, signed.text, signed.values, query.columns, query.sqlMode);
+  },
+};
 
 /** A column's raw value as its kind, from whatever form the driver read, as a Standard Query's `decode` takes it (src/standard-query.ts). */
 function mysqlDecoder(name: string, kind: Kind, delim: string | undefined): (v: unknown) => unknown {
@@ -936,9 +975,10 @@ function mysqlValue(type: EngineType, v: unknown, name: string): unknown {
 export const mysql: Runtime<"mysql"> = {
   dialect: "mysql",
   run: runMysql,
-  wrappers,
   readError: readMysqlError,
   decoder: mysqlDecoder,
   encode: mysqlValue,
-  clients: "execute(text, values) as on mysql2 and PlanetScale; query(text, values) as on mariadb's pool or connection, from its promise or callback API; unsafe(text, values) as on Bun.sql; a mysql2 callback pool or connection; or a Drizzle database or Knex instance over one of them",
 };
+
+/** Every MySQL driver, in the order they are tried, which `defineQuery` passes; a module passes the ones its project installs (src/loader.ts, `moduleDrivers`). */
+export const mysqlDrivers: readonly DriverClient<"mysql", any>[] = [drizzleDriver, knexDriver, bunMysqlDriver, mariadbDriver, mysql2Driver, planetscaleDriver];

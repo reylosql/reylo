@@ -12,10 +12,10 @@ import { build } from "esbuild";
 import type { Dialect } from "../src/execute.ts";
 import { DRIVERS, ROOT } from "./helpers.ts";
 
-/** Each dialect's drivers and error codes. MySQL's include Bun.sql's reader of rows, which Postgres's module holds (`bunRows`). */
+/** Each dialect's drivers and error codes. */
 const OWN: Record<Dialect, string[]> = {
   postgres: ["src/decode.ts", "src/error-codes-postgres.ts"],
-  mysql: ["src/decode-mysql.ts", "src/decode.ts", "src/error-codes-mysql.ts"],
+  mysql: ["src/decode-mysql.ts", "src/error-codes-mysql.ts"],
   sqlite: ["src/decode-sqlite.ts", "src/error-codes-sqlite.ts"],
   clickhouse: ["src/decode-clickhouse.ts", "src/error-codes-clickhouse.ts"],
 };
@@ -29,32 +29,35 @@ const ELSEWHERE: Record<string, RegExp> = {
   "Postgres's money": /not the C locale's form/,
   "pgvector": /pgvector/,
   "SQLite's synchronous clients": /This sql\.js binds|SQLite Wasm binds/,
-  "Knex": /Knex/,
-  "Slonik": /Slonik/,
-  "PGlite": /PGlite/,
-  "postgres.js": /postgres\.js/,
-  "Bun.sql": /Bun\.sql/,
-  "pg-promise": /pg-promise/,
+  // Each driver by the label its refusal of another client names it with.
+  "Knex": /a Knex instance over/,
+  "Slonik": /a Slonik pool/,
+  "PGlite": /PGlite or its transaction/,
+  "postgres.js": /as on postgres\.js/,
+  "Bun.sql": /as on Bun\.sql/,
+  "pg-promise": /a pg-promise database/,
+  "mariadb": /as on mariadb's pool/,
+  "libSQL": /as on @libsql\/client/,
   "Postgres's catalog reading": /pg_catalog\.pg_attribute/,
   "Postgres's date and time readers": /DateStyle/,
 };
 
-/** What each dialect's bundle of `.run()` on a query of plain columns may hold of `ELSEWHERE`: on Postgres, on pg alone, nothing but pgvector's parameters. */
+/** What each dialect's bundle of `.run()` on a query of plain columns, on its usual driver alone, may hold of `ELSEWHERE`: nothing but pgvector's parameters on Postgres. */
 const HELD: Record<Dialect, string[]> = {
   postgres: ["pgvector"],
-  mysql: ["Knex", "Bun.sql"],
-  sqlite: ["Knex", "Bun.sql", "SQLite's synchronous clients"],
+  mysql: [],
+  sqlite: [],
   clickhouse: [],
 };
 
 /** "reylo/module", which a module a build step writes imports, from the sources. */
 const ALIAS = { "reylo/module": join(ROOT, "src", "module.ts") };
 
-/** The module a build step writes for a statement of one int column, on Postgres on pg alone. */
+/** The module a build step writes for a statement of one int column, on each dialect's usual driver alone: pg, mysql2, better-sqlite3. */
 const MODULE: Record<Dialect, string> = {
   postgres: `import { definePostgresQuery, readNumber, pgDriver } from "reylo/module";\nconst q = definePostgresQuery({ sql: "select 1 as n", params: [], cardinality: "one", columns: [["n", "int"]], readers: { int: readNumber }, drivers: [pgDriver] });`,
-  mysql: `import { defineMysqlQuery } from "reylo/module";\nconst q = defineMysqlQuery({ sql: "select 1 as n", params: [], cardinality: "one", columns: [["n", "int"]] });`,
-  sqlite: `import { defineSqliteQuery } from "reylo/module";\nconst q = defineSqliteQuery({ sql: "select 1 as n", params: [], cardinality: "one", columns: [["n", "int"]] });`,
+  mysql: `import { defineMysqlQuery, mysql2Driver } from "reylo/module";\nconst q = defineMysqlQuery({ sql: "select 1 as n", params: [], cardinality: "one", columns: [["n", "int"]], drivers: [mysql2Driver] });`,
+  sqlite: `import { defineSqliteQuery, syncSqliteDriver } from "reylo/module";\nconst q = defineSqliteQuery({ sql: "select 1 as n", params: [], cardinality: "one", columns: [["n", "int"]], drivers: [syncSqliteDriver] });`,
   clickhouse: `import { defineClickhouseQuery } from "reylo/module";\nconst q = defineClickhouseQuery({ sql: "select 1 as n", params: [], cardinality: "one", columns: [["n", "int"]] });`,
 };
 

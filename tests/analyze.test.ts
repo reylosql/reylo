@@ -736,18 +736,21 @@ test("the module a build step emits carries the analysis and reads nothing at ru
   writeFileSync(file, SELECT);
   // The build steps share one session per project; this one finds the database through .env.
   writeFileSync(join(root, ".env"), `DATABASE_URL=${env.DATABASE_URL}\n`);
+  // An install with no SQLite driver package: the module passes node:sqlite's way, which has none.
+  mkdirSync(join(root, "node_modules"));
   try {
     const { code, entry, watched } = await sqlModule(file, SELECT);
     assert.ok(existsSync(entry));
     // A bundler watches the files the module's text reads besides the statement: here the .env
-    // file, the only one of the project's files that exists.
-    assert.deepEqual(watched, [join(root, ".env")]);
+    // file, the only one of the project's files that exists, and the package.json that says which
+    // drivers the project installs.
+    assert.deepEqual(watched, [join(root, ".env"), join(root, "package.json")]);
     assert.equal(code, [
-      `import { defineSqliteQuery } from "reylo/module";`,
+      `import { defineSqliteQuery, syncSqliteDriver } from "reylo/module";`,
       `export const sql = "select id, name from users where id = ?";`,
       `export const raw = ${JSON.stringify(SELECT)};`,
       `export const params = ["id"];`,
-      `export default defineSqliteQuery({ sql: raw, params, cardinality: "maybeOne", readOnly: true, text: sql, order: ["id"], marks: [[38,39]], inputs: {"id":{"type":{"kind":"integer","bits":64},"nullable":false}}, columns: [["id","int"],["name","text"]], row: (v) => ({ "id": v[0], "name": v[1] }), source: "user.sql", sqlcommenter: true });`,
+      `export default defineSqliteQuery({ sql: raw, params, cardinality: "maybeOne", readOnly: true, text: sql, order: ["id"], marks: [[38,39]], inputs: {"id":{"type":{"kind":"integer","bits":64},"nullable":false}}, columns: [["id","int"],["name","text"]], row: (v) => ({ "id": v[0], "name": v[1] }), source: "user.sql", sqlcommenter: true, drivers: [syncSqliteDriver] });`,
       ``,
     ].join("\n"));
     // A statement in a directory carries its file written with `/`.

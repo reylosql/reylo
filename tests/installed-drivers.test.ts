@@ -10,6 +10,7 @@ import { installedDrivers } from "../src/installed-drivers.ts";
 function project(packages: string[], files: Record<string, string> = {}): string {
   const root = mkdtempSync(join(tmpdir(), "reylo-drivers-"));
   writeFileSync(join(root, "package.json"), "{}");
+  mkdirSync(join(root, "node_modules"));
   for (const name of packages) {
     mkdirSync(join(root, "node_modules", name), { recursive: true });
     writeFileSync(join(root, "node_modules", name, "package.json"), "{}");
@@ -29,6 +30,14 @@ test("a Postgres module passes the drivers its project installs, in the order th
   assert.deepEqual(installedDrivers("postgres", project(["@neondatabase/serverless"]))!.drivers, ["pgDriver", "neonDriver"]);
   // Bun.sql has no package: a Bun lockfile says the app runs on Bun.
   assert.deepEqual(installedDrivers("postgres", project(["knex", "pg"], { "bun.lock": "" }))!.drivers, ["knexDriver", "pgDriver", "bunPostgresDriver"]);
+});
+
+test("a MySQL or SQLite module passes its project's drivers, node:sqlite's way always, and Cloudflare's where wrangler or its config is there", () => {
+  assert.deepEqual(installedDrivers("mysql", project(["mysql2"]))!.drivers, ["mysql2Driver"]);
+  assert.deepEqual(installedDrivers("mysql", project(["mariadb", "@planetscale/database", "drizzle-orm"]))!.drivers, ["drizzleDriver", "mariadbDriver", "planetscaleDriver"]);
+  assert.deepEqual(installedDrivers("sqlite", project(["better-sqlite3"]))!.drivers, ["syncSqliteDriver"]);
+  assert.deepEqual(installedDrivers("sqlite", project(["@libsql/client", "sqlite3"]))!.drivers, ["syncSqliteDriver", "libsqlDriver", "sqlite3Driver"]);
+  assert.deepEqual(installedDrivers("sqlite", project([], { "wrangler.jsonc": "{}" }))!.drivers, ["durableObjectDriver", "syncSqliteDriver", "d1Driver"]);
 });
 
 test("with no node_modules above the file, nothing says which drivers the app has, and the module passes every one", () => {
