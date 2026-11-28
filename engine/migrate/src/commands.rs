@@ -1875,7 +1875,7 @@ async fn leftovers(db: &mut Db, history: &[HistoryRow]) -> Result<Vec<Leftover>,
         let Some(statement) = split_statements(&m.sql, Dialect::Postgres).into_iter().next() else { continue };
         let Some(found) = leftover_filter(&statement.text) else { continue };
         for r in db
-            .rows(&format!("select format('%I.%I', n.nspname, c.relname) as qualified, pg_get_indexdef(c.oid) as def from pg_index i join pg_class c on c.oid = i.indexrelid join pg_namespace n on n.oid = c.relnamespace where not i.indisvalid and not exists (select 1 from pg_stat_progress_create_index p where p.relid = i.indrelid) and {found}"))
+            .rows(&format!("select format('%I.%I', n.nspname, c.relname) as qualified, pg_get_indexdef(c.oid) as def from pg_index i join pg_class c on c.oid = i.indexrelid join pg_namespace n on n.oid = c.relnamespace where not i.indisvalid and not exists (select 1 from pg_locks l join pg_stat_activity a on a.pid = l.pid where l.locktype = 'relation' and l.database = (select d.oid from pg_database d where d.datname = current_database()) and l.relation = i.indrelid and l.mode = 'ShareUpdateExclusiveLock' and l.granted and a.backend_type = 'client backend' and l.pid <> pg_backend_pid()) and {found}"))
             .await?
         {
             out.push(Leftover { migration: m.name.clone(), index: r.text("qualified").to_string(), line: format!("index {} (invalid)", r.text("def")) });
@@ -1932,8 +1932,26 @@ fn leftover_filter(statement: &str) -> Option<String> {
             Some(_) => None,
             // Unnamed, the index takes the name the server chooses: the table's, its columns', then
             // `idx` and a number where that is taken, cut to fit 63 bytes. Only an invalid index
-            // named so is its build's.
-            None => Some(format!(r"{on} and c.relname ~ '_idx[0-9]*$' and (starts_with(c.relname, (select t.relname from pg_class t where t.oid = i.indrelid) || '_') or octet_length(c.relname) >= 56)")),
+            // named so, as unique as the statement's and on exactly its columns, is its build's; one
+            // over expressions is tied to nothing, and deploy refuses to run past it.
+            None => {
+                static USING: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)^using[ \t\n\r\x0B\x0C]+[^ \t\n\r\x0B\x0C(]+[ \t\n\r\x0B\x0C]*").expect("a valid pattern"));
+                static INCLUDE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)^[ \t\n\r\x0B\x0C]*include[ \t\n\r\x0B\x0C]*\(").expect("a valid pattern"));
+                let m = c.get(0)?;
+                // What follows the table: an optional `using <method>`, then the parenthesized columns.
+                let mut after = sql[m.end() - usize::from(m.as_str().ends_with('('))..].trim_start_matches(|c: char| c.is_ascii_whitespace());
+                if let Some(u) = USING.find(after) {
+                    after = &after[u.end()..];
+                }
+                let (keys, rest) = parenthesized(after)?;
+                let included = match INCLUDE.find(rest) {
+                    Some(i) => parenthesized(&rest[i.end() - 1..])?.0,
+                    None => vec![],
+                };
+                let picked = keys.iter().chain(&included).map(|item| Some(format!("(select a.attnum from pg_attribute a where a.attrelid = i.indrelid and a.attname = ((parse_ident({}, false))[1])::name)", literal(index_column(item)?)))).collect::<Option<Vec<_>>>()?;
+                let unique = sql.get(..13).is_some_and(|w| w.eq_ignore_ascii_case("create unique"));
+                Some(format!(r"{on} and c.relname ~ '_idx[0-9]*$' and (starts_with(c.relname, (select t.relname from pg_class t where t.oid = i.indrelid) || '_') or octet_length(c.relname) >= 56) and i.indisunique = {unique} and i.indexprs is null and i.indkey::int2[] = array[{}]::int2[]", picked.join(", ")))
+            }
         };
     }
     if let Some(c) = drop.captures(sql) {
@@ -1944,7 +1962,7 @@ fn leftover_filter(statement: &str) -> Option<String> {
     let option = c.get(1).is_some_and(|o| {
         o.as_str().split(',').any(|o| {
             let words: Vec<String> = o.split_ascii_whitespace().map(|w| w.to_ascii_lowercase()).collect();
-            words.first().is_some_and(|w| w == "concurrently") && !words.get(1).is_some_and(|v| matches!(v.as_str(), "false" | "off" | "0"))
+            words.first().is_some_and(|w| w == "concurrently") && !words.get(1).is_some_and(|v| matches!(v.trim_matches('\''), "false" | "off" | "0"))
         })
     });
     if c.get(3).is_none() && !option {
@@ -1967,11 +1985,72 @@ fn leftover_filter(statement: &str) -> Option<String> {
     ))
 }
 
+/// The comma-separated items of the parenthesized list `text` starts with, each quote and nested
+/// parenthesis kept whole, and the text after the list.
+fn parenthesized(text: &str) -> Option<(Vec<String>, &str)> {
+    let body = text.strip_prefix('(')?;
+    let (mut depth, mut quote, mut item, mut items) = (0usize, None, String::new(), Vec::new());
+    for (k, ch) in body.char_indices() {
+        match quote {
+            Some(q) => {
+                if ch == q {
+                    quote = None;
+                }
+                item.push(ch);
+            }
+            None => match ch {
+                '"' | '\'' => {
+                    quote = Some(ch);
+                    item.push(ch);
+                }
+                '(' => {
+                    depth += 1;
+                    item.push(ch);
+                }
+                ')' if depth == 0 => {
+                    items.push(item.trim().to_string());
+                    return Some((items, &body[k + 1..]));
+                }
+                ')' => {
+                    depth -= 1;
+                    item.push(ch);
+                }
+                ',' if depth == 0 => items.push(std::mem::take(&mut item).trim().to_string()),
+                _ => item.push(ch),
+            },
+        }
+    }
+    None
+}
+
+/// The column an index's item names, ahead of its collation, operator class and order, or none for
+/// an expression.
+fn index_column(item: &str) -> Option<&str> {
+    let end = match item.strip_prefix('"') {
+        Some(inner) => {
+            let mut k = 0;
+            loop {
+                let at = k + inner[k..].find('"')?;
+                if inner[at + 1..].starts_with('"') {
+                    k = at + 2;
+                } else {
+                    break at + 2;
+                }
+            }
+        }
+        None if item.starts_with('(') => return None,
+        None => item.find(|c: char| c.is_ascii_whitespace() || c == '(').unwrap_or(item.len()),
+    };
+    // A name followed by a parenthesis is a function's call.
+    (!item[..end].is_empty() && !item[end..].trim_start().starts_with('(')).then(|| &item[..end])
+}
+
 async fn drop_leftovers(db: &mut Db, leftovers: &[Leftover], log: Log<'_>) -> Result<(), Error> {
     for x in leftovers {
-        // Still invalid, and no build of another session's on its table since the plan read it.
+        // Still invalid, and no build of another session's on its table since the plan read it: a
+        // concurrent build holds a share update exclusive lock on its table, which every role can see.
         let index = format!("'{}'", x.index.replace('\'', "''"));
-        let still = db.rows(&format!("select 1 as one from pg_index i where i.indexrelid = to_regclass({index}) and not i.indisvalid and not exists (select 1 from pg_stat_progress_create_index p where p.relid = i.indrelid)")).await?;
+        let still = db.rows(&format!("select 1 as one from pg_index i where i.indexrelid = to_regclass({index}) and not i.indisvalid and not exists (select 1 from pg_locks l join pg_stat_activity a on a.pid = l.pid where l.locktype = 'relation' and l.database = (select d.oid from pg_database d where d.datname = current_database()) and l.relation = i.indrelid and l.mode = 'ShareUpdateExclusiveLock' and l.granted and a.backend_type = 'client backend' and l.pid <> pg_backend_pid())")).await?;
         if still.is_empty() {
             continue;
         }
@@ -12060,6 +12139,13 @@ mod tests {
         assert_eq!(super::leftover_filter("drop index concurrently U&\"actual_idx\""), None);
         assert_eq!(super::leftover_filter("create index concurrently i on U&\"t\" (x)"), None);
         assert_eq!(f("drop index concurrently app . idx;"), "c.oid = to_regclass('app . idx')");
+        // Unnamed, the build is tied to an index as unique as it and on exactly its columns, and an
+        // expression ties it to nothing.
+        let unnamed = f("create unique index concurrently on t using btree (a, \"B\" desc nulls last) include (c)");
+        assert!(unnamed.contains("i.indisunique = true") && unnamed.contains("parse_ident('a', false)") && unnamed.contains("parse_ident('\"B\"', false)") && unnamed.contains("parse_ident('c', false)"), "{unnamed}");
+        assert!(f("create index concurrently on t(a)").contains("i.indisunique = false"));
+        assert_eq!(super::leftover_filter("create index concurrently on t (lower(email))"), None);
+        assert_eq!(super::leftover_filter("create index concurrently on t ((a + 1))"), None);
         // The table as `only (t)` and `t*` write it.
         assert!(f("create index concurrently i on only (orders) (x)").starts_with("i.indrelid = to_regclass('orders') and"));
         assert!(f("create index concurrently i on orders* (x)").starts_with("i.indrelid = to_regclass('orders') and"));
@@ -12074,6 +12160,7 @@ mod tests {
         assert!(copies("reindex (concurrently) index users_n").contains("to_regclass('users_n')"));
         assert!(copies("reindex (tablespace \"a)b\", concurrently true) table users").contains("o.indrelid in (select to_regclass('users') union"));
         assert_eq!(f("reindex (concurrently false) index users_n"), None);
+        assert_eq!(f("reindex (concurrently 'off') index users_n"), None);
         assert_eq!(f("reindex index users_n"), None);
         assert!(copies("reindex schema concurrently app").contains("to_regnamespace('app')"));
         assert!(copies("reindex database concurrently").contains("and true and"));
