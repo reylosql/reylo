@@ -233,7 +233,15 @@ function declaredColumn(fields: readonly Field[], columns: Columns | undefined, 
   // them takes a declared kind, and each is read by its type, or as its text, never by a guess.
   const count = new Map<string, number>();
   for (const f of fields) count.set(f.name, (count.get(f.name) ?? 0) + 1);
-  return (f) => (count.get(f.name) === 1 ? byName.get(f.name) : undefined);
+  // A field of a built-in type whose kind is not the declared one (a column a migration retyped) is
+  // read by its type. Postgres gives an array of every rank one oid, so an array's kind is compared
+  // without its rank.
+  const rankless = (kind: Kind) => kind.replace(/(?:\[\])+$/, "[]");
+  const fits = (f: Field, c: Columns[number]) => !(SCALAR_OIDS[f.oid] !== undefined || ARRAY_OIDS.has(f.oid)) || rankless(builtin(f.oid)?.kind ?? "") === rankless(c[1]);
+  return (f) => {
+    const c = count.get(f.name) === 1 ? byName.get(f.name) : undefined;
+    return c && fits(f, c) ? c : undefined;
+  };
 }
 
 // ---------------------------------------------------------------------------------------------

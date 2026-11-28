@@ -106,6 +106,16 @@ test("postgres: after a migration adds a column under select *, a created type t
     } finally {
       await freshRank.end();
     }
+    // A row value's column retyped to a built-in type: it is read by its type, not as the row it was.
+    await admin.unsafe(`create type pair as (n int, s text); create table payloads (id int primary key, payload pair); insert into payloads values (1, row(1, 'a'))`);
+    const payloads = await built("payloads", "select * from payloads");
+    await admin.unsafe(`alter table payloads drop column payload; alter table payloads add column payload int; alter table payloads add column note text; update payloads set payload = 42`);
+    const freshPayload = postgres(own.url, { max: 1 });
+    try {
+      assert.deepEqual(await payloads.run(freshPayload), [{ id: 1, payload: 42, note: null }]);
+    } finally {
+      await freshPayload.end();
+    }
     // A column renamed and another added under a name like it: the new one is no declared column.
     await admin.unsafe(`create table moods (id int primary key, mood_list mood[]); insert into moods values (1, '{sad}')`);
     const moods = await built("moods", "select * from moods");
