@@ -1682,8 +1682,10 @@ fn enum_value(kind: &Kind, text: &str) -> Result<Option<String>, &'static str> {
         Kind::Integer(_) if !is_canonical_number(text) || text.contains('.') => Err("no whole number in canonical text"),
         Kind::Integer(i) if !holds_bits(text, i) => Err("past its type's width"),
         Kind::Integer(i) => bounded(&i.bounds),
-        Kind::Float(f) if is_canonical_number(text) && !holds_finite(text, f) => Err("past its type's finite range"),
-        Kind::Float(f) if is_canonical_number(text) => bounded(&f.bounds),
+        Kind::Float(f) if is_canonical_number(text) => {
+            let value = float_value(text, f)?;
+            bounded(&f.bounds).map(|_| Some(value))
+        }
         Kind::Decimal(d) if is_canonical_number(text) && !holds_scale(text, d) => Err("more digits than its type's precision and scales hold"),
         Kind::Decimal(d) if is_canonical_number(text) => bounded(&d.bounds),
         Kind::Float(_) | Kind::Decimal(_) => Err("no number in canonical text"),
@@ -1739,10 +1741,10 @@ fn enum_value(kind: &Kind, text: &str) -> Result<Option<String>, &'static str> {
             Ok(Some(format!("{at}.{fraction}{zone}")))
         }
         Kind::Time(t) => {
-            let (at, fraction, rest) = clock(text).ok_or(FORM)?;
-            // A time of day is told apart as `time_order` orders it, by its `HH:MM:SS` and its
-            // fraction, so that a leap second's `23:59:60` is not `24:00:00`.
-            let time = &text[..8];
+            let Clock { seconds: at, fields: (hours, minutes, seconds), fraction, rest } = clock(text).ok_or(FORM)?;
+            // A time of day is told apart as `time_order` orders it, by its fields and its
+            // fraction, so that a leap second's `23:59:60` is not `24:00:00`, and `12:00` is `12:00:00`.
+            let time = format!("{hours:02}:{minutes:02}:{seconds:02}");
             if t.offset {
                 // Each value keeps its offset; a bound in the same offset limits it.
                 let (east, "") = offset(rest).ok_or(FORM)? else { return Err(FORM) };
@@ -1975,9 +1977,9 @@ fn number(text: &str) -> Option<(bool, i64, String)> {
 /// Where they keep an offset, only two in the same offset compare: the format does not say how
 /// times with different offsets order.
 fn time_order(t: &TimeType, a: &str, b: &str) -> Option<std::cmp::Ordering> {
-    let ((Some(_), a_fraction, a_rest), (Some(_), b_fraction, b_rest)) = (clock(a)?, clock(b)?) else { return None };
-    let same_zone = if t.offset { matches!((offset(a_rest), offset(b_rest)), (Some((Some(x), "")), Some((Some(y), ""))) if x == y) } else { a_rest.is_empty() && b_rest.is_empty() };
-    same_zone.then(|| (&a[..8], a_fraction).cmp(&(&b[..8], b_fraction)))
+    let (a, b) = (clock(a).filter(|c| c.seconds.is_some())?, clock(b).filter(|c| c.seconds.is_some())?);
+    let same_zone = if t.offset { matches!((offset(a.rest), offset(b.rest)), (Some((Some(x), "")), Some((Some(y), ""))) if x == y) } else { a.rest.is_empty() && b.rest.is_empty() };
+    same_zone.then(|| (a.fields, a.fraction).cmp(&(b.fields, b.fraction)))
 }
 
 /// Two dates or times in ISO 8601 compared by their text where both have four-digit years and no
@@ -1988,8 +1990,9 @@ fn text_order(a: &str, b: &str) -> Option<std::cmp::Ordering> {
 }
 
 /// Whether a moment or a time of day, its whole seconds and the digits of its fraction, falls on a
-/// tick, counted from 1970-01-01 or from midnight. A tick no decimal fraction writes exactly
-/// (`1/300`, whose values a source prints rounded) is not read, nor a sum too large to count.
+/// tick. Only a tick that divides a second is read, which steps from every whole second whatever
+/// its origin, and the format names none; nor one no decimal fraction writes exactly (`1/300`,
+/// whose values a source prints rounded), nor a sum too large to count.
 fn on_tick(tick: &str, seconds: i64, fraction: &str) -> bool {
     let (p, q) = tick.split_once('/').unwrap_or((tick, "1"));
     let (Ok(p), Ok(q)) = (p.parse::<i128>(), q.parse::<i128>()) else { return true };
@@ -2000,7 +2003,7 @@ fn on_tick(tick: &str, seconds: i64, fraction: &str) -> bool {
     while rest > 0 && rest % 5 == 0 {
         rest /= 5;
     }
-    if p <= 0 || rest != 1 || fraction.len() > 18 {
+    if p <= 0 || q % p != 0 || rest != 1 || fraction.len() > 18 {
         return true;
     }
     // seconds + fraction / 10^k is a whole number of p/q seconds when (seconds·10^k + fraction)·q
@@ -2011,16 +2014,33 @@ fn on_tick(tick: &str, seconds: i64, fraction: &str) -> bool {
     p.checked_mul(scale).is_none_or(|step| total.rem_euclid(step) == 0)
 }
 
-/// Whether a float type's finite values reach a number's canonical text: below the least magnitude
-/// that rounds to infinity, (2 - 2^-(mantissa+1)) · 2^(2^(exponent-1) - 1). A float wider than a
-/// double holds any.
-fn holds_finite(text: &str, f: &FloatType) -> bool {
+/// The float a number's canonical text writes at a float type's widths, rounded to the nearest, ties
+/// to even, as what tells it from the others (`65504` and `65519` are one binary16), or why there
+/// is none: past the largest finite value. It rounds through a double, so a text halfway between
+/// two of a narrower float's values may round as the double nearest it does. A float wider than a
+/// double is told apart by its text.
+fn float_value(text: &str, f: &FloatType) -> Result<String, &'static str> {
     if f.exponent_bits > 11 || f.mantissa_bits > 52 {
-        return true;
+        return Ok(text.to_string());
     }
-    let Ok(value) = text.parse::<f64>() else { return true };
-    let largest = 2f64.powi((1i32 << (f.exponent_bits - 1)) - 1);
-    value.is_finite() && value.abs() < (2.0 - 2f64.powi(-(f.mantissa_bits as i32) - 1)) * largest
+    let Ok(value) = text.parse::<f64>() else { return Ok(text.to_string()) };
+    let mantissa = f.mantissa_bits as i32;
+    let highest = (1i32 << (f.exponent_bits - 1)) - 1;
+    // The power of two of its leading bit, no lower than the least a normal value has.
+    let leading = ((value.abs().to_bits() >> 52) & 0x7ff) as i32 - 1023;
+    let step = two_to(leading.max(1 - highest) - mantissa);
+    let rounded = (value / step).round_ties_even() * step;
+    let largest = (2.0 - two_to(-mantissa)) * two_to(highest);
+    if !rounded.is_finite() || rounded.abs() > largest {
+        return Err("past its type's finite range");
+    }
+    // -0 equals 0.
+    Ok(format!("{:e}", if rounded == 0.0 { 0.0 } else { rounded }))
+}
+
+/// 2^n as a double, for n from -1074 to 1023, exactly.
+fn two_to(n: i32) -> f64 {
+    if n >= -1022 { f64::from_bits(((n + 1023) as u64) << 52) } else { f64::from_bits(1u64 << (n + 1074)) }
 }
 
 /// Two of a date-bearing kind's values compared as the moments they write ([`moment`]).
@@ -2041,7 +2061,7 @@ fn moment<'a>(kind: &Kind, text: &'a str) -> Option<(Option<i64>, &'a str, &'a s
     let midnight = days.map(|days| days * 86_400);
     let (seconds, fraction, rest) = match (kind, rest.strip_prefix('T')) {
         (Kind::Date(_), None) => return rest.is_empty().then_some((midnight, "", "")),
-        (Kind::DateTime(_) | Kind::Instant(_) | Kind::ZonedDateTime(_), Some(time)) => clock(time)?,
+        (Kind::DateTime(_) | Kind::Instant(_) | Kind::ZonedDateTime(_), Some(time)) => clock(time).map(|c| (c.seconds, c.fraction, c.rest))?,
         _ => return None,
     };
     let at = midnight.zip(seconds).map(|(midnight, seconds)| midnight + seconds);
@@ -2090,14 +2110,18 @@ fn date(text: &str) -> Option<(Option<i64>, &str)> {
 }
 
 /// The time of day an ISO 8601 text starts with in its extended form, `HH:MM:SS` and any fraction
-/// of a second: its seconds from midnight, up to `24:00:00` and with a leap second's `60`, or
-/// `None` for a time no day has (`25:00:00`); the digits of its fraction without a trailing zero;
-/// and the rest of the text. `None` where the text starts with no time in that form.
-fn clock(text: &str) -> Option<(Option<i64>, &str, &str)> {
-    let (hours, minutes, seconds) = (two_digits(text, 0)?, two_digits(text, 3)?, two_digits(text, 6)?);
-    if text.as_bytes()[2] != b':' || text.as_bytes()[5] != b':' {
+/// of a second, or `HH:MM`, up to `24:00:00` and with a leap second's `60`, and the rest of the
+/// text. `None` where the text starts with no time in that form.
+fn clock(text: &str) -> Option<Clock<'_>> {
+    let (hours, minutes) = (two_digits(text, 0)?, two_digits(text, 3)?);
+    if text.as_bytes()[2] != b':' {
         return None;
     }
+    // `HH:MM`, ISO 8601's extended form at a minute's precision, is `HH:MM:00`.
+    let Some(seconds) = two_digits(text, 6).filter(|_| text.as_bytes()[5] == b':') else {
+        let time = (hours < 24 && minutes < 60) || (hours, minutes) == (24, 0);
+        return Some(Clock { seconds: time.then_some(hours * 3_600 + minutes * 60), fields: (hours, minutes, 0), fraction: "", rest: &text[5..] });
+    };
     let (fraction, rest) = match text[8..].strip_prefix('.') {
         Some(after) => match after.bytes().take_while(u8::is_ascii_digit).count() {
             0 => return None,
@@ -2107,7 +2131,19 @@ fn clock(text: &str) -> Option<(Option<i64>, &str, &str)> {
     };
     let fraction = fraction.trim_end_matches('0');
     let time = (hours < 24 && minutes < 60 && seconds <= 60) || (hours, minutes, seconds, fraction) == (24, 0, 0, "");
-    Some((time.then_some(hours * 3_600 + minutes * 60 + seconds), fraction, rest))
+    Some(Clock { seconds: time.then_some(hours * 3_600 + minutes * 60 + seconds), fields: (hours, minutes, seconds), fraction, rest })
+}
+
+/// A time of day as [`clock`] reads it.
+struct Clock<'a> {
+    /// Seconds from midnight, or `None` for a time no day has.
+    seconds: Option<i64>,
+    /// Its hours, minutes and seconds, which order as the time does, a leap second's `60` before
+    /// `24:00:00`.
+    fields: (i64, i64, i64),
+    /// The digits of its fraction of a second without a trailing zero, which order as the fraction does.
+    fraction: &'a str,
+    rest: &'a str,
 }
 
 /// The UTC offset an ISO 8601 text starts with, `Z` or a sign and `HH`, `HH:MM` or `HH:MM:SS`:
@@ -2454,7 +2490,6 @@ mod tests {
             (json!({"kind": "datetime", "tick": "1"}), "2026-01-01 00:00:00"),
             (json!({"kind": "instant", "tick": "1"}), "2026-01-01T09:00:00+09:00"),
             (json!({"kind": "zoned_datetime", "tick": "1"}), "2026-01-01T00:00:00Z"),
-            (json!({"kind": "time", "tick": "1"}), "12:00"),
             (json!({"kind": "time", "tick": "1", "offset": true}), "10:00:00"),
             (json!({"kind": "time", "tick": "1"}), "10:00:00+09:00"),
             // A time with an offset keeps a bound in the same offset.
@@ -2463,7 +2498,6 @@ mod tests {
             (json!({"kind": "zoned_datetime", "tick": "1", "offset_only": true}), "2026-01-01T10:00:00+09:00[Asia/Tokyo]"),
             // A value falls on its type's tick.
             (json!({"kind": "instant", "tick": "1"}), "2026-01-01T00:00:00.5Z"),
-            (json!({"kind": "datetime", "tick": "60"}), "2026-01-01T10:00:30"),
             (json!({"kind": "time", "tick": "1/1000"}), "10:00:00.0005"),
             (json!({"kind": "zoned_datetime", "tick": "1"}), "2026-01-01T10:00:00.5+09:00[Asia/Tokyo]"),
             // A float's value is inside its finite range.
@@ -2473,6 +2507,8 @@ mod tests {
             refused(json!({"kind": "enum", "type": ty, "values": [{"value": value}]}));
         }
         refused(json!({"kind": "enum", "type": {"kind": "integer", "bits": 32}, "values": [{"value": "0"}, {"value": "-0"}]}));
+        refused(json!({"kind": "enum", "type": {"kind": "float", "exponent_bits": 5, "mantissa_bits": 10}, "values": [{"value": "65504"}, {"value": "65519"}]}));
+        refused(json!({"kind": "enum", "type": {"kind": "time", "tick": "60"}, "values": [{"value": "12:00"}, {"value": "12:00:00"}]}));
         refused(json!({"kind": "enum", "type": {"kind": "uuid"}, "values": [{"value": "01890a5d-ac96-7ed0-8f4c-c3b8d0a1b2c3"}, {"value": "01890A5D-AC96-7ED0-8F4C-C3B8D0A1B2C3"}]}));
         refused(json!({"kind": "enum", "type": {"kind": "instant", "tick": "1/1000"}, "values": [{"value": "2026-01-01T00:00:00.5Z"}, {"value": "2026-01-01T00:00:00.500Z"}]}));
         for (ty, values) in [
@@ -2501,7 +2537,13 @@ mod tests {
             (json!({"kind": "instant", "tick": "1/1000"}), json!(["2026-01-01T00:00:00.125Z"])),
             // A tick no decimal fraction writes is not read: a source prints its values rounded.
             (json!({"kind": "datetime", "tick": "1/300"}), json!(["2026-01-01T00:00:00.003"])),
-            (json!({"kind": "float", "exponent_bits": 5, "mantissa_bits": 10}), json!(["65504", "65519"])),
+            (json!({"kind": "float", "exponent_bits": 5, "mantissa_bits": 10}), json!(["65504", "0.1"])),
+            (json!({"kind": "float", "exponent_bits": 5, "mantissa_bits": 10}), json!(["65519"])),
+            // A time at a minute's precision is ISO 8601's extended form too.
+            (json!({"kind": "time", "tick": "60"}), json!(["12:00", "12:01"])),
+            (json!({"kind": "instant", "tick": "60"}), json!(["2026-01-01T10:00Z"])),
+            // A tick past a second says nothing of its origin.
+            (json!({"kind": "instant", "tick": "2"}), json!(["2026-01-01T00:00:01Z", "2026-01-01T00:00:03Z"])),
             (json!({"kind": "float", "exponent_bits": 11, "mantissa_bits": 52}), json!(["179769313486231570000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"])),
         ] {
             let values: Vec<Value> = values.as_array().unwrap().iter().map(|v| json!({"value": v})).collect();
