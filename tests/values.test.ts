@@ -1078,5 +1078,7 @@ test("a driver's own array of JSON keeps its levels where each JSON value is sti
   assert.throws(() => withinDimensions(coerce("json[]", [["1", "2"], ["3", "4"]], "docs", ",", true, true), "json[]", "docs"), /Column "docs" holds an array of 2 dimensions, and its type has one/);
   assert.throws(() => withinDimensions(coerce("json[]", [["1"]], "docs", ",", true, true), "json[]", "docs", undefined, true), /Column "docs" holds an array of 2 dimensions/);
   // A driver that may have parsed each JSON value leaves its levels unknown, so nothing is refused by them.
-  assert.deepEqual(withinDimensions(coerce("json[]", [["\"a\""]], "docs", ",", true), "json[]", "docs"), [["a"]]);
+  assert.deepEqual(withinDimensions(coerce("json[]", [["a"]], "docs", ",", true), "json[]", "docs"), [["a"]]);
+  // Bun.sql's own decoder gives each JSON value decoded, so a JSON string that looks like a number stays a string.
+  assert.deepEqual(coerce("json[]", [["1"], { k: "2" }], "docs", ",", true), [["1"], { k: "2" }]);
 });

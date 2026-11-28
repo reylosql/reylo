@@ -1620,6 +1620,8 @@ export function coerce(kind: Kind, v: unknown, column: string, delim = ",", post
     if (Array.isArray(v)) {
       // A driver's own array, as PGlite's parser gives one, whose arrays are its levels: each whole
       // array in it is still its text.
+      // A driver that decoded each JSON value itself, as Bun.sql's own decoder and PGlite's parsers do, gives them as values, a string among them a JSON string, never text to read again.
+      if (element === "json" && !textElements) return v;
       const out = v.map((e) => (Array.isArray(e) ? coerce(kind, e, column, delim, postgres, textElements) : coerce(element, e, column, ",", postgres)));
       // Its levels are the array's where each whole array, or each JSON value, is still its text, as the caller that passes `textElements` knows; a JSON value the driver parsed may be an array itself, and leaves the levels unknown.
       if (wholeArrayKind(element) !== undefined || (element === "json" && textElements)) {

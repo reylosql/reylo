@@ -204,6 +204,8 @@ test("a jsonb[] member's element is any JSON but an array, which Postgres would 
   const keys: string[] = [];
   assert.deepEqual(prepareRows("docs", docsOf.rows, [{ docs: [null, { toJSON: (key: string) => (keys.push(key), { k: 1 }) }] }], "postgres", true).value, [{ docs: [null, { k: 1 }] }]);
   assert.deepEqual(keys, ["1"]);
+  // What toJSON() returns is written as it is, its own toJSON() never called, as JSON.stringify writes it.
+  assert.deepEqual(prepareRows("docs", docsOf.rows, [{ docs: [{ toJSON: () => ({ ok: true, toJSON: () => [1, 2] }) }] }], "postgres", true).value, [{ docs: [{ ok: true }] }]);
   // An element a schema types is any value of it but an array.
   const typed = structured(false, [["docs", array(checked({ type: ["object", "array"] }), true), "doc[]", true, true]]);
   assert.match(renderParamType(typed.type, "postgres", false, typed.members), /docs\?: \(Exclude<.*, readonly unknown\[\]> \| null\)\[\] \| null/);

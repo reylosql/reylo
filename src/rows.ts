@@ -123,14 +123,16 @@ function jsonMember(f: RowField, v: unknown, dialect: Dialect, fail: (message: s
   return dialect !== "postgres" && f.type.kind === "json" ? new Raw(writeJson(v, dialect, fail)!) : v;
 }
 
-/** What JSON.stringify writes a value as at `key`, read through its toJSON() as it does; `fail` says why a toJSON() that throws gives no JSON value. */
-function jsonOf(v: unknown, key: string, fail: (message: string) => never): unknown {
-  if (v === null || typeof v !== "object" || typeof (v as { toJSON?: unknown }).toJSON !== "function") return v;
+/** The JSON value JSON.stringify writes `v` as at `key`, its toJSON() called once as it calls it there, as plain JSON; `fail` says why there is none. */
+function jsonAt(v: unknown, key: string, fail: (message: string) => never): unknown {
+  if (v === null || typeof v !== "object") return v;
+  let text: string | undefined;
   try {
-    return (v as { toJSON(key: string): unknown }).toJSON(key);
+    text = JSON.stringify({ [key]: v });
   } catch (e) {
     return fail(`holds a JSON value: ${(e as Error).message}.`);
   }
+  return (JSON.parse(text) as Record<string, unknown>)[key];
 }
 
 /**
@@ -185,7 +187,7 @@ function check(type: EngineType, written: string, v: unknown, dialect: Dialect, 
           }
           // Postgres reads a JSON array inside a member as one more dimension of the array, so a JSON element may be anything but one, read as JSON.stringify writes it, through its toJSON() once.
           if (dialect === "postgres" && kind === "json") {
-            const value = jsonOf(e, String(i), at);
+            const value = jsonAt(e, String(i), at);
             if (Array.isArray(value)) return at(`is a JSON array, which an element of ${written} can't be: Postgres reads it as one more dimension of the array. Pass the array as one value of a jsonb column, or wrap it in an object.`);
             return check(type.element.type, element, value, dialect, at);
           }
