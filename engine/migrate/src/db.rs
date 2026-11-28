@@ -800,10 +800,10 @@ pub fn transaction_pooler(url: &str, key: &str) -> Option<String> {
     }
     let rest = &rest[host_start(rest)..];
     let authority = rest[..rest.find(['/', '?']).unwrap_or(rest.len())].to_ascii_lowercase();
-    // The URL's hosts, each with its port where it writes one: an IPv6 address in brackets.
+    // The URL's hosts, each with its port where it writes one: an IPv6 address in brackets. An empty
+    // one keeps its place, as libpq pairs hosts and ports by position, and is no pooler.
     let (mut hosts, mut ports): (Vec<String>, Vec<Option<String>>) = authority
         .split(',')
-        .filter(|chunk| !chunk.is_empty())
         .map(|chunk| match chunk.strip_prefix('[').and_then(|c| c.split_once(']')) {
             Some((host, rest)) => (host.to_string(), rest.strip_prefix(':').map(String::from)),
             None => chunk.split_once(':').map_or((chunk.to_string(), None), |(host, port)| (host.to_string(), Some(port.to_string()))),
@@ -2405,6 +2405,7 @@ mod url_tests {
         assert!(transaction_pooler("postgres://u@/postgres?host=direct.example,aws-1-us-east-1.pooler.supabase.com&port=5432,6543", "").is_some());
         assert!(transaction_pooler("postgres://u@/postgres?host=direct.example,aws-1-us-east-1.pooler.supabase.com&port=6543", "").is_some());
         assert!(transaction_pooler("postgres://u@direct.example:5432,aws-1-us-east-1.pooler.supabase.com:6543/postgres", "").is_some());
+        assert!(transaction_pooler("postgres://u@,aws-1-us-east-1.pooler.supabase.com/postgres?port=5432,6543", "").is_some());
         // An app's own pool has no project file's key to name.
         let pool = transaction_pooler("postgres://neondb_owner@ep-late-darkness-bb241gty-pooler.c-15.us-east-1.aws.neon.tech:5432/neondb", "").expect("Neon's pooled host");
         assert!(pool.ends_with("host ep-late-darkness-bb241gty.c-15.us-east-1.aws.neon.tech"), "{pool}");
