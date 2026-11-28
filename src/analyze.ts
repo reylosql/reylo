@@ -46,7 +46,7 @@ export type Outcome =
  * the schema changes. On SQLite, `drivers` are the app's own, which each statement is prepared on
  * too (src/sqlite-drivers.ts).
  */
-type Io = { analyze(sql: string): Promise<Analysis>; query(sql: string, params: unknown[]): Promise<unknown[][]>; schema(): Promise<Schema>; forget(): Promise<void>; close(): Promise<void>; drivers?: SqliteDriver[] };
+type Io = { analyze(sql: string, label?: string): Promise<{ analysis: Analysis; kept: boolean; after?: string; again?: boolean }>; query(sql: string, params: unknown[]): Promise<unknown[][]>; schema(): Promise<Schema>; forget(): Promise<void>; close(): Promise<void>; drivers?: SqliteDriver[] };
 
 const ENTRY_VERSION = 1;
 // How long a schema fingerprint is trusted, as long as a statement answer: a migration shows up
@@ -343,12 +343,16 @@ export class Session {
     const shared = options.force || options.store === false ? undefined : this.#sameSchema(sql, schema.value);
     if (shared) return { ok: true, analysis: shared.entry.analysis, source: "cache", entry: shared.file };
     let analysis: Analysis;
+    let replicas = true;
+    let after: string | undefined;
+    let again: boolean | undefined;
     let label: string = schema.value;
     let stamp = this.#schema?.stamp;
     for (let tries = 1; ; tries++) {
       const io = this.#connection();
       try {
-        analysis = await (await io).analyze(sql);
+        // The label goes with the analysis only where it may be kept under it.
+        ({ analysis, kept: replicas, after, again } = await (await io).analyze(sql, options.store === false || label.startsWith("unverified ") ? undefined : label));
       } catch (e) {
         // A dead connection is reopened by the next call; a server error is reported.
         if (e instanceof Unreachable) {
@@ -373,11 +377,16 @@ export class Session {
       // answers are dropped (`schema()`) and the statement analyzed again. Where the database keeps a
       // stamp (SQLite), a stamp that moved is a schema that changed in between, even one changed
       // back to the same fingerprint, so the statement is analyzed again then too.
-      await this.recheck();
+      // On ClickHouse the engine read it after the analysis itself, from the servers that answered it.
+      if (after !== undefined) await this.#took(await io, { fingerprint: after, stamp: null }, Date.now());
+      else await this.recheck();
       const read = await this.schema();
       const now = read.value;
       const moved = this.#schema?.stamp;
-      if (now === label && moved === stamp) break;
+      // One kept back for a replica that had not shown the schema yet, which the engine read
+      // after the analysis, is analyzed again while the schema stands, unless the engine says no
+      // try would keep it, as where it can't tell the servers that answered apart.
+      if (now === label && moved === stamp && (replicas || again === false || tries === ANALYSES)) break;
       // A read that found the database gone leaves the next statement to try it again, rather than a minute offline.
       if (now === null && !read.fatal) this.#schema = undefined;
       if (now === null || now.startsWith("unverified ") || tries === ANALYSES) return { ok: true, analysis, source: "database", entry: file };
@@ -388,11 +397,13 @@ export class Session {
     // statement's, which the engine's host fails the analysis with and which would stand for the
     // statement until the schema moved, is not kept, nor one a privilege decides, since a grant
     // moves no schema's fingerprint (src/server-errors.ts).
+    // Nor is one whose answers came from replicas that did not show the schema it would be kept by
+    // throughout, though nothing shows it wrong: the next analysis asks again.
     const kept = keptAnalysis(this.project.dialect, analysis);
-    if (options.store !== false && kept) {
+    if (options.store !== false && kept && replicas) {
       writeEntry(this.project.cache, file, { version: ENTRY_VERSION, dialect: this.project.dialect, schema: label, analysis, at: Date.now() });
       this.#prune(sql, file);
-    } else if (options.store !== false) {
+    } else if (options.store !== false && !kept) {
       // An entry of an older schema is no answer where the database now refuses the statement, so
       // a build with the database out of reach does not build from it.
       try {
@@ -422,13 +433,7 @@ export class Session {
       return this.#schema;
     }
     try {
-      const { fingerprint: value, stamp } = await io.schema();
-      // The engine's answers describe the old schema too, and outlast a spell offline: a schema
-      // whose stamp moved may have been another in between, whatever its fingerprint is now.
-      const known = JSON.stringify([value, stamp]);
-      if (this.#known !== undefined && this.#known !== known) await io.forget().catch(() => {});
-      this.#known = known;
-      this.#schema = { value, stamp, at: now };
+      await this.#took(io, await io.schema(), now);
     } catch (e) {
       if (e instanceof Unreachable) {
         this.#drop(pending);
@@ -442,7 +447,17 @@ export class Session {
         this.#known = value;
       }
     }
-    return this.#schema;
+    return this.#schema!;
+  }
+
+  /** The fingerprint read at `at`, as the session's own. */
+  async #took(io: Io, { fingerprint: value, stamp }: Schema, at: number): Promise<void> {
+    // The engine's answers describe the old schema too, and outlast a spell offline: a schema
+    // whose stamp moved may have been another in between, whatever its fingerprint is now.
+    const known = JSON.stringify([value, stamp]);
+    if (this.#known !== undefined && this.#known !== known) await io.forget().catch(() => {});
+    this.#known = known;
+    this.#schema = { value, stamp, at };
   }
 
   /**
@@ -571,7 +586,7 @@ export class Session {
         }
       };
       return {
-        analyze: (sql) => again((on) => on.analyze(sql)),
+        analyze: (sql, label) => again((on) => on.analyze(sql, label)),
         query: (text, params) => again((on) => on.query(text, params)),
         schema: () => again((on) => on.schema()),
         forget: () => again((on) => on.forget()),
@@ -627,7 +642,7 @@ export class Session {
       throw e;
     }
     return {
-      analyze: (sql) => c.analyze(sql),
+      analyze: (sql, label) => c.analyzeFor(sql, label),
       query: (text, params) => c.query(text, params),
       schema: () => c.schema(),
       forget: () => c.forget(),
