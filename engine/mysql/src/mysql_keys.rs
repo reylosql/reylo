@@ -776,10 +776,7 @@ fn calls_unvouched(e: &Expr) -> bool {
         Expr::Subquery(q) => lists_unvouched(q),
         // EXISTS reads no value of its subquery's select list, only whether a row passes, unless a
         // HAVING reads the list by an alias.
-        Expr::Exists { subquery, .. } => match plain(subquery) {
-            Some(s) if s.having.is_none() => s.selection.iter().any(calls_unvouched),
-            _ => lists_unvouched(subquery),
-        },
+        Expr::Exists { subquery, .. } => reads_unvouched(subquery, plain(subquery).is_none_or(|s| s.having.is_some())),
         Expr::InSubquery { expr, subquery, .. } => calls_unvouched(expr) || lists_unvouched(subquery),
         Expr::MatchAgainst { .. } => false,
         _ => true,
@@ -806,25 +803,19 @@ fn materialized(q: &Query) -> bool {
 }
 
 /// Whether a query, or a derived table or WITH query inside it, lists a value [`calls_unvouched`]
-/// makes: the server may merge each level into the one around it.
+/// makes, or decides which rows it keeps by one: the server may merge each level into the one
+/// around it.
 fn lists_unvouched(q: &Query) -> bool {
-    if let Some(w) = &q.with {
-        // The WITH queries its body reads, and those they read in turn, as names it parses: one
-        // it never reads is never computed for its rows.
-        let mut read = tables_anywhere(&Query { with: None, ..q.clone() }, None);
-        let mut used = vec![false; w.cte_tables.len()];
-        for (at, c) in w.cte_tables.iter().enumerate().rev() {
-            if read.iter().any(|t| crate::mysql_names::may_match(t, &c.alias.name.value)) {
-                used[at] = true;
-                read.extend(tables_anywhere(&c.query, None));
-            }
-        }
-        if w.cte_tables.iter().zip(&used).any(|(c, used)| *used && lists_unvouched(&c.query)) {
-            return true;
-        }
+    reads_unvouched(q, true)
+}
+
+/// [`lists_unvouched`], reading the select list only where `listed`: EXISTS reads no value of it.
+fn reads_unvouched(q: &Query, listed: bool) -> bool {
+    if q.with.iter().flat_map(|w| &w.cte_tables).any(|c| lists_unvouched(&c.query)) {
+        return true;
     }
     if let SetExpr::Query(inner) = q.body.as_ref() {
-        return lists_unvouched(inner);
+        return reads_unvouched(inner, listed);
     }
     fn factor(f: &TableFactor) -> bool {
         match f {
@@ -834,9 +825,10 @@ fn lists_unvouched(q: &Query) -> bool {
         }
     }
     plain(q).is_some_and(|s| {
-            s.projection.iter().any(|item| matches!(item, SelectItem::UnnamedExpr(e) | SelectItem::ExprWithAlias { expr: e, .. } if calls_unvouched(e)))
-                || s.from.iter().any(|twj| factor(&twj.relation) || twj.joins.iter().any(|j| factor(&j.relation)))
-        })
+        (listed && s.projection.iter().any(|item| matches!(item, SelectItem::UnnamedExpr(e) | SelectItem::ExprWithAlias { expr: e, .. } if calls_unvouched(e))))
+            || s.selection.iter().chain(s.having.iter()).any(calls_unvouched)
+            || s.from.iter().any(|twj| factor(&twj.relation) || twj.joins.iter().any(|j| factor(&j.relation)))
+    })
 }
 
 /// The terms of a condition's top-level `AND`.

@@ -3864,6 +3864,8 @@ mod tests {
             "select distinct x.v from users u, (select pick() in (select 1) as v from posts where id = 1) x",
             "select distinct x.v from users u, (with c as (select id, pick() as v from posts) (select id, v from c)) x where x.id = 1",
             "select distinct x.v from users u, (select exists(select pick() as r from posts having r = 1) as v from posts p where p.id = 1) x",
+            "select distinct x.v from users u, (select exists(select 1 from posts where id = 1 having pick() = p.id) as v from posts p where p.id = 1) x",
+            "select distinct x.v from users u, (select exists(select 1 from posts where id = 1 and pick() = p.id having 1 = 1) as v from posts p where p.id = 1) x",
         ] {
             assert_eq!(rows(sql), "many", "{sql}");
         }
@@ -3871,9 +3873,8 @@ mod tests {
         for sql in [
             "select distinct x.v from users u, (select pick() as v from posts limit 1) x",
             "select distinct x.v from users u, (select max(pick()) as v from posts) x",
-            // EXISTS reads no value of its select list, and a WITH query nothing reads is never computed.
+            // EXISTS reads no value of its select list.
             "select distinct x.v from users u, (select exists(select pick() from posts) as v from posts where id = 1) x",
-            "select distinct x.v from users u, (with c as (select pick() from posts) (select id, user_id as v from posts)) x where x.id = 1",
         ] {
             assert_eq!(rows(sql), "at_most_one", "{sql}");
         }
