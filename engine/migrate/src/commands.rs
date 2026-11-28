@@ -3435,7 +3435,7 @@ async fn api_began_replaying(server: &mut Server, opts: &Options, order: &[Migra
                 if first.is_none() && crate::catalog::without_extra_children(live, &now) == now {
                     first = Some(k);
                 }
-                if k < order.len() && run(shadows.db(lane), &order[k]).await.is_err() {
+                if k < order.len() && shadows.run(lane, &order[k]).await.is_err() {
                     return Ok(None);
                 }
             }
@@ -3495,7 +3495,7 @@ fn api_privileges_in(text: &str) -> Vec<crate::db::ApiPrivilege> {
 }
 
 /// The extensions a text creates.
-fn extensions_in(text: &str) -> Vec<String> {
+pub(crate) fn extensions_in(text: &str) -> Vec<String> {
     static EXTENSION: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"(?i)\bcreate\s+extension\s+(?:if\s+not\s+exists\s+)?"?([A-Za-z0-9_-]+)"?"#).expect("a valid pattern"));
     // What a comment says creates nothing: matched in the text with comments taken out.
     let uncommented = crate::sql::tokenize(text, Dialect::Postgres).iter().map(|token| token.text.clone()).collect::<Vec<_>>().join(" ");
@@ -5060,7 +5060,13 @@ async fn pending_findings(shadows: &mut Shadows<'_>, target: &mut Db, ran: &[Mig
     let mut timed = false;
     let mut out = Vec::new();
     for m in pending {
-        let hazards = match crate::locks::run_watched(shadows.db(lane), m).await {
+        let pg_cron = shadows.before(lane, &m.sql).await?;
+        let watched = crate::locks::run_watched(shadows.db(lane), m).await;
+        let watched = match watched {
+            Ok(found) => shadows.after(lane, pg_cron, Ok(())).await?.map(|()| found),
+            Err(e) => shadows.after(lane, pg_cron, Err(e)).await?.map(|()| Vec::new()),
+        };
+        let hazards = match watched {
             Ok(found) => found,
             // The check already tried each pending migration: one that fails here says nothing more.
             Err(_) => break,
@@ -6600,7 +6606,7 @@ async fn history_push_on(db: &mut Db, server: &mut Server, opts: &Options, init:
             if k == order.len() {
                 break;
             }
-            if let Err(e) = run(shadows.db(lane), &order[k]).await {
+            if let Err(e) = shadows.run(lane, &order[k]).await {
                 return Ok(Err(format!("{} fails when replayed in a shadow database: {e}", order[k].name)));
             }
         }
@@ -9127,7 +9133,10 @@ async fn draft_with(opts: &Options, files: &[Migration], schema_sql: &str, targe
             }
             Ok((None, hazards))
         };
+        let planned = plan.runnable().cloned().collect::<Vec<_>>().join(";\n");
+        let pg_cron = shadows.before(c, &planned).await?;
         let (mut failed, mut hazards) = run_pieces(shadows.db(c), pieces(&split, &plan)).await?;
+        failed = shadows.after(c, pg_cron, failed.map_or(Ok(()), |e| Err(Error(e)))).await?.err().map(|e| e.0);
         // On MySQL each statement is a file of its own: a table an earlier one made has no rows.
         if d == Dialect::Mysql {
             let made = crate::locks::mysql_tables_made(plan.runnable().map(String::as_str));
@@ -9160,7 +9169,9 @@ async fn draft_with(opts: &Options, files: &[Migration], schema_sql: &str, targe
                     let file = Migration { name: "moves".into(), time: String::new(), path: PathBuf::new(), sql: moves.iter().map(|m| format!("{m};")).collect::<Vec<_>>().join("\n") };
                     run(shadows.db(c2), &file).await?;
                 }
+                let pg_cron = shadows.before(c2, &planned).await?;
                 (failed, hazards) = run_pieces(shadows.db(c2), pieces(&shape, &plan)).await?;
+                failed = shadows.after(c2, pg_cron, failed.map_or(Ok(()), |e| Err(Error(e)))).await?.err().map(|e| e.0);
                 reached = catalog(shadows.db(c2)).await?;
                 let note = match (&shape, commits) {
                     (Some(_), _) => format!("  {} Drops each index it replaces before it builds the new one: built first, the new ones didn't reach {target_name}", paint("yellow", "!")),
@@ -11479,10 +11490,13 @@ async fn dev_in_shadows(shadows: &mut Shadows<'_>, db: &mut Db, opts: &Options, 
                 shadows.taint(lane);
                 let plan = plan_between(shadows.db(lane), db, None).await?;
                 let statements: Vec<String> = plan.runnable().cloned().collect();
-                if let Ok(Ok(())) = run_to(shadows.db(lane), &statements, &[], &base).await {
+                let pg_cron = shadows.before(lane, &statements.join(";\n")).await?;
+                let reached = run_to(shadows.db(lane), &statements, &[], &base).await;
+                shadows.after(lane, pg_cron, Ok(())).await??;
+                if let Ok(Ok(())) = reached {
                     runs = true;
                     for m in &pending {
-                        if run(shadows.db(lane), m).await.is_err() {
+                        if shadows.run(lane, m).await.is_err() {
                             runs = false;
                             break;
                         }

@@ -141,6 +141,29 @@ impl P {
         Some(P { d, dir, url, name, lines: vec![], t, strict: false, server: None })
     }
 
+    /// A project and, fresh, the one database pg_cron makes itself in: the one `cron.database_name`
+    /// names on the server `REYLO_TEST_PG_CRON` names, a Postgres that loads pg_cron. None where it
+    /// is not set.
+    async fn pg_cron() -> Option<P> {
+        let Ok(base) = std::env::var("REYLO_TEST_PG_CRON") else {
+            eprintln!("skipped: no test server with pg_cron");
+            return None;
+        };
+        let mut p = P::new(Dialect::Postgres).await?;
+        // Its database on the other test server goes unused.
+        let mut other = Db::connect(&with_database(&p.url, "postgres"), &p.dir).await.unwrap();
+        other.exec(&format!("drop database if exists {} with (force)", p.name)).await.unwrap();
+        other.close().await;
+        let mut admin = Db::connect(&base, &p.dir).await.unwrap();
+        let name = admin.rows("select current_setting('cron.database_name') as n").await.unwrap()[0].text("n").to_string();
+        admin.exec(&format!("drop database if exists {name} with (force)")).await.unwrap();
+        admin.exec(&format!("create database {name}")).await.unwrap();
+        admin.close().await;
+        p.url = with_database(&base, &name);
+        p.name = name;
+        Some(p)
+    }
+
     /// A project and a fresh database on a libSQL server of its own (Turso's dialect, SQLite).
     async fn turso() -> Option<P> {
         let mut p = P::new(Dialect::Sqlite).await?;
@@ -4369,6 +4392,86 @@ on!(
     a_foreign_key_added_back_under_another_name_holds_through_its_keys_swap,
     a_partitioned_tables_foreign_key_holds_through_its_keys_swap,
 );
+
+/// pg_cron makes itself only in the database `cron.database_name` names, which no shadow is: a project
+/// that creates it, and one that finds it made, schedule jobs from their migrations all the same.
+#[test]
+fn a_project_with_pg_cron_replays_in_shadows() {
+    on_a_main_threads_stack(|| async {
+        let Some(mut p) = P::pg_cron().await else { return };
+        let int = p.t.int;
+        p.exec(&format!("create extension pg_cron; create table runs (id {int}); select cron.schedule('nightly', '0 3 * * *', 'delete from runs')")).await;
+        assert_eq!(p.run(async |o, log| reylo_migrate::init(o, &[], log).await).await, 0, "{}", p.peek());
+        p.output();
+        assert_has!(std::fs::read_to_string(p.dir.join("migrations").join("init.sql")).unwrap(), r"(?i)create extension[^;]*pg_cron");
+        p.file("20261126100000_hourly.sql", "select cron.schedule('hourly', '0 * * * *', 'select 1');");
+        let (code, out) = p.check_every_way().await;
+        assert_eq!(code, 0, "{out}");
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        assert_eq!(p.rows("select jobname from cron.job order by 1").await.iter().map(|r| r.text("jobname").to_string()).collect::<Vec<_>>(), ["hourly", "nightly"]);
+        assert!(p.rows("select 1 from pg_database where datname = 'contrib_regression'").await.is_empty(), "a shadow kept pg_cron's name");
+
+        // A shadow a run cut off left under pg_cron's name is swept; a database of that name that is no
+        // shadow stays, and keeps every shadow from taking the name.
+        let base = std::env::var("REYLO_TEST_PG_CRON").unwrap();
+        let mut admin = Db::connect(&base, &p.dir).await.unwrap();
+        admin.exec("create database contrib_regression").await.unwrap();
+        admin.exec("comment on database contrib_regression is 'reylo shadow reylo_shadow_0000000000'").await.unwrap();
+        reylo_migrate::cache::set_enabled(Some(false));
+        assert_eq!(p.dry_run().await, 0, "{}", p.peek());
+        assert!(p.rows("select 1 from pg_database where datname = 'contrib_regression'").await.is_empty(), "a shadow left under pg_cron's name stayed");
+        admin.exec("create database contrib_regression").await.unwrap();
+        p.output();
+        assert_ne!(p.dry_run().await, 0, "{}", p.peek());
+        assert_has!(p.output(), r"named contrib_regression that is no shadow");
+        reylo_migrate::cache::set_enabled(None);
+        admin.exec("drop database contrib_regression").await.unwrap();
+        admin.close().await;
+        forget(&p.url).await;
+
+        // A pending migration that makes it, which deploy's dry run replays and then runs step by step.
+        let Some(mut q) = P::pg_cron().await else { return };
+        q.file("20261126100000_runs.sql", &format!("create extension pg_cron; create table runs (id {int}); select cron.schedule('nightly', '0 3 * * *', 'delete from runs');"));
+        q.schema(&format!("create extension pg_cron; create table runs (id {int});"));
+        assert_eq!(q.dry_run().await, 0, "{}", q.peek());
+        assert_eq!(q.migrate().await, 0, "{}", q.peek());
+        // One that drops it and makes it again, in a shadow that has it.
+        q.file("20261126110000_again.sql", "drop/* again */extension\nif exists \"legacy;extension\", pg_cron; create extension pg_cron;");
+        assert_eq!(q.dry_run().await, 0, "{}", q.peek());
+        assert_eq!(q.migrate().await, 0, "{}", q.peek());
+        q.file("20261126120000_in_a_block.sql", "do $$ begin drop extension pg_cron; end $$; create extension pg_cron;");
+        assert_eq!(q.dry_run().await, 0, "{}", q.peek());
+        assert_eq!(q.migrate().await, 0, "{}", q.peek());
+        q.file("20261126130000_in_a_procedure.sql", "create procedure remove_cron() language plpgsql as $p$ begin drop extension pg_cron; end $p$; call remove_cron(); create extension pg_cron; drop procedure remove_cron();");
+        assert_eq!(q.dry_run().await, 0, "{}", q.peek());
+        assert_eq!(q.migrate().await, 0, "{}", q.peek());
+        assert!(q.rows("select 1 from pg_database where datname = 'contrib_regression'").await.is_empty(), "a shadow kept pg_cron's name");
+        forget(&q.url).await;
+
+        // Made on the database by hand, it is the environment's, which every shadow is given.
+        let Some(mut e) = P::pg_cron().await else { return };
+        e.exec("create extension pg_cron").await;
+        e.file("20261126100000_runs.sql", &format!("create table runs (id {int}); select cron.schedule('nightly', '0 3 * * *', 'delete from runs');"));
+        e.schema(&format!("create table runs (id {int});"));
+        assert_eq!(e.dry_run().await, 0, "{}", e.peek());
+        assert_has!(e.output(), r"Tried the pending migration on a shadow database");
+        forget(&e.url).await;
+
+        // On another database of the server, pg_cron refuses the target, and so each shadow refuses it too.
+        let Some(mut o) = P::pg_cron().await else { return };
+        let base = std::env::var("REYLO_TEST_PG_CRON").unwrap();
+        let mut admin = Db::connect(&base, &o.dir).await.unwrap();
+        admin.exec("drop database if exists reylo_cron_beside with (force)").await.unwrap();
+        admin.exec("create database reylo_cron_beside").await.unwrap();
+        o.url = with_database(&base, "reylo_cron_beside");
+        o.file("20261126100000_cron.sql", "create extension pg_cron;");
+        assert_ne!(o.dry_run().await, 0, "{}", o.peek());
+        assert_has!(o.output(), r"can only create extension in database");
+        forget(&o.url).await;
+        admin.exec("drop database if exists reylo_cron_beside with (force)").await.unwrap();
+        admin.close().await;
+    });
+}
 
 #[tokio::test(flavor = "current_thread")]
 async fn a_sqlite_numeric_column_made_integer_needs_no_drop() {

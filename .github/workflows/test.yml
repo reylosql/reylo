@@ -368,6 +368,18 @@ jobs:
           sudo apt-get install -y --no-install-recommends postgresql-client-18
           /usr/lib/postgresql/18/bin/pg_dump --version
           echo /usr/lib/postgresql/18/bin >> "$GITHUB_PATH"
+      # pg_cron makes itself only in the database cron.database_name names, which no shadow is, and a server
+      # loads it only at start: a cluster of its own, for the migrations' pg_cron scenario.
+      - name: Start a Postgres 18 that loads pg_cron
+        run: |
+          # The package would make and start a cluster of its own too.
+          echo 'create_main_cluster = false' | sudo tee -a /etc/postgresql-common/createcluster.conf
+          sudo apt-get install -y --no-install-recommends postgresql-18 postgresql-18-cron
+          dir="$RUNNER_TEMP/pgcron"
+          /usr/lib/postgresql/18/bin/initdb -D "$dir" -U postgres --auth=trust -E UTF8 --locale=C
+          printf "shared_preload_libraries = 'pg_cron'\ncron.database_name = 'reylo_cron'\nport = 25435\nlisten_addresses = '127.0.0.1'\nunix_socket_directories = '%s'\n" "$dir" >> "$dir/postgresql.conf"
+          /usr/lib/postgresql/18/bin/pg_ctl -D "$dir" -l "$dir/log" -w start
+          echo "REYLO_TEST_PG_CRON=postgres://postgres@127.0.0.1:25435/postgres" >> "$GITHUB_ENV"
       - name: Install sqld, libSQL's server
         run: |
           curl -fsSL -o "$RUNNER_TEMP/sqld.tar.xz" https://github.com/tursodatabase/libsql/releases/download/libsql-server-v0.24.32/libsql-server-x86_64-unknown-linux-gnu.tar.xz
