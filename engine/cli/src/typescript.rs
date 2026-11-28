@@ -541,7 +541,7 @@ const JSON_INPUT_TYPE: &str = "JsonInput";
 const NO_CODECS: &Value = &Value::Null;
 
 /// The form Postgres writes `t` in inside a JSON document, of those `json_image` names
-/// (src/schema.ts, `postgresInJson`): a built-in structure is known by its own label, which a type
+/// (src/in-document.ts, `postgresInJson`): a built-in structure is known by its own label, which a type
 /// of another schema never has, and any other type, pgvector's among them, by its name in whatever
 /// schema its extension was created in.
 fn postgres_json_image(t: &Value) -> Option<&'static str> {
@@ -675,7 +675,7 @@ fn render_type(t: &Value, in_json: bool, dialect: &str, codecs: &Value) -> Strin
         "enum" => return enum_literal(t, &render_type(&t["type"], in_json, dialect, codecs)),
         "tuple" => return tuple_of(t, &|e| render_type(e, in_json, dialect, codecs)),
         "array" => {
-            // A SET is its text inside a document, but on SQLite, which has none, any JSON (src/schema.ts, `inDocument`).
+            // A SET is its text inside a document, but on SQLite, which has none, any JSON (src/in-document.ts, `inDocument`).
             if is_mysql_set(t) {
                 return if !in_json && dialect == "mysql" { format!("Set<{}>", render_type(&t["element"]["type"], false, dialect, codecs)) } else if in_json && dialect == "sqlite" { JSON_TYPE.into() } else { "string".into() };
             }

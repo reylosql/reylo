@@ -1433,15 +1433,18 @@ fn json_admits(ty: &Type, json: &Value) -> bool {
 }
 
 /// Whether a text is a value of a date, time, timestamp or UUID kind as Postgres writes one inside
-/// a document (`JsonEncodeDateTime`, in XSD's style): a year of four digits or more, ` BC` after one
-/// before the year 1, the fraction of a second where it is not zero, a UTC offset in hours and
-/// minutes and its seconds where they are not zero, an infinity where the type holds one, and a
-/// UUID in lowercase.
+/// a document: a date or a timestamp in XSD's style (`JsonEncodeDateTime`), with a year of four
+/// digits or more, ` BC` after one before the year 1, the fraction of a second where it is not
+/// zero, a UTC offset in hours and minutes and its seconds where they are not zero (its hours in
+/// three digits from 100, as far as the 169 a POSIX zone's summer reaches: `+168:59`), and an
+/// infinity where the type holds one; a time as its type's own text, whose offset is in hours,
+/// with its minutes and its seconds where they are not zero (`12:00:00+00`, `12:00:00-04:56:02`);
+/// and a UUID in lowercase.
 fn written_form(kind: &Kind, text: &str) -> bool {
     static FORMS: std::sync::OnceLock<[regex::Regex; 6]> = std::sync::OnceLock::new();
     let [date, time, time_offset, timestamp, timestamp_offset, uuid] = FORMS.get_or_init(|| {
-        let (date, time, offset) = (r"\d{4,}-\d{2}-\d{2}", r"\d{2}:\d{2}:\d{2}(\.\d+)?", r"[+-]\d{2}:\d{2}(:\d{2})?");
-        [format!("^{date}( BC)?$"), format!("^{time}$"), format!("^{time}{offset}$"), format!("^{date}T{time}( BC)?$"), format!("^{date}T{time}{offset}( BC)?$"), "^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$".to_string()].map(|form| regex::Regex::new(&form).expect("a form is a valid expression"))
+        let (date, time, offset, text_offset) = (r"\d{4,}-\d{2}-\d{2}", r"\d{2}:\d{2}:\d{2}(\.\d+)?", r"[+-]\d{2,3}:\d{2}(:\d{2})?", r"[+-]\d{2}(:\d{2}(:\d{2})?)?");
+        [format!("^{date}( BC)?$"), format!("^{time}$"), format!("^{time}{text_offset}$"), format!("^{date}T{time}( BC)?$"), format!("^{date}T{time}{offset}( BC)?$"), "^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$".to_string()].map(|form| regex::Regex::new(&form).expect("a form is a valid expression"))
     });
     let infinite = matches!(text, "infinity" | "-infinity");
     match kind {
@@ -1600,7 +1603,7 @@ fn sqlite_tables<D: SqliteDb + ?Sized>(db: &D) -> Result<Vec<SqliteTable>, Strin
     let listed: Vec<(String, String, String, bool)> = sqlite_rows(
         db,
         "select l.name, l.type, coalesce(s.sql, ''), l.strict from pragma_table_list l left join sqlite_schema s on s.type = 'table' and s.name = l.name \
-         where l.schema = 'main' and l.type in ('table', 'virtual') and l.name not like 'sqlite_%' order by s.rowid",
+         where l.schema = 'main' and l.type in ('table', 'virtual') and l.name not like 'sqlite\\_%' escape '\\' order by s.rowid",
     )?
     .iter()
     .map(|r| (value_text(&r[0]), value_text(&r[1]), value_text(&r[2]), r[3] == rusqlite::types::Value::Integer(1)))
@@ -2324,9 +2327,9 @@ mod tests {
             (json!({"kind": "date", "infinity": true, "label": "date"}), &["2026-01-01", "0044-03-15 BC", "294276-12-31", "infinity", "-infinity"], &["2026-01-01T00:00:00", "2020-01-01T00:00:00-08:00", "26-01-01", "1/1/2026"]),
             (json!({"kind": "date", "label": "date"}), &["2026-01-01"], &["infinity"]),
             (json!({"kind": "datetime", "tick": "1/1000000", "infinity": true, "label": "timestamp"}), &["2026-01-01T12:00:00", "2026-01-01T12:00:00.5", "4714-11-24T00:00:00 BC", "-infinity"], &["2026-01-01 12:00:00", "2026-01-01T12:00:00+00:00", "2026-01-01"]),
-            (json!({"kind": "instant", "tick": "1/1000000", "infinity": true, "label": "timestamptz"}), &["2025-12-31T22:30:00-08:00", "2026-01-01T12:00:00.123456+05:30", "1799-12-31T19:03:58-04:56:02", "0044-03-15T12:00:00-07:52:58 BC", "infinity"], &["2026-01-01T12:00:00", "2026-01-01T12:00:00Z", "2026-01-01"]),
+            (json!({"kind": "instant", "tick": "1/1000000", "infinity": true, "label": "timestamptz"}), &["2025-12-31T22:30:00-08:00", "2026-01-01T12:00:00.123456+05:30", "1799-12-31T19:03:58-04:56:02", "0044-03-15T12:00:00-07:52:58 BC", "2026-07-08T12:59:00+168:59", "infinity"], &["2026-01-01T12:00:00", "2026-01-01T12:00:00Z", "2026-01-01T12:00:00+00", "2026-01-01T12:00:00+1000:00", "2026-01-01"]),
             (json!({"kind": "time", "tick": "1/1000000", "label": "time"}), &["12:00:00", "24:00:00", "12:00:00.25"], &["12:00:00+05:30", "12:00", "1 day"]),
-            (json!({"kind": "time", "tick": "1/1000000", "offset": true, "label": "timetz"}), &["12:00:00.25+05:30", "12:00:00-08:00"], &["12:00:00"]),
+            (json!({"kind": "time", "tick": "1/1000000", "offset": true, "label": "timetz"}), &["12:00:00+00", "12:00:00-08", "12:00:00.25+05:30", "12:00:00+05:30:15", "12:00:00-04:56:02"], &["12:00:00"]),
             (json!({"kind": "uuid", "label": "uuid"}), &["3f2b5c1e-8d4a-4b6f-9c2d-1e0f5a6b7c8d"], &["3F2B5C1E-8D4A-4B6F-9C2D-1E0F5A6B7C8D", "{3f2b5c1e-8d4a-4b6f-9c2d-1e0f5a6b7c8d}", "a"]),
         ];
         for (t, good, bad) in cases {

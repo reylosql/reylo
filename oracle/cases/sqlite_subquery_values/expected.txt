@@ -1,0 +1,18 @@
+derived_random.sql: many () -> { id: INTEGER }
+distinct_random.sql: many () -> { id: int64 }
+distinct_random_where.sql: many () -> { id: int64 }
+key_correlated.sql: many () -> { id: INTEGER }
+key_filter_correlated.sql: many () -> { id: INTEGER }
+key_filter_own.sql: at_most_one () -> { id: INTEGER }
+key_in.sql: at_most_one (id: int64) -> { id: INTEGER }
+key_in_collate.sql: many (id: int64) -> { id: INTEGER }
+key_in_limit.sql: at_most_one () -> { id: INTEGER }
+key_in_many.sql: many () -> { id: INTEGER }
+key_subquery.sql: at_most_one (id: int64) -> { id: INTEGER }
+key_subquery_left.sql: at_most_one () -> { id: INTEGER }
+key_subquery_rows.sql: at_most_one () -> { id: INTEGER }
+key_subquery_with.sql: at_most_one (id: unknown) -> { name: TEXT(text(UTF-8, ill-formed) | bytes) }
+no_from_exists.sql: at_most_one () -> { one: int64(1) }
+no_from_where.sql: at_most_one (n: unknown, ok: int64) -> { n: unknown }
+text_key_in.sql: at_most_one (id: int64) -> { tag: TEXT(text(UTF-8, ill-formed) | bytes) }
+text_key_subquery.sql: at_most_one (id: int64) -> { tag: TEXT(text(UTF-8, ill-formed) | bytes) }

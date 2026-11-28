@@ -88,7 +88,7 @@ fn bare_name(ty: &Type) -> &str {
 /// on Neon and Supabase (PostGIS's others, cube, seg, isn, intarray, h3, hll, ip4r, pgx_ulid,
 /// prefix, rdkit, roaringbitmap, semver, unit, VectorChord). An extension's type named nowhere
 /// here may have a cast to JSON, so inside a document it is any JSON value. The same list in
-/// src/schema.ts, which tests/schema-facts.test.ts holds to this one.
+/// src/in-document.ts, which tests/render.test.ts holds to this one.
 pub const POSTGRES_TEXT_IN_JSON: &[&str] = &[
     "bit", "varbit", "vector", "halfvec", "sparsevec", "point", "line", "lseg", "box", "path", "polygon", "circle", "inet", "cidr", "money", "tsvector", "tsquery", "regclass", "regtype", "ltree", "lquery", "ltxtquery",
     "oid", "pg_lsn", "jsonpath", "xid", "xid8", "oid8", "regdatabase", "regproc", "regprocedure", "regoper", "regoperator", "regnamespace", "regrole", "regcollation", "regconfig", "regdictionary",
@@ -103,7 +103,7 @@ pub const POSTGRES_TEXT_IN_JSON: &[&str] = &[
 /// names. A built-in structure (a geometric type, a bit string, a network address) is known by its
 /// own label, which a type of another schema never has, since the engine qualifies one: a composite
 /// of the user's named `public.point` is an object of its fields there. An extension's type is known
-/// by its name in whatever schema it was created in. The loader's in src/schema.ts, `postgresInJson`.
+/// by its name in whatever schema it was created in. The loader's in src/in-document.ts, `postgresInJson`.
 pub fn postgres_text_in_json(ty: &Type) -> bool {
     let name = bare_name(ty);
     match &ty.kind {
@@ -179,8 +179,7 @@ fn slot_schema(s: &Slot, opts: SchemaOptions) -> Value {
 
 // The fields of a date's and an instant's text, each within its range: a year from 0001 to 9999, a
 // month and a day, a time of day, and an offset from UTC within RFC 3339's 23:59 where the value
-// stands on its own. Macros, so that `concat!` joins them into the patterns below; the same in
-// src/schema.ts.
+// stands on its own. Macros, so that `concat!` joins them into the patterns below.
 macro_rules! year { () => { "(000[1-9]|00[1-9][0-9]|0[1-9][0-9]{2}|[1-9][0-9]{3})" }; }
 macro_rules! month_day { () => { "-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])" }; }
 macro_rules! clock { () => { "T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]([.][0-9]+)?" }; }
@@ -202,7 +201,7 @@ macro_rules! odd_offset { () => { "[+-](([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]
 /// inside a document Postgres's own, five digits or more, or four with BC after the value
 /// (`12345-01-01`, `0002-06-01 BC`). Inside a document an instant of a year from 1 to 9999 takes
 /// Postgres's offset too where the format refuses it (`1849-12-31T19:03:58-04:56:02`,
-/// `odd_offset`). The same in src/schema.ts.
+/// `odd_offset`).
 const DATE_PAST: [&str; 2] = [concat!("^", extended_year!(), month_day!(), "$"), concat!("^([1-9][0-9]{4,}", month_day!(), "|", year!(), month_day!(), " BC)$")];
 const INSTANT_PAST: [&str; 2] = [
     concat!("^", extended_year!(), month_day!(), clock!(), "(Z|", offset!(), ")$"),

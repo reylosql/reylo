@@ -269,12 +269,14 @@ fn then(line: impl AsRef<str>, what: &[(&str, &[&str])]) -> String {
 }
 
 fn normalized(sql: &str) -> String {
-    line_feeds(sql).trim_end().to_string()
+    line_feeds(sql).trim_end_matches(|c: char| c.is_ascii_whitespace()).to_string()
 }
 
-/// The text with each of its line endings a line feed, as the lock reads them.
+/// The text with each of its `\r\n` line endings a line feed, as the lock reads them. A bare
+/// carriage return stays: Postgres ends a `--` comment there and MySQL and SQLite don't, and in a
+/// string it is another value than a line feed.
 fn line_feeds(sql: &str) -> String {
-    sql.replace("\r\n", "\n").replace('\r', "\n")
+    sql.replace("\r\n", "\n")
 }
 
 /// A path as the person running the command reads it: relative to where they are.
@@ -1867,42 +1869,11 @@ async fn leftovers(db: &mut Db, history: &[HistoryRow]) -> Result<Vec<Leftover>,
     if db.dialect() != Dialect::Postgres || started.is_empty() {
         return Ok(vec![]);
     }
-    const NAME: &str = r#"(?:"(?:[^"]|"")*"|[^\s(".;]+)(?:\.(?:"(?:[^"]|"")*"|[^\s(".;]+))*"#;
-    let create = regex::Regex::new(&format!(r"(?is)^create\s+(?:unique\s+)?index\s+concurrently\s+(?:if\s+not\s+exists\s+)?(?:({NAME})\s+)?on\s+(?:only\s+)?({NAME})")).unwrap();
-    let drop = regex::Regex::new(&format!(r"(?is)^drop\s+index\s+concurrently\s+(?:if\s+exists\s+)?({NAME})")).unwrap();
-    let reindex = regex::Regex::new(&format!(r"(?is)^reindex\s+(?:\([^)]*\)\s*)?(index|table)\s+concurrently\s+({NAME})")).unwrap();
-    let literal = |s: &str| format!("'{}'", s.replace('\'', "''"));
-    // A name as the server stores it: unquoted folded to lower case.
-    let stored = |name: &str| match name.strip_prefix('"').and_then(|n| n.strip_suffix('"')) {
-        Some(inner) => inner.replace("\"\"", "\""),
-        None => name.to_lowercase(),
-    };
     let mut out = Vec::new();
     for m in started {
         // The one statement, without the comments above it.
         let Some(statement) = split_statements(&m.sql, Dialect::Postgres).into_iter().next() else { continue };
-        let sql = statement.text.trim().trim_end_matches(';').trim();
-        let found = if let Some(c) = create.captures(sql) {
-            // An index is made in its table's schema, and named without one.
-            let on = format!("i.indrelid = to_regclass({})", literal(&c[2]));
-            match c.get(1) {
-                Some(name) => format!("{on} and c.relname = {}", literal(&stored(name.as_str()))),
-                None => on,
-            }
-        } else if let Some(c) = drop.captures(sql) {
-            format!("c.oid = to_regclass({})", literal(&c[1]))
-        } else if let Some(c) = reindex.captures(sql) {
-            // A concurrent reindex builds <index>_ccnew beside each index, and swaps the old one to <index>_ccold.
-            let copies = |base: &str| format!("(c.relname like {} or c.relname like {})", literal(&format!("{}\\_ccnew%", base.replace('_', "\\_"))), literal(&format!("{}\\_ccold%", base.replace('_', "\\_"))));
-            if c[1].eq_ignore_ascii_case("index") {
-                let bare = stored(&crate::sql::last_written(&c[2]));
-                format!("i.indrelid = (select x.indrelid from pg_index x where x.indexrelid = to_regclass({})) and {}", literal(&c[2]), copies(&bare))
-            } else {
-                format!("i.indrelid = to_regclass({}) and {}", literal(&c[2]), copies("%"))
-            }
-        } else {
-            continue;
-        };
+        let Some(found) = leftover_filter(&statement.text) else { continue };
         for r in db
             .rows(&format!("select format('%I.%I', n.nspname, c.relname) as qualified, pg_get_indexdef(c.oid) as def from pg_index i join pg_class c on c.oid = i.indexrelid join pg_namespace n on n.oid = c.relnamespace where not i.indisvalid and {found}"))
             .await?
@@ -1911,6 +1882,64 @@ async fn leftovers(db: &mut Db, history: &[HistoryRow]) -> Result<Vec<Leftover>,
         }
     }
     Ok(out)
+}
+
+/// The catalog filter, over `pg_index i` and `pg_class c`, for the indexes a Postgres statement
+/// that builds, drops or rebuilds one concurrently leaves invalid when it is cut off. Spacing is
+/// ASCII's, as Postgres reads it: a U+3000 or a U+00A0 is part of a name there. The server resolves
+/// each name, since how it folds an unquoted one to lower case turns on its encoding and locale.
+fn leftover_filter(statement: &str) -> Option<String> {
+    const S: &str = r"[ \t\n\r\x0B\x0C]";
+    static PATTERNS: LazyLock<[Regex; 3]> = LazyLock::new(|| {
+        let part = r#"(?:"(?:[^"]|"")*"|[^ \t\n\r\x0B\x0C(".;]+)"#;
+        // A dotted name, the dots with or without spacing around them, ending where a word does.
+        let name = format!(r"{part}(?:\s*\.\s*{part})*");
+        let end = r"(?:\s|[,;(]|$)";
+        let re = |p: String| Regex::new(&p.replace("\\s", S)).expect("a valid pattern");
+        [
+            re(format!(r"(?i)^create\s+(?:unique\s+)?index\s+concurrently\s+(?:if\s+not\s+exists\s+)?(?:({name})\s+)?on\s+(?:only\s+)?({name}){end}")),
+            re(format!(r"(?i)^drop\s+index\s+concurrently\s+(?:if\s+exists\s+)?({name}){end}")),
+            re(format!(r"(?i)^reindex\s+(?:\([^)]*\)\s*)?(index|table)\s+concurrently\s+({name}){end}")),
+        ]
+    });
+    let [create, drop, reindex] = &*PATTERNS;
+    let literal = |s: &str| format!("'{}'", s.replace('\'', "''"));
+    // The statement as its tokens, a space where spacing or a comment came between two, so that a
+    // comment is no name and a name written as one word (`U&"i"`) stays one, which matches nothing
+    // here rather than a part of it.
+    let mut sql = String::new();
+    let mut last = None;
+    for t in crate::sql::tokenize(statement, Dialect::Postgres) {
+        if last.is_some_and(|end| end < t.start) {
+            sql.push(' ');
+        }
+        sql.push_str(&t.text);
+        last = Some(t.end);
+    }
+    let sql = sql.trim_end_matches(';').trim_end_matches(|c: char| c.is_ascii_whitespace());
+    if let Some(c) = create.captures(sql) {
+        // An index is made in its table's schema, and named without one. The server keeps a name's
+        // first 63 bytes, as `name` does.
+        let on = format!("i.indrelid = to_regclass({})", literal(&c[2]));
+        return match c.get(1).map(|m| m.as_str()) {
+            Some(name) if name.starts_with(|c: char| c == '"' || c == '_' || c.is_ascii_alphabetic() || !c.is_ascii()) => Some(format!("{on} and c.relname = ((parse_ident({}, false))[1])::name", literal(name))),
+            // No name the server would have taken, so no index it built.
+            Some(_) => None,
+            None => Some(on),
+        };
+    }
+    if let Some(c) = drop.captures(sql) {
+        return Some(format!("c.oid = to_regclass({})", literal(&c[1])));
+    }
+    let c = reindex.captures(sql)?;
+    // A concurrent reindex builds <index>_ccnew beside each index, and swaps the old one to <index>_ccold.
+    Some(if c[1].eq_ignore_ascii_case("index") {
+        let index = format!("to_regclass({})", literal(&c[2]));
+        let base = format!("(select x.relname from pg_class x where x.oid = {index})");
+        format!("i.indrelid = (select x.indrelid from pg_index x where x.indexrelid = {index}) and (starts_with(c.relname, {base} || '_ccnew') or starts_with(c.relname, {base} || '_ccold'))")
+    } else {
+        format!(r"i.indrelid = to_regclass({}) and (c.relname like '%\_ccnew%' or c.relname like '%\_ccold%')", literal(&c[2]))
+    })
 }
 
 async fn drop_leftovers(db: &mut Db, leftovers: &[Leftover], log: Log<'_>) -> Result<(), Error> {
@@ -3435,7 +3464,7 @@ async fn api_began_replaying(server: &mut Server, opts: &Options, order: &[Migra
                 if first.is_none() && crate::catalog::without_extra_children(live, &now) == now {
                     first = Some(k);
                 }
-                if k < order.len() && run(shadows.db(lane), &order[k]).await.is_err() {
+                if k < order.len() && shadows.run(lane, &order[k]).await.is_err() {
                     return Ok(None);
                 }
             }
@@ -3495,7 +3524,7 @@ fn api_privileges_in(text: &str) -> Vec<crate::db::ApiPrivilege> {
 }
 
 /// The extensions a text creates.
-fn extensions_in(text: &str) -> Vec<String> {
+pub(crate) fn extensions_in(text: &str) -> Vec<String> {
     static EXTENSION: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"(?i)\bcreate\s+extension\s+(?:if\s+not\s+exists\s+)?"?([A-Za-z0-9_-]+)"?"#).expect("a valid pattern"));
     // What a comment says creates nothing: matched in the text with comments taken out.
     let uncommented = crate::sql::tokenize(text, Dialect::Postgres).iter().map(|token| token.text.clone()).collect::<Vec<_>>().join(" ");
@@ -5060,7 +5089,13 @@ async fn pending_findings(shadows: &mut Shadows<'_>, target: &mut Db, ran: &[Mig
     let mut timed = false;
     let mut out = Vec::new();
     for m in pending {
-        let hazards = match crate::locks::run_watched(shadows.db(lane), m).await {
+        let pg_cron = shadows.before(lane, &m.sql).await?;
+        let watched = crate::locks::run_watched(shadows.db(lane), m).await;
+        let watched = match watched {
+            Ok(found) => shadows.after(lane, pg_cron, Ok(())).await?.map(|()| found),
+            Err(e) => shadows.after(lane, pg_cron, Err(e)).await?.map(|()| Vec::new()),
+        };
+        let hazards = match watched {
             Ok(found) => found,
             // The check already tried each pending migration: one that fails here says nothing more.
             Err(_) => break,
@@ -6397,12 +6432,7 @@ async fn wipe_rows_on(db: &mut Db) -> Result<usize, Error> {
         // A virtual table's own tables (an FTS5 index's, an R*Tree's) are its to empty, and a libSQL
         // vector index's are libSQL's: deleting from them directly breaks it.
         Dialect::Sqlite => db
-            .rows(&format!(
-                "select name as n from pragma_table_list where schema = 'main' and type in ('table', 'virtual') and name not like 'sqlite_%' and {} and name {} and {}",
-                crate::catalog::not_history("name"),
-                crate::catalog::NOT_TURSO_OWN,
-                crate::catalog::NOT_LIBSQL_VECTOR_OWN
-            ))
+            .rows(&format!("select name as n from pragma_table_list where schema = 'main' and type in ('table', 'virtual') and {}", crate::catalog::sqlite_project("name")))
             .await?
             .iter()
             .map(|r| format!("\"{}\"", r.text("n").replace('"', "\"\"")))
@@ -6464,8 +6494,8 @@ async fn wipe_rows_on(db: &mut Db) -> Result<usize, Error> {
             }
             sql.push_str(&after);
             let has_sequence = db.rows("select count(*) > 0 as ok from sqlite_schema where name = 'sqlite_sequence'").await?.first().is_some_and(|r| r.flag("ok"));
-            // The counters of the tables it empties: a history table keeps its own.
-            let reset = if has_sequence { format!("delete from sqlite_sequence where {};", crate::catalog::not_history("name")) } else { String::new() };
+            // The counters of the tables it empties: a history table, and any other table not the project's, keeps its own.
+            let reset = if has_sequence { format!("delete from sqlite_sequence where {};", crate::catalog::sqlite_project("name")) } else { String::new() };
             let turso = crate::catalog::holds_turso_tables(db).await?;
             let restart = crate::catalog::turso_sequences(db, turso, true).await?;
             let result = db.script(&format!("begin; {sql} {reset} {restart} commit;")).await;
@@ -6600,7 +6630,7 @@ async fn history_push_on(db: &mut Db, server: &mut Server, opts: &Options, init:
             if k == order.len() {
                 break;
             }
-            if let Err(e) = run(shadows.db(lane), &order[k]).await {
+            if let Err(e) = shadows.run(lane, &order[k]).await {
                 return Ok(Err(format!("{} fails when replayed in a shadow database: {e}", order[k].name)));
             }
         }
@@ -9127,7 +9157,10 @@ async fn draft_with(opts: &Options, files: &[Migration], schema_sql: &str, targe
             }
             Ok((None, hazards))
         };
+        let planned = plan.runnable().cloned().collect::<Vec<_>>().join(";\n");
+        let pg_cron = shadows.before(c, &planned).await?;
         let (mut failed, mut hazards) = run_pieces(shadows.db(c), pieces(&split, &plan)).await?;
+        failed = shadows.after(c, pg_cron, failed.map_or(Ok(()), |e| Err(Error(e)))).await?.err().map(|e| e.0);
         // On MySQL each statement is a file of its own: a table an earlier one made has no rows.
         if d == Dialect::Mysql {
             let made = crate::locks::mysql_tables_made(plan.runnable().map(String::as_str));
@@ -9160,7 +9193,9 @@ async fn draft_with(opts: &Options, files: &[Migration], schema_sql: &str, targe
                     let file = Migration { name: "moves".into(), time: String::new(), path: PathBuf::new(), sql: moves.iter().map(|m| format!("{m};")).collect::<Vec<_>>().join("\n") };
                     run(shadows.db(c2), &file).await?;
                 }
+                let pg_cron = shadows.before(c2, &planned).await?;
                 (failed, hazards) = run_pieces(shadows.db(c2), pieces(&shape, &plan)).await?;
+                failed = shadows.after(c2, pg_cron, failed.map_or(Ok(()), |e| Err(Error(e)))).await?.err().map(|e| e.0);
                 reached = catalog(shadows.db(c2)).await?;
                 let note = match (&shape, commits) {
                     (Some(_), _) => format!("  {} Drops each index it replaces before it builds the new one: built first, the new ones didn't reach {target_name}", paint("yellow", "!")),
@@ -10231,12 +10266,9 @@ async fn dump_from(db: &mut Db, opts: &Options, schemas: &[String]) -> Result<St
         Dialect::Sqlite => {
             let rows = db
                 .rows(&format!(
-                    "select sql from sqlite_schema where sql is not null and name not like 'sqlite_%' and {}
-                      and name not in (select name from pragma_table_list where type = 'shadow') and name {turso} and tbl_name {turso} and {}
+                    "select sql from sqlite_schema where sql is not null and {} and name not in (select name from pragma_table_list where type = 'shadow')
                     order by case type when 'table' then 0 when 'index' then 1 when 'view' then 2 else 3 end, rowid",
-                    crate::catalog::not_history("tbl_name"),
-                    crate::catalog::NOT_LIBSQL_VECTOR_OWN,
-                    turso = crate::catalog::NOT_TURSO_OWN
+                    crate::catalog::sqlite_project("tbl_name")
                 ))
                 .await?;
             Ok(format!("{}\n", rows.iter().map(|r| format!("{};", r.text("sql"))).collect::<Vec<_>>().join("\n\n")))
@@ -11479,10 +11511,13 @@ async fn dev_in_shadows(shadows: &mut Shadows<'_>, db: &mut Db, opts: &Options, 
                 shadows.taint(lane);
                 let plan = plan_between(shadows.db(lane), db, None).await?;
                 let statements: Vec<String> = plan.runnable().cloned().collect();
-                if let Ok(Ok(())) = run_to(shadows.db(lane), &statements, &[], &base).await {
+                let pg_cron = shadows.before(lane, &statements.join(";\n")).await?;
+                let reached = run_to(shadows.db(lane), &statements, &[], &base).await;
+                shadows.after(lane, pg_cron, Ok(())).await??;
+                if let Ok(Ok(())) = reached {
                     runs = true;
                     for m in &pending {
-                        if run(shadows.db(lane), m).await.is_err() {
+                        if shadows.run(lane, m).await.is_err() {
                             runs = false;
                             break;
                         }
@@ -11980,6 +12015,29 @@ fn table_lines(table: &crate::db::Table) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_index_cut_off_is_found_by_its_whole_name() {
+        let f = |sql: &str| super::leftover_filter(sql).unwrap();
+        // Postgres reads a U+3000 as part of an unquoted name; the server folds the name itself.
+        assert_eq!(f("create unique index concurrently users_email\u{3000} on users (email);"), "i.indrelid = to_regclass('users') and c.relname = ((parse_ident('users_email\u{3000}', false))[1])::name");
+        // A comment between the words is no name.
+        assert_eq!(f("CREATE INDEX CONCURRENTLY /*review*/ ON app.t (x)"), "i.indrelid = to_regclass('app.t')");
+        assert_eq!(f("drop index concurrently a\u{a0}b;"), "c.oid = to_regclass('a\u{a0}b')");
+        assert_eq!(f("create index concurrently on \"T\"\n  (x)"), "i.indrelid = to_regclass('\"T\"')");
+        assert!(f("reindex index concurrently Édition_IDX").contains("x.oid = to_regclass('Édition_IDX')) || '_ccnew')"));
+        assert_eq!(super::leftover_filter("create index i on t (x)"), None);
+        // A name read only in part would name another index: nothing is matched.
+        assert_eq!(super::leftover_filter("drop index concurrently U&\"actual_idx\""), None);
+        assert_eq!(super::leftover_filter("create index concurrently i on U&\"t\" (x)"), None);
+        assert_eq!(f("drop index concurrently app . idx;"), "c.oid = to_regclass('app . idx')");
+    }
+
+    #[test]
+    fn a_space_beyond_ascii_ending_a_file_is_kept() {
+        assert_eq!(super::normalized("select 1 as x\u{3000}\r\n \n"), "select 1 as x\u{3000}");
+        assert_eq!(super::normalized("select 1 as x\u{a0}"), "select 1 as x\u{a0}");
+    }
+
     #[cfg(feature = "cli")]
     #[test]
     fn what_a_data_change_writes_is_read_from_its_words() {

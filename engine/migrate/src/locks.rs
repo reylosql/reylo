@@ -286,14 +286,18 @@ enum Built {
     Key { rel: String, primary: bool, columns: Vec<String>, including: Vec<String>, nulls_not_distinct: bool },
 }
 
-/// `create [unique] index [if not exists] <name> on`, its name apart.
-static NAMED: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new(r#"(?is)^(\s*create\s+(?:unique\s+)?index)((?:\s|/\*.*?\*/)+(?:if\s+not\s+exists(?:\s|/\*.*?\*/)+)?)("(?:[^"]|"")+"|[^\s"(/]+)((?:\s|/\*.*?\*/)+on\s)"#).expect("a valid pattern"));
+/// `create [unique] index [if not exists] <name> on`, its name apart. Spacing is ASCII's, as
+/// Postgres reads it: a U+3000 or a U+00A0 is part of a name there.
+static NAMED: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    let pattern = r#"(?is)^(\s*create\s+(?:unique\s+)?index)((?:\s|/\*.*?\*/)+(?:if\s+not\s+exists(?:\s|/\*.*?\*/)+)?)("(?:[^"]|"")+"|[^ \t\n\r\x0B\x0C"(/]+)((?:\s|/\*.*?\*/)+on\s)"#;
+    regex::Regex::new(&pattern.replace("\\s", r"[ \t\n\r\x0B\x0C]")).expect("a valid pattern")
+});
 
-/// A name as the server stores it: unquoted, folded to lower case.
+/// A name as the server stores it: unquoted, its ASCII letters folded to lower case.
 fn stored(name: &str) -> String {
     match name.strip_prefix('"').and_then(|n| n.strip_suffix('"')) {
         Some(inner) => inner.replace("\"\"", "\""),
-        None => name.to_lowercase(),
+        None => name.to_ascii_lowercase(),
     }
 }
 
@@ -1578,6 +1582,13 @@ pub(crate) async fn run_watched(db: &mut Db, m: &Migration) -> Result<Vec<Hazard
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn an_index_name_keeps_a_space_beyond_ascii_and_its_case_beyond_ascii() {
+        let c = super::NAMED.captures("create unique index Édition\u{3000} on t (x)").unwrap();
+        assert_eq!(super::stored(&c[3]), "Édition\u{3000}");
+        assert_eq!(super::stored(&super::NAMED.captures("CREATE INDEX IF NOT EXISTS T_X ON t (x)").unwrap()[3]), "t_x");
+    }
 
     #[test]
     fn what_a_file_changes_ahead_of_each_read_is_read_from_its_parse() {

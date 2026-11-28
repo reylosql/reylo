@@ -11,7 +11,8 @@
 //! its own.
 
 /// The query: one row, the server's version and how many lines there are with two sums of their
-/// hashes, then how many executable functions the server's configuration defines. With
+/// hashes, then how many executable functions the server's configuration defines, then the
+/// server's UUID, which is no part of the fingerprint: it names the replica that answered. With
 /// `signatures`, it reads each one's arguments and result too, from `system.user_defined_functions`:
 /// a table an account may read only by its own grant, so it is asked for only where the first
 /// answer counts such a function.
@@ -20,7 +21,7 @@ pub fn query(signatures: bool) -> String {
     if signatures {
         rows.push("SELECT cityHash64('x', name, toString(type), return_type, toString(argument_types), toString(argument_names)) FROM system.user_defined_functions");
     }
-    format!("SELECT concat(version(), ' ', toString(count()), ' ', toString(sum(x)), ' ', toString(groupBitXor(x))), (SELECT count() FROM system.functions WHERE origin = 'ExecutableUserDefined') FROM (\n    {}\n  )", rows.join("\n    UNION ALL "))
+    format!("SELECT concat(version(), ' ', toString(count()), ' ', toString(sum(x)), ' ', toString(groupBitXor(x))), (SELECT count() FROM system.functions WHERE origin = 'ExecutableUserDefined'), toString(serverUUID()) FROM (\n    {}\n  )", rows.join("\n    UNION ALL "))
 }
 
 /// Whether a server of `version` (`26.8.1.1`) lists an executable function's signature, which it

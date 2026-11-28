@@ -42,7 +42,7 @@ export function AboutDialog({ about, open, onClose }: { about: About; open: bool
         <section>
           <h3>Reylo</h3>
           <p>Reylo is a general-purpose SQL type inference engine. Give it a query and a database, and it infers the query's parameters, its columns and their nullability, nested JSON shapes and cardinality, from the database's own analysis, with nothing declared by hand.</p>
-          <p>It is language-agnostic: TypeScript is one rendering of what it infers, JSON Schema another, and its API answers any language.</p>
+          <p>It is language-agnostic: TypeScript is one rendering of what it infers, and its API answers any language.</p>
         </section>
         <section>
           <h3>This playground</h3>

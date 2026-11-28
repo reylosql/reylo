@@ -292,7 +292,7 @@ fn split(sql: &str, dialect: Dialect, tokens: &[Token], openings: &[(usize, usiz
     let mut current: Vec<Token> = Vec::new();
     let flush = |current: &mut Vec<Token>, from: usize, end: usize, statements: &mut Vec<Statement>| {
         if !current.is_empty() {
-            statements.push(Statement { text: sql[from..end].trim().to_string(), tokens: std::mem::take(current) });
+            statements.push(Statement { text: sql[from..end].trim_matches(|c: char| c.is_ascii_whitespace()).to_string(), tokens: std::mem::take(current) });
         }
     };
     for k in 0..tokens.len() {
@@ -968,6 +968,14 @@ mod tests {
         assert!(atomicity_problem(body, m).unwrap().contains("several statements on others"));
         // A statement that changes data on any server is data.
         assert!(changes_data(&split_statements("/*!99999 CREATE TABLE x (id int) */ DELETE FROM t", m)[0], m));
+    }
+
+    #[test]
+    fn mysql_reads_dash_dash_before_a_space_beyond_ascii_as_code() {
+        let m = Dialect::Mysql;
+        assert_eq!(texts("select 1 --\u{3000}; drop table users;", m), ["select 1 --\u{3000}", "drop table users"]);
+        // A U+3000 is part of a name there, so a statement keeps one at its end.
+        assert_eq!(texts("create view v as select 1 as x\u{3000};", m), ["create view v as select 1 as x\u{3000}"]);
     }
 
     #[test]

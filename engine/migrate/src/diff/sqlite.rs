@@ -340,7 +340,7 @@ pub async fn read(db: &mut Db) -> Result<Schema, Error> {
     let list: BTreeMap<String, Row> = db.rows("select name, type, strict, wr from pragma_table_list where schema = 'main'").await?.into_iter().map(|r| (fold(r.text("name")), r)).collect();
     let shadow = |name: &str| list.get(&fold(name)).is_some_and(|r| r.text("type") == "shadow");
     let all: Vec<Row> = db
-        .rows(&format!("select type, name, tbl_name as tbl, sql from sqlite_schema where name not like 'sqlite_%' and {} and name {turso} and tbl_name {turso} and sql is not null and {} order by rowid", crate::catalog::not_history("tbl_name"), crate::catalog::NOT_LIBSQL_VECTOR_OWN, turso = crate::catalog::NOT_TURSO_OWN))
+        .rows(&format!("select type, name, tbl_name as tbl, sql from sqlite_schema where {} and sql is not null order by rowid", crate::catalog::sqlite_project("tbl_name")))
         .await?;
     // SQLite takes a table named as a full-text table's own (`docs_content`) for one, whoever made
     // it: one that an external-content index reads its text from is the project's, and so is one
@@ -599,6 +599,8 @@ pub async fn read(db: &mut Db) -> Result<Schema, Error> {
 pub struct SqliteAlterer {
     decided: super::Decided,
     schemas: std::cell::RefCell<Option<(Schema, Schema)>>,
+    /// The tables each table's change makes again, by its id, as the plan's ordering asks.
+    remade: std::cell::RefCell<BTreeMap<String, BTreeSet<String>>>,
 }
 
 /// The affinity of a SQLite column's declared type, by SQLite's rules (datatype3.html, 3.1), as far as
@@ -619,6 +621,24 @@ fn affinity(def: &str) -> super::TypeClass {
     }
 }
 
+impl SqliteAlterer {
+    /// Whether the change of table `by` makes table `id` again, as a rebuild makes those that reference it.
+    fn makes_again(&self, by: &str, id: &str) -> bool {
+        if let Some(made) = self.remade.borrow().get(by) {
+            return made.contains(id);
+        }
+        let schemas = self.schemas.borrow();
+        let Some(both) = schemas.as_ref() else { return false };
+        let (Some(from), Some(to)) = (both.0.objects.get(by), both.1.objects.get(by)) else { return false };
+        let out = alter_table(from, to, &|name| self.decided.of(name), Some(both)).unwrap_or_default();
+        let dropped = |o: &&Object| out.iter().any(|s| *s == format!("drop table {}", quote(&Info::of(o).name)));
+        let made: BTreeSet<String> = both.0.objects.values().filter(|o| o.kind == Some(Kind::Table)).filter(dropped).map(|o| o.id.clone()).collect();
+        let answer = made.contains(id);
+        self.remade.borrow_mut().insert(by.to_string(), made);
+        answer
+    }
+}
+
 impl Alterer for SqliteAlterer {
     fn narrows(&self, from: &Object, to: &Object) -> Option<String> {
         if from.kind != Some(Kind::Column) {
@@ -636,6 +656,7 @@ impl Alterer for SqliteAlterer {
 
     fn schemas(&self, from: &Schema, to: &Schema) {
         *self.schemas.borrow_mut() = Some((from.clone(), to.clone()));
+        self.remade.borrow_mut().clear();
     }
 
     /// Every full-text index's rebuild runs once, after every other statement: where the plan's
@@ -703,6 +724,59 @@ impl Alterer for SqliteAlterer {
         self.decided.set(renames);
     }
 
+    /// A table's rebuild makes the tables that reference it, at any depth, again from the text each
+    /// has then: so each one's own change waits for every rebuild that makes it again, rather than
+    /// run first and be undone. A table it references whose change runs in place makes nothing
+    /// again, and waiting for it could close a circle where none was. A rebuild that takes others
+    /// of tables that reference each other to the target waits for what each of those needs there
+    /// too: a table one comes to reference by a key it has yet to have, which a copied row looks
+    /// up with foreign keys on.
+    fn waits_for(&self, from: &Object, to: &Object) -> Vec<String> {
+        if to.kind != Some(Kind::Table) {
+            return Vec::new();
+        }
+        let schemas = self.schemas.borrow();
+        let Some((f, t)) = schemas.as_ref() else { return Vec::new() };
+        let mut out: Vec<String> = parents_of(f, t, &from.id).into_iter().filter(|p| self.makes_again(p, &from.id)).collect();
+        let decided = |name: &str| self.decided.of(name);
+        if rebuilt_by(f, t, &from.id, &decided).as_deref() == Some(from.id.as_str()) {
+            let circling = circle(f, t, &from.id);
+            for m in circling.iter().filter(|m| **m != from.id && self.makes_again(&from.id, m)) {
+                let Some(target) = t.objects.get(m) else { continue };
+                let carried = f.objects.get(m).is_some_and(|x| m.strip_prefix("table ").and_then(|name| shape(x, target, decided(name))).is_some_and(|s| s.rebuild));
+                let text = target.create.first().map_or("", String::as_str);
+                let wanted = |d: &str| t.objects.get(d).is_some_and(|o| o.kind == Some(Kind::Table) && new_key(text, f, o));
+                if carried {
+                    out.extend(target.deps.iter().filter(|d| !circling.contains(*d) && !out.contains(*d) && wanted(d)).cloned().collect::<Vec<_>>());
+                }
+            }
+        }
+        out
+    }
+
+    /// A table's change, or a table made, needs the change of a table it references first only
+    /// where that is a rebuild: one in place moves no key a copied row looks up, and makes nothing
+    /// again. Nor does a rebuild of its own that makes that table again, whose change then follows
+    /// it, nor one beside it of the tables that reference each other, which one rebuild takes to the
+    /// target together.
+    fn runs_before(&self, to: &Object, dep_from: &Object, dep_to: &Object) -> bool {
+        if to.kind != Some(Kind::Table) || dep_to.kind != Some(Kind::Table) {
+            return false;
+        }
+        let schemas = self.schemas.borrow();
+        let Some((f, t)) = schemas.as_ref() else { return false };
+        let decided = |name: &str| self.decided.of(name);
+        let rebuilds = |a: &Object, b: &Object| b.id.strip_prefix("table ").and_then(|name| shape(a, b, decided(name))).map(|s| s.rebuild);
+        match rebuilds(dep_from, dep_to) {
+            Some(false) => true,
+            Some(true) => {
+                let Some(from) = f.objects.get(&to.id) else { return false };
+                self.makes_again(&to.id, &dep_to.id) || (rebuilds(from, to) == Some(true) && circle(f, t, &to.id).contains(&dep_to.id))
+            }
+            None => false,
+        }
+    }
+
     fn rename(&self, from: &Object, to: &Object) -> Option<Vec<String>> {
         let (table, old, new) = (from.extra.first()?, from.extra.get(1)?, to.extra.get(1)?);
         Some(vec![format!("alter table {table} rename column {old} to {new}")])
@@ -712,15 +786,74 @@ impl Alterer for SqliteAlterer {
         match to.kind? {
             // A column changes with its table, whose alter sees the whole of both.
             Kind::Column => Some(vec![]),
-            Kind::Table => alter_table(from, to, self.decided.of(to.id.strip_prefix("table ")?), self.schemas.borrow().as_ref()),
+            Kind::Table => alter_table(from, to, &|name| self.decided.of(name), self.schemas.borrow().as_ref()),
             _ => None,
         }
     }
 }
 
-/// The statements that take table `from` to `to`: `alter table` where SQLite can, else a rebuild.
-/// A column the planner renames is renamed after this, so the statements write it by its old name.
-fn alter_table(from: &Object, to: &Object, decided: Option<Vec<(String, String)>>, schemas: Option<&(Schema, Schema)>) -> Option<Vec<String>> {
+/// A change of table `from` to `to` as SQLite takes it: the target's text with each column the plan
+/// renames still under its old name, as the statements write it, and whether `alter table` can take
+/// the table there, dropping and adding columns, or it is rebuilt.
+struct Shape {
+    a: Info,
+    b: Info,
+    old_parts: Vec<Part>,
+    new_parts: Vec<Part>,
+    old_columns: Vec<(String, String)>,
+    new_columns: Vec<(String, String)>,
+    /// Each column renamed, by its new name, to its old.
+    renamed: BTreeMap<String, String>,
+    target: String,
+    /// The target's flags, each column by its name before the renames.
+    new_flags: BTreeMap<String, String>,
+    /// Whether its options (WITHOUT ROWID, STRICT) change.
+    reshaped: bool,
+    rebuild: bool,
+    drops: Vec<String>,
+    adds: Vec<String>,
+}
+
+impl Shape {
+    fn flag(&self, c: &str, f: char) -> bool {
+        self.new_flags.get(c).is_some_and(|x| x.contains(f))
+    }
+
+    fn has(ps: &[Part], c: &str) -> bool {
+        ps.iter().any(|p| p.column.as_deref() == Some(c))
+    }
+
+    /// The columns its rows copy into a rebuild: those both sides have, but those the target generates.
+    fn copied(&self) -> Vec<String> {
+        self.new_parts.iter().filter(|p| p.column.as_deref().is_some_and(|c| Self::has(&self.old_parts, c) && !self.flag(c, 'g'))).map(|p| p.tokens[0].text.clone()).collect()
+    }
+
+    /// Every column either side names.
+    fn named(&self) -> Vec<String> {
+        self.old_columns.iter().chain(self.new_columns.iter()).map(|(c, _)| c.clone()).collect()
+    }
+
+    /// The columns the change drops, which the planner replaces what is on them for.
+    fn dropped(&self) -> BTreeSet<String> {
+        let (old, new) = (&self.old_columns, &self.new_columns);
+        old.iter().map(|(c, _)| c).filter(|c| !new.iter().any(|(n, _)| n == *c) && !self.renamed.values().any(|o| o == *c)).map(|c| format!("column {}.{c}", fold(&self.a.name))).collect()
+    }
+
+    /// What a rebuild says of each column it adds that no row can fill.
+    fn warnings(&self) -> Vec<String> {
+        let new = self.new_parts.iter().filter(|p| p.column.as_deref().is_some_and(|c| !Self::has(&self.old_parts, c) && self.flag(c, 'n')));
+        new.map(|p| format!("-- {} is not null with no default, so the copy fails on a table that has rows: give it a default, or add it nullable, fill it, then make it not null", p.tokens[0].text)).collect()
+    }
+
+    /// The full-text indexes the change leaves stale.
+    fn reindexed(&self, schemas: Option<&(Schema, Schema)>) -> Vec<String> {
+        reindexed(&self.a, &self.b, &self.renamed, &self.old_parts, &self.new_parts, &self.named(), self.reshaped, schemas)
+    }
+}
+
+/// What a change of table `from` to `to` is (`Shape`), the columns the planner renamed in it, by old
+/// name and new, `decided`.
+fn shape(from: &Object, to: &Object, decided: Option<Vec<(String, String)>>) -> Option<Shape> {
     let (a, b) = (Info::of(from), Info::of(to));
     if a.virtual_table || b.virtual_table {
         return None;
@@ -756,7 +889,8 @@ fn alter_table(from: &Object, to: &Object, decided: Option<Vec<(String, String)>
     let constraints = |ps: &[Part]| -> BTreeSet<String> { ps.iter().filter(|p| p.column.is_none()).map(Part::canonical).collect() };
     let options = |def: &str| def.lines().next().unwrap_or_default().to_string();
     let find = |ps: &'_ [Part], c: &str| ps.iter().find(|p| p.column.as_deref() == Some(c)).cloned();
-    let mut rebuild = options(&from.def) != options(&to.def) || constraints(&old_parts) != constraints(&new_parts);
+    let reshaped = options(&from.def) != options(&to.def);
+    let mut rebuild = reshaped || constraints(&old_parts) != constraints(&new_parts);
     let mut drops = Vec::new();
     let mut adds = Vec::new();
     for p in old_parts.iter().filter(|p| p.column.is_some()) {
@@ -778,20 +912,54 @@ fn alter_table(from: &Object, to: &Object, decided: Option<Vec<(String, String)>
             }
         }
     }
+    Some(Shape { a, b, old_parts, new_parts, old_columns, new_columns, renamed, target, new_flags, reshaped, rebuild, drops, adds })
+}
+
+/// The columns the planner renamed in a table, by old name and new, from the table's name as its id writes it.
+type Renamed<'a> = &'a dyn Fn(&str) -> Option<Vec<(String, String)>>;
+
+/// The statements that take table `from` to `to`: `alter table` where SQLite can, else a rebuild.
+/// A column the planner renames is renamed after this, so the statements write it by its old name.
+fn alter_table(from: &Object, to: &Object, decided: Renamed, schemas: Option<&(Schema, Schema)>) -> Option<Vec<String>> {
+    let s = shape(from, to, decided(from.id.strip_prefix("table ")?))?;
+    let (a, b, target) = (&s.a, &s.b, &s.target);
     let table = quote(&a.name);
-    if !rebuild {
-        let mut out: Vec<String> = drops.iter().map(|c| format!("alter table {table} drop column {c}")).collect();
-        out.extend(adds.iter().map(|p| format!("alter table {table} add column {p}")));
+    if !s.rebuild {
+        let mut out: Vec<String> = s.drops.iter().map(|c| format!("alter table {table} drop column {c}")).collect();
+        out.extend(s.adds.iter().map(|p| format!("alter table {table} add column {p}")));
         return Some(out);
+    }
+    // Of tables that reference each other, the first by name whose change is a rebuild makes the
+    // others as the target has them, so that no rebuild makes one again as it was after its own.
+    if schemas.and_then(|(f, t)| rebuilt_by(f, t, &from.id, decided)).is_some_and(|by| by != from.id) {
+        return Some(Vec::new());
     }
 
     // The tables that reference it, at any depth, as they are on both sides, each after what it references.
     let (children, cycle) = schemas.map_or_else(|| (Vec::new(), false), |(f, t)| children_of(f, t, &from.id));
     let family: Vec<(Info, Info)> = std::iter::once((Info::of(from), Info::of(to))).chain(children.iter().map(|(x, y)| (Info::of(x), Info::of(y)))).collect();
+    // Each of them as it is made again: its text, the columns its rows copy and every column it names. One it
+    // references back whose own change is a rebuild is made as the target has it, and the rest as they are.
+    let circling = schemas.map(|(f, t)| circle(f, t, &from.id)).unwrap_or_default();
+    let mut carried: Vec<(String, Vec<String>, Vec<String>, Option<Shape>)> = Vec::new();
+    for (x, y) in &children {
+        let own = if circling.contains(&x.id) { x.id.strip_prefix("table ").and_then(|name| shape(x, y, decided(name))).filter(|s| s.rebuild) } else { None };
+        carried.push(match own {
+            Some(own) => (own.target.clone(), own.copied(), own.named(), Some(own)),
+            None => {
+                let (text, info) = (x.create.first()?.clone(), Info::of(x));
+                let ps = parts(&text);
+                let copied = ps.iter().filter(|p| p.column.as_deref().is_some_and(|c| !info.flag(c, 'g'))).map(|p| p.tokens[0].text.clone()).collect();
+                let named = ps.iter().filter_map(|p| p.column.clone()).collect();
+                (text, copied, named, None)
+            }
+        });
+    }
+    let changed = || carried.iter().filter_map(|(.., own)| own.as_ref());
 
-    // What goes with them and the planner leaves be: the same on both sides, and on no column of
-    // the table that the change drops, which the planner replaces it for.
-    let dropped: BTreeSet<String> = old_columns.iter().map(|(c, _)| c).filter(|c| !new_columns.iter().any(|(n, _)| n == *c) && !renamed.values().any(|o| o == *c)).map(|c| format!("column {}.{c}", fold(&a.name))).collect();
+    // What goes with them and the planner leaves be: the same on both sides, and on no column that
+    // a change drops, which the planner replaces it for.
+    let dropped: BTreeSet<String> = std::iter::once(&s).chain(changed()).flat_map(Shape::dropped).collect();
     let on_dropped = |id: &str| schemas.and_then(|(f, _)| f.objects.get(id)).is_some_and(|o| o.deps.iter().any(|d| dropped.contains(d)));
     let kept = |x: &(String, String, String, String, usize), other: &Info| other.goes.iter().any(|y| y.0 == x.0 && y.1 == x.1) && !on_dropped(&x.0);
     let mut going: BTreeMap<String, &(String, String, String, String, usize)> = BTreeMap::new();
@@ -812,23 +980,9 @@ fn alter_table(from: &Object, to: &Object, decided: Option<Vec<(String, String)>
     let mut going: Vec<(usize, String)> = going.values().map(|i| (i.4, i.2.clone())).collect();
     going.sort();
     let mut out: Vec<String> = going.into_iter().rev().map(|(_, drop)| drop).collect();
-    for p in &new_parts {
-        let Some(c) = p.column.as_deref() else { continue };
-        if find(&old_parts, c).is_none() && flag(c, 'n') {
-            out.push(format!("-- {} is not null with no default, so the copy fails on a table that has rows: give it a default, or add it nullable, fill it, then make it not null", p.tokens[0].text));
-        }
-    }
-    // The columns both have, but those the new table generates.
-    let copied: Vec<String> = new_parts
-        .iter()
-        .filter(|p| p.column.as_deref().is_some_and(|c| find(&old_parts, c).is_some() && !flag(c, 'g')))
-        .map(|p| p.tokens[0].text.clone())
-        .collect();
-    let named: Vec<String> = old_columns.iter().chain(new_columns.iter()).map(|(c, _)| c.clone()).collect();
-    let mut texts: Vec<String> = vec![target.clone()];
-    for (child, _) in &children {
-        texts.push(child.create.first()?.clone());
-    }
+    out.extend(std::iter::once(&s).chain(changed()).flat_map(Shape::warnings));
+    let (copied, named) = (s.copied(), s.named());
+    let texts: Vec<String> = std::iter::once(target.clone()).chain(carried.iter().map(|(text, ..)| text.clone())).collect();
     // A name no object of the schema has, nor one of `used`: `base`, else `base` and a number.
     let free = |base: String, used: &BTreeSet<String>| -> String {
         (1..)
@@ -880,13 +1034,9 @@ fn alter_table(from: &Object, to: &Object, decided: Option<Vec<(String, String)>
         }
         // Each member's columns to keep, the rowid where no column is it, and whether it counts.
         let mut members: Vec<(String, String, String, bool)> = Vec::new();
-        for (k, ((x, y), text)) in family.iter().zip(&texts).enumerate() {
-            let mut kept: Vec<String> = if k == 0 {
-                copied.clone()
-            } else {
-                parts(text).iter().filter(|p| p.column.as_deref().is_some_and(|c| !x.flag(c, 'g'))).map(|p| p.tokens[0].text.clone()).collect()
-            };
-            let names: Vec<String> = if k == 0 { named.clone() } else { parts(text).iter().filter_map(|p| p.column.clone()).collect() };
+        let lists = std::iter::once((&copied, &named)).chain(carried.iter().map(|(_, copied, named, _)| (copied, named)));
+        for (((x, y), text), (copied, names)) in family.iter().zip(&texts).zip(lists) {
+            let mut kept = copied.clone();
             if x.bare_rowid && y.bare_rowid {
                 if let Some(rowid) = ["rowid", "_rowid_", "oid"].into_iter().find(|n| !names.iter().any(|c| c == n)) {
                     kept.insert(0, rowid.to_string());
@@ -943,7 +1093,7 @@ fn alter_table(from: &Object, to: &Object, decided: Option<Vec<(String, String)>
         }
         out.extend(standing.iter().map(|name| format!("drop index {}", quote(name))));
         out.extend(coming.into_iter().map(|(_, create)| create));
-        out.extend(reindexed(&a, &b, &renamed, &old_parts, &new_parts, &named, options(&from.def) != options(&to.def), schemas));
+        out.extend(std::iter::once(&s).chain(changed()).flat_map(|s| s.reindexed(schemas)));
         return Some(out);
     }
     if cycle {
@@ -978,8 +1128,8 @@ fn alter_table(from: &Object, to: &Object, decided: Option<Vec<(String, String)>
         }))
     };
     out.push(renamed_text(&target, &a.name)?);
-    for ((x, _), (child, _)) in family[1..].iter().zip(&children) {
-        out.push(renamed_text(child.create.first()?, &x.name)?);
+    for ((x, _), (text, ..)) in family[1..].iter().zip(&carried) {
+        out.push(renamed_text(text, &x.name)?);
     }
     // Each key on its table's new one, under a name of its own while the old index has its name.
     let mut used: BTreeSet<String> = scratches.values().map(|(name, _)| fold(name)).collect();
@@ -993,12 +1143,9 @@ fn alter_table(from: &Object, to: &Object, decided: Option<Vec<(String, String)>
         out.push(rewrite(create, &tokens, |k, _| if k == name { Some(quote(&scratch)) } else if k == table { Some(on.clone()) } else { None }));
         passing.push(scratch);
     }
-    copy_rows(&mut out, &a, &b, &scratches[&fold(&a.name)].0, copied, &named);
-    for ((x, y), (child, _)) in family[1..].iter().zip(&children) {
-        let child_parts = parts(child.create.first()?);
-        let copied: Vec<String> = child_parts.iter().filter(|p| p.column.as_deref().is_some_and(|c| !x.flag(c, 'g'))).map(|p| p.tokens[0].text.clone()).collect();
-        let named: Vec<String> = child_parts.iter().filter_map(|p| p.column.clone()).collect();
-        copy_rows(&mut out, x, y, &scratches[&fold(&x.name)].0, copied, &named);
+    copy_rows(&mut out, a, b, &scratches[&fold(&a.name)].0, copied, &named);
+    for ((x, y), (_, copied, named, _)) in family[1..].iter().zip(&carried) {
+        copy_rows(&mut out, x, y, &scratches[&fold(&x.name)].0, copied.clone(), named);
     }
     // Children first, so that no drop has a row left to fire an action on.
     for (x, _) in family.iter().rev() {
@@ -1012,7 +1159,7 @@ fn alter_table(from: &Object, to: &Object, decided: Option<Vec<(String, String)>
     let mut again: Vec<(usize, String)> = keys.into_iter().chain(coming).collect();
     again.sort();
     out.extend(again.into_iter().map(|(_, create)| create));
-    out.extend(reindexed(&a, &b, &renamed, &old_parts, &new_parts, &named, options(&from.def) != options(&to.def), schemas));
+    out.extend(std::iter::once(&s).chain(changed()).flat_map(|s| s.reindexed(schemas)));
     Some(out)
 }
 
@@ -1281,6 +1428,101 @@ fn whole_columns(list: &[Token], columns: &BTreeSet<String>) -> bool {
     true
 }
 
+/// The names in the parenthesized list `tokens` opens with, folded and in order, each with the
+/// collation it names, uppercased, but for its order: None where it holds anything but names.
+fn listed(tokens: &[Token]) -> Option<(Vec<(String, Option<String>)>, usize)> {
+    if tokens.first()?.text != "(" {
+        return None;
+    }
+    let close = tokens.iter().position(|t| t.text == ")")?;
+    let mut out: Vec<(String, Option<String>)> = Vec::new();
+    let mut k = 1;
+    while k < close {
+        let t = &tokens[k];
+        if t.upper() == "COLLATE" {
+            out.last_mut()?.1 = Some(unquote(tokens.get(k + 1)?).to_uppercase());
+            k += 2;
+            continue;
+        }
+        if t.text != "," && !matches!(t.upper().as_str(), "ASC" | "DESC") {
+            out.push((name_of(t)?, None));
+        }
+        k += 1;
+    }
+    Some((out, close))
+}
+
+/// The primary key of a table's text, its columns folded, in their order.
+fn primary_key(sql: &str) -> Option<Vec<String>> {
+    parts(sql).into_iter().find_map(|p| {
+        if !p.words().windows(2).any(|w| w[0] == "PRIMARY" && w[1] == "KEY") {
+            return None;
+        }
+        match &p.column {
+            Some(c) => Some(vec![c.clone()]),
+            None => p.tokens.iter().position(|t| t.text == "(").and_then(|at| listed(&p.tokens[at..])).map(|(cols, _)| cols.into_iter().map(|(c, _)| c).collect()),
+        }
+    })
+}
+
+/// The keys a foreign key can name in table `table` of `schema`, each as its columns, folded: its
+/// primary key, each UNIQUE, and each unique index on whole columns over every row, where each
+/// column's collation is the one the column declares, as a parent key's must be.
+fn keys_of(schema: &Schema, table: &Object) -> Vec<BTreeSet<String>> {
+    let parts = table.create.first().map(|sql| parts(sql)).unwrap_or_default();
+    let declared: BTreeMap<String, String> = parts
+        .iter()
+        .filter_map(|p| {
+            // Its own COLLATE, the last outside parentheses: one in a CHECK is the expression's.
+            let mut depth = 0;
+            let at = p.tokens.iter().enumerate().filter(|(_, t)| {
+                depth += i32::from(t.text == "(") - i32::from(t.text == ")");
+                depth == 0 && t.upper() == "COLLATE"
+            }).map(|(k, _)| k).last()?;
+            Some((p.column.clone()?, unquote(p.tokens.get(at + 1)?).to_uppercase()))
+        })
+        .collect();
+    let key = |cols: Vec<(String, Option<String>)>| -> Option<BTreeSet<String>> {
+        let own = |c: &str, named: &str| declared.get(c).map_or("BINARY", String::as_str) == named;
+        cols.iter().all(|(c, named)| named.as_deref().is_none_or(|n| own(c, n))).then(|| cols.into_iter().map(|(c, _)| c).collect())
+    };
+    let mut out = Vec::new();
+    for p in &parts {
+        let words = p.words();
+        let keyed = words.iter().any(|w| w == "UNIQUE") || words.windows(2).any(|w| w[0] == "PRIMARY" && w[1] == "KEY");
+        match &p.column {
+            Some(c) if keyed => out.push(BTreeSet::from([c.clone()])),
+            None if keyed => {
+                let at = p.tokens.iter().position(|t| t.text == "(");
+                out.extend(at.and_then(|at| listed(&p.tokens[at..])).and_then(|(cols, _)| key(cols)));
+            }
+            _ => {}
+        }
+    }
+    for index in schema.objects.values().filter(|o| o.kind == Some(Kind::Index) && o.deps.contains(&table.id)) {
+        let tokens = tokenize(index.create.first().map_or("", String::as_str), Dialect::Sqlite);
+        if let Some((_, on)) = unique_index(&tokens) {
+            let list = &tokens[on + 1..];
+            out.extend(listed(list).filter(|(_, close)| close + 1 == list.len()).and_then(|(cols, _)| key(cols)));
+        }
+    }
+    out
+}
+
+/// Whether `text`, a table's, references table `parent` (as the target has it) by a key it has yet
+/// to have: a table `from` lacks, columns no key of `from`'s covers, or, naming no columns, a primary
+/// key the change gives it or moves.
+fn new_key(text: &str, from: &Schema, parent: &Object) -> bool {
+    let Some(old) = from.objects.get(&parent.id) else { return true };
+    let (keys, name) = (keys_of(from, old), fold(&Info::of(parent).name));
+    let primary = || old.create.first().and_then(|sql| primary_key(sql)).is_none_or(|was| parent.create.first().and_then(|sql| primary_key(sql)) != Some(was));
+    let tokens = tokenize(text, Dialect::Sqlite);
+    (0..tokens.len()).filter(|&k| tokens[k].upper() == "REFERENCES" && tokens.get(k + 1).and_then(qualifier).as_deref() == Some(name.as_str())).any(|k| match tokens.get(k + 2).filter(|t| t.text == "(") {
+        Some(_) => listed(&tokens[k + 2..]).is_none_or(|(cols, _)| !keys.contains(&cols.into_iter().map(|(c, _)| c).collect())),
+        None => primary(),
+    })
+}
+
 /// Whether a table's text names a column by the table's own name, as `"users"."age"`.
 fn names_itself(sql: &str, table: &str) -> bool {
     let tokens = tokenize(sql, Dialect::Sqlite);
@@ -1332,6 +1574,42 @@ fn children_of<'a>(from: &'a Schema, to: &'a Schema, id: &str) -> (Vec<(&'a Obje
         ordered.push((o, &to.objects[&o.id]));
     }
     (ordered, cycle)
+}
+
+/// The tables whose rebuild makes table `id` again with them (`children_of`, the other way round): those
+/// it references at any depth, through tables that still reference the next in `to`.
+fn parents_of(from: &Schema, to: &Schema, id: &str) -> Vec<String> {
+    let table = |id: &str| from.objects.get(id).is_some_and(|o| o.kind == Some(Kind::Table) && !Info::of(o).virtual_table);
+    let mut seen: Vec<String> = vec![id.to_string()];
+    let mut k = 0;
+    while k < seen.len() {
+        let child = seen[k].clone();
+        k += 1;
+        let (Some(x), Some(y)) = (from.objects.get(&child), to.objects.get(&child)) else { continue };
+        for d in x.deps.iter().filter(|d| y.deps.contains(*d) && table(d)) {
+            if !seen.contains(d) {
+                seen.push(d.clone());
+            }
+        }
+    }
+    seen.split_off(1)
+}
+
+/// The tables that table `id` references and that reference it back, at any depth, through
+/// references both sides keep, `id` among them, in the order of their ids.
+fn circle(from: &Schema, to: &Schema, id: &str) -> Vec<String> {
+    let (children, _) = children_of(from, to, id);
+    let mut out: Vec<String> = parents_of(from, to, id).into_iter().filter(|p| children.iter().any(|(c, _)| c.id == *p)).collect();
+    out.push(id.to_string());
+    out.sort();
+    out
+}
+
+/// The table whose rebuild takes table `id` to the target, where its own change is a rebuild or one
+/// of the tables it references back rebuilds: of those (`circle`), the first whose change is one.
+fn rebuilt_by(from: &Schema, to: &Schema, id: &str, decided: Renamed) -> Option<String> {
+    let rebuilds = |t: &str| -> Option<bool> { Some(shape(from.objects.get(t)?, to.objects.get(t)?, decided(t.strip_prefix("table ")?))?.rebuild) };
+    circle(from, to, id).into_iter().find(|t| rebuilds(t) == Some(true))
 }
 
 /// What copies a table's rows into its rebuild, named `scratch`: the columns `copied` names, its

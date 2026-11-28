@@ -6,34 +6,29 @@ import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { Ajv2020 } from "ajv/dist/2020.js";
 import { Session } from "../src/analyze.ts";
-import { validate } from "../src/json-schema.ts";
 import { sqlModule } from "../src/loader.ts";
 import { clickhouseDatabase, clickhouseLive, closeSessions, DRIVERS, INDEX, mysqlDatabase, mysqlLive, pgLive, postgresDatabase, ROOT } from "./helpers.ts";
 
 // Every type of each database, at the edges of what it holds, as `.run()` returns it and as the
-// server writes it inside each kind of JSON document it builds, held to what the module says of it:
-// the rows, written as JSON by the convention the output schema states (src/index.ts), to that
-// schema, by Reylo's validator and by ajv with each format the schemas name held to what it claims;
-// each schema to JSON Schema 2020-12's own; and the same JSON to the type the content mapper
-// declares for it, `~reylo.json`. A built array of one value (`json_build_array`, `json_array`) is
-// typed by the engine's own writers, and an object or an aggregate by the loader's, so both meet
-// the same values.
+// server writes it inside each kind of JSON document it builds, held to the type the content mapper
+// declares for the result: each result written as a TypeScript literal of its values, a BigInt, bytes
+// and a Set included, and type-checked against that type. A built array of one value
+// (`json_build_array`, `json_array`) is typed by the engine's own writers, and an object or an
+// aggregate by the loader's, so both meet the same values.
 
-/** Rows as JSON writes them, by the convention the output schema states: a BigInt as the integer it is, bytes as their base64, a Set as an array of its members. */
-function asJson(rows: unknown): string {
-  return JSON.stringify(rows, function (this: Record<string, unknown>, key, written) {
-    const v = this[key];
-    if (typeof v === "bigint") return (JSON as unknown as { rawJSON(text: string): unknown }).rawJSON(String(v));
-    if (v instanceof Uint8Array) return Buffer.from(v).toString("base64");
-    if (v instanceof Set) return [...v];
-    return written;
-  });
+/** A value as a TypeScript literal of what it is: a BigInt as one, bytes and a Set as the objects they are, a key as a computed one, which `__proto__` is too. */
+function literal(v: unknown): string {
+  if (v === null) return "null";
+  if (typeof v === "bigint") return `${v}n`;
+  if (typeof v === "number") return Object.is(v, -0) ? "-0" : String(v);
+  if (typeof v === "string" || typeof v === "boolean") return JSON.stringify(v);
+  if (v instanceof Uint8Array) return `new Uint8Array([${[...v].join(",")}])`;
+  if (v instanceof Set) return `new Set([${[...v].map(literal).join(",")}])`;
+  if (Array.isArray(v)) return `[${v.map(literal).join(",")}]`;
+  if (typeof v === "object") return `{ ${Object.entries(v as Record<string, unknown>).map(([k, x]) => `[${JSON.stringify(k)}]: ${literal(x)}`).join(", ")} }`;
+  throw new Error(`no literal for ${String(v)}`);
 }
-
-/** JSON read back exactly, a whole number past 2^53 - 1 as a BigInt of its digits, which Reylo's validator refuses as a number that may already be another one. */
-const exactly = (text: string): unknown => JSON.parse(text, (_key, x, context?: { source?: string }) => (typeof x === "number" && !Number.isSafeInteger(x) && /^-?\d+$/.test(context?.source ?? "") ? BigInt(context!.source!) : x));
 
 /** A run's refusal of a 64-bit integer inside a document, which JSON.parse would round. */
 const refusesRounded = (message: string) => /holds, inside its JSON.*, the integer -?\d+, which is (past|below)/.test(message);
@@ -41,26 +36,9 @@ const SAFE = BigInt(Number.MAX_SAFE_INTEGER);
 /** Whether a case of 64-bit integers holds one past 2^53 - 1, which every document of it must refuse. */
 const unsafe = ([name, , values]: Case) => /int8|bigint|Int64|UInt64/i.test(name) && values.some((v) => (v.match(/-?\d{16,}/g) ?? []).some((d) => BigInt(d) > SAFE || BigInt(d) < -SAFE));
 
-/**
- * ajv, as a consumer of the schemas reads them, with every format they name held to what it claims:
- * an integer's width as a double reads it (2^63 - 1 rounds to 2^63), a decimal's text, base64, and
- * Postgres's hex of bytes; and the formats Reylo's validator asserts, by it. A format named nowhere
- * here fails the schema's compilation, so a new one is defined before a schema writes it.
- */
-const ajv = new Ajv2020({ strictTypes: false, strictTuples: false, strictRequired: false, allErrors: false, multipleOfPrecision: 12 });
-const within = (bits: number) => (v: number) => Number.isInteger(v) && v >= -(2 ** (bits - 1)) && v <= 2 ** (bits - 1);
-ajv.addFormat("int32", { type: "number", validate: within(32) });
-ajv.addFormat("int64", { type: "number", validate: within(64) });
-ajv.addFormat("float", { type: "number", validate: Number.isFinite });
-ajv.addFormat("double", { type: "number", validate: Number.isFinite });
-ajv.addFormat("decimal", /^[+-]?(\d+(\.\d*)?|\.\d+)(e[+-]?\d+)?$/i);
-ajv.addFormat("byte", /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/);
-ajv.addFormat("hex", /^\\x(?:[0-9a-fA-F]{2})*$/);
-for (const name of ["date", "time", "date-time", "uuid", "email", "ipv4", "ipv6", "uri", "hostname", "regex"]) ajv.addFormat(name, (v: string) => validate({ type: "string", format: name }, v) === undefined);
-
 /** A project at a new directory on `url`, with `drivers` from lab/drivers installed, whose `main.ts` the type check reads. */
 function project(url: string, drivers: string[] = []): string {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), "reylo-output-schema-")));
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "reylo-row-types-")));
   writeFileSync(join(root, "package.json"), `{ "type": "module" }`);
   writeFileSync(join(root, ".env"), `DATABASE_URL=${url}\n`);
   mkdirSync(join(root, "node_modules", "@clickhouse"), { recursive: true });
@@ -71,7 +49,7 @@ function project(url: string, drivers: string[] = []): string {
   return root;
 }
 
-type Built = { run(client: unknown): Promise<unknown> | unknown; inputSchema: Record<string, unknown>; outputSchema: Record<string, unknown> };
+type Built = { run(client: unknown): Promise<unknown> | unknown };
 
 /** The module a build step writes for `sql` in `root`, imported. */
 async function built(root: string, name: string, sql: string): Promise<Built> {
@@ -96,7 +74,7 @@ type Case = readonly [name: string, column: string, values: readonly string[]];
  */
 async function check(root: string, cases: readonly Case[], statements: (table: string, c: Case) => readonly string[], run: (q: Built) => Promise<unknown>): Promise<string[]> {
   const problems: string[] = [];
-  const typed: { file: string; about: string; json: unknown }[] = [];
+  const typed: { file: string; about: string; rows: unknown }[] = [];
   for (const [i, c] of cases.entries()) {
     // A case a document refuses also has its column read on its own, which holds every value.
     const refused = unsafe(c);
@@ -111,10 +89,8 @@ async function check(root: string, cases: readonly Case[], statements: (table: s
         continue;
       }
       let rows: unknown;
-      let text: string;
       try {
-        text = asJson(await run(q));
-        rows = JSON.parse(text);
+        rows = await run(q);
       } catch (e) {
         const message = (e as Error).message.split("\n")[0]!;
         // An edge of a 64-bit integer inside a document is refused rather than returned rounded.
@@ -122,29 +98,19 @@ async function check(root: string, cases: readonly Case[], statements: (table: s
         continue;
       }
       if (document) {
-        problems.push(`${about}: a document holding a 64-bit integer past 2^53 - 1 came back, which JSON.parse rounds: ${text}`);
+        problems.push(`${about}: a document holding a 64-bit integer past 2^53 - 1 came back, which JSON.parse rounds: ${literal(rows)}`);
         continue;
       }
-      const error = validate(q.outputSchema, exactly(text));
-      if (error !== undefined) problems.push(`${about}: ${error.message} in ${JSON.stringify(rows)} against ${JSON.stringify(q.outputSchema)}`);
-      for (const [which, schema] of [["output", q.outputSchema], ["input", q.inputSchema]] as const) {
-        try {
-          const check = ajv.compile(schema);
-          if (which === "output" && !check(rows)) problems.push(`${about}: ajv: ${ajv.errorsText(check.errors)} in ${JSON.stringify(rows)} against ${JSON.stringify(schema)}`);
-        } catch (e) {
-          problems.push(`${about}: the ${which} schema does not compile: ${(e as Error).message}`);
-        }
-      }
-      typed.push({ file: `q${i}_${j}`, about, json: rows });
+      typed.push({ file: `q${i}_${j}`, about, rows });
     }
   }
-  // Each statement's JSON as a value of the type its module declares for it.
-  writeFileSync(join(root, "main.ts"), typed.map(({ file, json }) => `import type ${file} from "./${file}.sql";\nexport const ${file}_json: (typeof ${file})["~reylo"]["json"] = ${JSON.stringify(json)};\n`).join(""));
+  // Each statement's result as a value of the type its module declares for it.
+  writeFileSync(join(root, "main.ts"), `import type { Materialize } from "reylo";\n${typed.map(({ file, rows }) => `import type ${file} from "./${file}.sql";\nexport const ${file}_rows: Materialize<(typeof ${file})["~reylo"]["element"], (typeof ${file})["~reylo"]["cardinality"]> = ${literal(rows)};\n`).join("")}`);
   const tsc = spawnSync(process.execPath, [join(ROOT, "node_modules", "typescript", "bin", "tsc"), "-p", "tsconfig.json", "--runExternalCode", "--pretty", "false"], { cwd: root, encoding: "utf8" });
   for (const line of (tsc.stdout + tsc.stderr).split("\n").filter(Boolean)) {
     const at = /^main\.ts\((\d+),/.exec(line);
-    const entry = at ? typed[Math.floor((Number(at[1]) - 1) / 2)] : undefined;
-    problems.push(entry ? `${entry.about}: the declared type refuses ${JSON.stringify(entry.json)}: ${line}` : `tsc: ${line}`);
+    const entry = at ? typed[Math.floor((Number(at[1]) - 2) / 2)] : undefined;
+    problems.push(entry ? `${entry.about}: the declared type refuses ${literal(entry.rows)}: ${line}` : `tsc: ${line}`);
   }
   return problems;
 }
@@ -236,8 +202,8 @@ const POSTGRES: readonly Case[] = [
 /** The extension each case's type comes from, whose cases a server without it skips, saying so: a Postgres installed on Windows has no pgvector. */
 const EXTENSIONS: Readonly<Record<string, string>> = { citext: "citext", hstore: "hstore", ltree: "ltree", vector: "vector", halfvec: "vector", sparsevec: "vector" };
 
-test("Postgres: every type's values hold to the output schema, as a column and inside each document Postgres builds", { skip: pgLive }, async (t) => {
-  const own = await postgresDatabase("reylo_output_schema");
+test("Postgres: every type's values are of the type the module declares, as a column and inside each document Postgres builds", { skip: pgLive }, async (t) => {
+  const own = await postgresDatabase("reylo_row_types");
   try {
     const available = new Set((await own.sql`select name from pg_available_extensions`).map((r: { name: string }) => r.name));
     for (const missing of new Set(Object.values(EXTENSIONS).filter((e) => !available.has(e)))) await t.test(`${missing}'s types`, { skip: `the test server has no ${missing}` }, () => {});
@@ -296,8 +262,8 @@ const MYSQL: readonly Case[] = [
   ["point", "point", ["ST_GeomFromText('POINT(1 2)')"]],
 ];
 
-test("MySQL: every type's values hold to the output schema, as a column and inside each document MySQL builds", { skip: mysqlLive }, async () => {
-  const own = await mysqlDatabase("reylo_output_schema", `set time_zone = '+00:00';\n${tables(MYSQL)}`);
+test("MySQL: every type's values are of the type the module declares, as a column and inside each document MySQL builds", { skip: mysqlLive }, async () => {
+  const own = await mysqlDatabase("reylo_row_types", `set time_zone = '+00:00';\n${tables(MYSQL)}`);
   try {
     const problems = await check(project(own.url, ["mysql2"]), MYSQL, (t, [, column]) => [
       `select c, json_object('v', c) as o, json_array(c) as a from ${t}`,
@@ -332,7 +298,7 @@ const SQLITE: readonly Case[] = [
   ["blob", "blob", ["x''", "x'00ff'"]],
 ];
 
-test("SQLite: every type's values hold to the output schema, as a column and inside each document SQLite builds", async () => {
+test("SQLite: every type's values are of the type the module declares, as a column and inside each document SQLite builds", async () => {
   const dir = project("file:./app.db");
   const own = new DatabaseSync(join(dir, "app.db"));
   own.exec(tables(SQLITE, "integer primary key"));
@@ -392,10 +358,10 @@ const CLICKHOUSE: readonly Case[] = [
   ["Variant(UInt64, Ring)", "Variant(UInt64, Ring)", ["18446744073709551615", "[(0, 0)]"]],
 ];
 
-test("ClickHouse: every type's values hold to the output schema, as a column", { skip: clickhouseLive }, async () => {
+test("ClickHouse: every type's values are of the type the module declares, as a column", { skip: clickhouseLive }, async () => {
   const setup = CLICKHOUSE.map(([, column, values], i) => `CREATE TABLE t${i} (id Int32, c Nullable(${column})) ENGINE = MergeTree ORDER BY id;\nINSERT INTO t${i} VALUES ${[...values, "NULL"].map((v, n) => `(${n + 1}, ${v})`).join(", ")};`);
   // A type that cannot sit inside Nullable stands as itself, its NULL row left out.
-  const own = await clickhouseDatabase("reylo_output_schema", setup.map((s, i) => (/^(Array|Tuple|Map|LowCardinality|Point|Ring|Variant)/.test(CLICKHOUSE[i]![1]) ? s.replace(/Nullable\((.*)\)\) ENGINE/, "$1) ENGINE").replace(/, \(\d+, NULL\);$/, ";") : s)).join("\n"));
+  const own = await clickhouseDatabase("reylo_row_types", setup.map((s, i) => (/^(Array|Tuple|Map|LowCardinality|Point|Ring|Variant)/.test(CLICKHOUSE[i]![1]) ? s.replace(/Nullable\((.*)\)\) ENGINE/, "$1) ENGINE").replace(/, \(\d+, NULL\);$/, ";") : s)).join("\n"));
   try {
     const problems = await check(project(own.url, ["@clickhouse/client"]), CLICKHOUSE, (t, [, column]) => [`SELECT c FROM ${t} ORDER BY id`, ...(column === "Int32" ? [`SELECT c AS \`__proto__\` FROM ${t} ORDER BY id`] : [])], async (q) => q.run(own.client));
     assert.deepEqual(problems, [], problems.join("\n"));

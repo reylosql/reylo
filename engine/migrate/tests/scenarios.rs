@@ -141,6 +141,29 @@ impl P {
         Some(P { d, dir, url, name, lines: vec![], t, strict: false, server: None })
     }
 
+    /// A project and, fresh, the one database pg_cron makes itself in: the one `cron.database_name`
+    /// names on the server `REYLO_TEST_PG_CRON` names, a Postgres that loads pg_cron. None where it
+    /// is not set.
+    async fn pg_cron() -> Option<P> {
+        let Ok(base) = std::env::var("REYLO_TEST_PG_CRON") else {
+            eprintln!("skipped: no test server with pg_cron");
+            return None;
+        };
+        let mut p = P::new(Dialect::Postgres).await?;
+        // Its database on the other test server goes unused.
+        let mut other = Db::connect(&with_database(&p.url, "postgres"), &p.dir).await.unwrap();
+        other.exec(&format!("drop database if exists {} with (force)", p.name)).await.unwrap();
+        other.close().await;
+        let mut admin = Db::connect(&base, &p.dir).await.unwrap();
+        let name = admin.rows("select current_setting('cron.database_name') as n").await.unwrap()[0].text("n").to_string();
+        admin.exec(&format!("drop database if exists {name} with (force)")).await.unwrap();
+        admin.exec(&format!("create database {name}")).await.unwrap();
+        admin.close().await;
+        p.url = with_database(&base, &name);
+        p.name = name;
+        Some(p)
+    }
+
     /// A project and a fresh database on a libSQL server of its own (Turso's dialect, SQLite).
     async fn turso() -> Option<P> {
         let mut p = P::new(Dialect::Sqlite).await?;
@@ -1188,7 +1211,8 @@ async fn line_endings_inside_a_string_are_no_edit(mut p: P) {
 
 /// A `--` comment ends at a bare carriage return on Postgres, and runs on to the next line feed on
 /// MySQL and SQLite: there, the same text with a line feed in its place runs one more statement, so
-/// it is an edit, whatever the lock makes of the two, and history pull writes back what ran.
+/// it is an edit. The lock reads every dialect alike, so it takes it for one on Postgres too, and
+/// history pull writes back what ran.
 async fn a_carriage_return_ends_a_comment_only_where_the_database_ends_it(mut p: P) {
     let (d, text) = (p.d, p.t.text);
     p.linear();
@@ -1201,16 +1225,14 @@ async fn a_carriage_return_ends_a_comment_only_where_the_database_ends_it(mut p:
     let ran = if d == Dialect::Postgres { vec!["zero", "one"] } else { vec!["zero"] };
     assert_eq!(p.rows("select a from t order by a desc").await.iter().map(|r| r.text("a").to_string()).collect::<Vec<_>>(), ran);
     p.file("20261027110000_rows.sql", &rows("\n"));
-    if d == Dialect::Postgres {
-        assert_eq!(p.status().await, 0, "{}", p.peek());
-        assert_eq!(p.migrate().await, 0, "{}", p.peek());
-        assert_has!(p.output(), "Up to date");
-        return;
-    }
     assert_eq!(p.status().await, 1, "{}", p.peek());
-    assert_has!(p.output(), r"20261027110000_rows\.sql  applied [^\n]+, and edited since");
-    assert_eq!(p.migrate().await, 1, "{}", p.peek());
-    assert_has!(p.output(), r"Migration 20261027110000_rows\.sql changed after this database applied it");
+    if d == Dialect::Postgres {
+        assert_has!(p.output(), r"Migration 20261027110000_rows\.sql changed after it was locked");
+    } else {
+        assert_has!(p.output(), r"20261027110000_rows\.sql  applied [^\n]+, and edited since");
+        assert_eq!(p.migrate().await, 1, "{}", p.peek());
+        assert_has!(p.output(), r"Migration 20261027110000_rows\.sql changed after this database applied it");
+    }
     assert_eq!(p.run(async |o, log| reylo_migrate::history_pull(o, log).await).await, 0, "{}", p.peek());
     assert_has!(p.output(), "written over");
     assert_eq!(std::fs::read_to_string(p.dir.join("migrations").join("20261027110000_rows.sql")).unwrap(), rows("\r"));
@@ -1322,7 +1344,8 @@ async fn init_writes_and_records_the_baseline(mut p: P) {
 
 /// Another migration tool's history: a table of Prisma Migrate's with a check, one of Knex's whose
 /// key is a counter (a sequence the table owns on Postgres), Liquibase's lock in its capitals, and
-/// on Postgres Drizzle Kit's, in a schema of its own, and on MySQL a trigger on Prisma's.
+/// on Postgres Drizzle Kit's, in a schema of its own, on MySQL a trigger on Prisma's, and on SQLite
+/// Wrangler's, as `wrangler d1 migrations apply` makes it on D1.
 fn other_tools_history(p: &P) -> String {
     let text = p.t.text;
     let knex_id = match p.d {
@@ -1338,7 +1361,9 @@ fn other_tools_history(p: &P) -> String {
     match p.d {
         Dialect::Postgres => sql.push_str("create schema drizzle; create table drizzle.__drizzle_migrations (id serial primary key, hash text not null); insert into drizzle.__drizzle_migrations (hash) values ('h'); select setval('knex_migrations_id_seq', 100);"),
         Dialect::Mysql => sql.push_str("create trigger prisma_named before insert on _prisma_migrations for each row set new.migration_name = trim(new.migration_name);"),
-        Dialect::Sqlite => {}
+        Dialect::Sqlite => sql.push_str(
+            "CREATE TABLE IF NOT EXISTS \"d1_migrations\"(\n\t\tid         INTEGER PRIMARY KEY AUTOINCREMENT,\n\t\tname       TEXT UNIQUE,\n\t\tapplied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL\n); insert into d1_migrations (name) values ('0001_users.sql');",
+        ),
     }
     sql
 }
@@ -1357,7 +1382,7 @@ async fn the_dump_leaves_out_another_tools_history() {
     p.exec(&format!("create table users (id bigint primary key, email text not null);{}", other_tools_history(&p))).await;
     let text = introspect(&p.opts()).await;
     assert!(text.contains("CREATE TABLE public.users"), "{text}");
-    assert!(!has(&text, "(?i)prisma|knex|drizzle|databasechangelog"), "{text}");
+    assert!(!has(&text, "(?i)prisma|knex|drizzle|databasechangelog|d1_migrations"), "{text}");
 }
 
 async fn leaves_out_another_tools_history(mut p: P, app: &str) {
@@ -1366,9 +1391,9 @@ async fn leaves_out_another_tools_history(mut p: P, app: &str) {
     p.output();
     let schema = std::fs::read_to_string(p.dir.join("schema.sql")).unwrap();
     assert!(has(&schema, "(?i)create table .*users"), "{schema}");
-    assert!(!has(&schema, "(?i)prisma|knex|drizzle|databasechangelog"), "{schema}");
+    assert!(!has(&schema, "(?i)prisma|knex|drizzle|databasechangelog|d1_migrations"), "{schema}");
     assert_eq!(std::fs::read_to_string(p.dir.join("migrations/init.sql")).unwrap(), schema);
-    assert!(!has(&introspect(&p.opts()).await, "(?i)prisma|knex|drizzle|databasechangelog"));
+    assert!(!has(&introspect(&p.opts()).await, "(?i)prisma|knex|drizzle|databasechangelog|d1_migrations"));
     assert_eq!(p.dry_run().await, 0, "{}", p.peek());
     // Another database that still holds the old tool's history matches init.sql, and keeps it.
     let q = P::new(p.d).await.unwrap();
@@ -1381,6 +1406,9 @@ async fn leaves_out_another_tools_history(mut p: P, app: &str) {
     assert_eq!(p.run(async |o, log| reylo_migrate::db_wipe(o, false, log).await).await, 0, "{}", p.peek());
     assert_eq!(q.rows("select * from _prisma_migrations").await.len(), 1);
     assert_eq!(q.rows("select * from DATABASECHANGELOGLOCK").await.len(), 1);
+    if p.d == Dialect::Sqlite {
+        assert_eq!(q.rows("select * from d1_migrations").await.len(), 1);
+    }
     q.exec("insert into knex_migrations (name) values ('two.js')").await;
     assert_eq!(q.rows("select id from knex_migrations where name = 'two.js'").await[0].text("id"), "101");
     // A migration that drops it later is no change to the schema, and replays on a database that
@@ -4369,6 +4397,86 @@ on!(
     a_foreign_key_added_back_under_another_name_holds_through_its_keys_swap,
     a_partitioned_tables_foreign_key_holds_through_its_keys_swap,
 );
+
+/// pg_cron makes itself only in the database `cron.database_name` names, which no shadow is: a project
+/// that creates it, and one that finds it made, schedule jobs from their migrations all the same.
+#[test]
+fn a_project_with_pg_cron_replays_in_shadows() {
+    on_a_main_threads_stack(|| async {
+        let Some(mut p) = P::pg_cron().await else { return };
+        let int = p.t.int;
+        p.exec(&format!("create extension pg_cron; create table runs (id {int}); select cron.schedule('nightly', '0 3 * * *', 'delete from runs')")).await;
+        assert_eq!(p.run(async |o, log| reylo_migrate::init(o, &[], log).await).await, 0, "{}", p.peek());
+        p.output();
+        assert_has!(std::fs::read_to_string(p.dir.join("migrations").join("init.sql")).unwrap(), r"(?i)create extension[^;]*pg_cron");
+        p.file("20261126100000_hourly.sql", "select cron.schedule('hourly', '0 * * * *', 'select 1');");
+        let (code, out) = p.check_every_way().await;
+        assert_eq!(code, 0, "{out}");
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        assert_eq!(p.rows("select jobname from cron.job order by 1").await.iter().map(|r| r.text("jobname").to_string()).collect::<Vec<_>>(), ["hourly", "nightly"]);
+        assert!(p.rows("select 1 from pg_database where datname = 'contrib_regression'").await.is_empty(), "a shadow kept pg_cron's name");
+
+        // A shadow a run cut off left under pg_cron's name is swept; a database of that name that is no
+        // shadow stays, and keeps every shadow from taking the name.
+        let base = std::env::var("REYLO_TEST_PG_CRON").unwrap();
+        let mut admin = Db::connect(&base, &p.dir).await.unwrap();
+        admin.exec("create database contrib_regression").await.unwrap();
+        admin.exec("comment on database contrib_regression is 'reylo shadow reylo_shadow_0000000000'").await.unwrap();
+        reylo_migrate::cache::set_enabled(Some(false));
+        assert_eq!(p.dry_run().await, 0, "{}", p.peek());
+        assert!(p.rows("select 1 from pg_database where datname = 'contrib_regression'").await.is_empty(), "a shadow left under pg_cron's name stayed");
+        admin.exec("create database contrib_regression").await.unwrap();
+        p.output();
+        assert_ne!(p.dry_run().await, 0, "{}", p.peek());
+        assert_has!(p.output(), r"named contrib_regression that is no shadow");
+        reylo_migrate::cache::set_enabled(None);
+        admin.exec("drop database contrib_regression").await.unwrap();
+        admin.close().await;
+        forget(&p.url).await;
+
+        // A pending migration that makes it, which deploy's dry run replays and then runs step by step.
+        let Some(mut q) = P::pg_cron().await else { return };
+        q.file("20261126100000_runs.sql", &format!("create extension pg_cron; create table runs (id {int}); select cron.schedule('nightly', '0 3 * * *', 'delete from runs');"));
+        q.schema(&format!("create extension pg_cron; create table runs (id {int});"));
+        assert_eq!(q.dry_run().await, 0, "{}", q.peek());
+        assert_eq!(q.migrate().await, 0, "{}", q.peek());
+        // One that drops it and makes it again, in a shadow that has it.
+        q.file("20261126110000_again.sql", "drop/* again */extension\nif exists \"legacy;extension\", pg_cron; create extension pg_cron;");
+        assert_eq!(q.dry_run().await, 0, "{}", q.peek());
+        assert_eq!(q.migrate().await, 0, "{}", q.peek());
+        q.file("20261126120000_in_a_block.sql", "do $$ begin drop extension pg_cron; end $$; create extension pg_cron;");
+        assert_eq!(q.dry_run().await, 0, "{}", q.peek());
+        assert_eq!(q.migrate().await, 0, "{}", q.peek());
+        q.file("20261126130000_in_a_procedure.sql", "create procedure remove_cron() language plpgsql as $p$ begin drop extension pg_cron; end $p$; call remove_cron(); create extension pg_cron; drop procedure remove_cron();");
+        assert_eq!(q.dry_run().await, 0, "{}", q.peek());
+        assert_eq!(q.migrate().await, 0, "{}", q.peek());
+        assert!(q.rows("select 1 from pg_database where datname = 'contrib_regression'").await.is_empty(), "a shadow kept pg_cron's name");
+        forget(&q.url).await;
+
+        // Made on the database by hand, it is the environment's, which every shadow is given.
+        let Some(mut e) = P::pg_cron().await else { return };
+        e.exec("create extension pg_cron").await;
+        e.file("20261126100000_runs.sql", &format!("create table runs (id {int}); select cron.schedule('nightly', '0 3 * * *', 'delete from runs');"));
+        e.schema(&format!("create table runs (id {int});"));
+        assert_eq!(e.dry_run().await, 0, "{}", e.peek());
+        assert_has!(e.output(), r"Tried the pending migration on a shadow database");
+        forget(&e.url).await;
+
+        // On another database of the server, pg_cron refuses the target, and so each shadow refuses it too.
+        let Some(mut o) = P::pg_cron().await else { return };
+        let base = std::env::var("REYLO_TEST_PG_CRON").unwrap();
+        let mut admin = Db::connect(&base, &o.dir).await.unwrap();
+        admin.exec("drop database if exists reylo_cron_beside with (force)").await.unwrap();
+        admin.exec("create database reylo_cron_beside").await.unwrap();
+        o.url = with_database(&base, "reylo_cron_beside");
+        o.file("20261126100000_cron.sql", "create extension pg_cron;");
+        assert_ne!(o.dry_run().await, 0, "{}", o.peek());
+        assert_has!(o.output(), r"can only create extension in database");
+        forget(&o.url).await;
+        admin.exec("drop database if exists reylo_cron_beside with (force)").await.unwrap();
+        admin.close().await;
+    });
+}
 
 #[tokio::test(flavor = "current_thread")]
 async fn a_sqlite_numeric_column_made_integer_needs_no_drop() {
@@ -9815,6 +9923,66 @@ create trigger kids_note after insert on kids begin update parents set name = na
         }
         assert_eq!(p.dev().await, 0, "{}", p.peek());
     }
+}
+
+/// What Cloudflare keeps in every D1 database and Durable Object, its `_cf_` tables, which both
+/// refuse to make, is not the project's, nor is Wrangler's history under the name a project's
+/// `migrations_table` gives it: init leaves them out, a comparison never sees them, and a wipe leaves
+/// their rows. A table of the project's whose name only starts like SQLite's own is the
+/// project's.
+#[tokio::test(flavor = "current_thread")]
+async fn init_leaves_out_cloudflares_own_tables() {
+    let Some(mut p) = P::new(Dialect::Sqlite).await else { return };
+    let cloudflare = "CREATE TABLE _cf_METADATA (key INTEGER PRIMARY KEY, value BLOB); insert into _cf_METADATA values (1, x'00');
+        CREATE TABLE _cf_KV (key TEXT PRIMARY KEY, value BLOB) WITHOUT ROWID; create index _cf_kv_value on _cf_KV (value);
+        CREATE TABLE IF NOT EXISTS \"migrations(local)\"(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL); insert into \"migrations(local)\" (name) values ('0001_users.sql');";
+    let app = "create table users (id integer primary key, name text not null); create table sqlites (id integer primary key autoincrement, users_id integer references users (id));
+        create index sqliteidx on sqlites (users_id); insert into users values (1, 'a'); insert into sqlites (users_id) values (1);";
+    p.exec(&format!("{cloudflare}{app}")).await;
+    assert_eq!(p.run(async |o, log| reylo_migrate::init(o, &[], log).await).await, 0, "{}", p.peek());
+    p.output();
+    let schema = std::fs::read_to_string(p.dir.join("schema.sql")).unwrap();
+    assert!(has(&schema, r"(?i)create table users\b") && has(&schema, r"(?i)create table sqlites\b") && has(&schema, r"(?i)create index sqliteidx\b"), "{schema}");
+    assert!(!has(&schema, "(?i)_cf_|migrations\\(local"), "{schema}");
+    assert_eq!(std::fs::read_to_string(p.dir.join("migrations/init.sql")).unwrap(), schema);
+    assert!(!has(&introspect(&p.opts()).await, "(?i)_cf_|migrations\\(local"));
+    assert_eq!(p.dry_run().await, 0, "{}", p.peek());
+    // Another database that holds Cloudflare's tables, as every D1 database does, matches init.sql.
+    let q = P::new(p.d).await.unwrap();
+    q.exec(&format!("{cloudflare}{app}")).await;
+    let url = std::mem::replace(&mut p.url, q.url.clone());
+    assert_eq!(p.history_push().await, 0, "{}", p.peek());
+    assert_eq!(q.history().await, ["init.sql"]);
+    assert_eq!(p.dry_run().await, 0, "{}", p.peek());
+    // A wipe empties the project's tables alone.
+    p.url = url;
+    assert_eq!(p.run(async |o, log| reylo_migrate::db_wipe(o, false, log).await).await, 0, "{}", p.peek());
+    assert_eq!(p.rows("select * from _cf_METADATA").await.len(), 1);
+    assert_eq!(p.rows("select * from \"migrations(local)\"").await.len(), 1);
+    assert_eq!(p.rows("select * from sqlites").await.len(), 0);
+    assert_eq!(p.rows("select * from users").await.len(), 0);
+}
+
+/// Outside a file of Cloudflare's runtime, which alone refuses `_cf_` names, a table named so is the
+/// project's, as is one named as Cloudflare's or Wrangler's own but defined otherwise. Litestream's
+/// tables, which it makes in every database it replicates, are not.
+#[tokio::test(flavor = "current_thread")]
+async fn a_cf_table_outside_cloudflare_is_the_projects() {
+    let Some(mut p) = P::new(Dialect::Sqlite).await else { return };
+    p.exec("create table _cf_parent (id integer primary key); create table child (id integer primary key, parent integer references _cf_parent (id));
+        create table _cf_METADATA (key INTEGER PRIMARY KEY, value BLOB, tenant integer not null); create table d1_migrations (id integer primary key, region text);
+        create table releases (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL); create table notes (id integer primary key, release integer references releases (id));
+        CREATE TABLE IF NOT EXISTS _litestream_seq (id INTEGER PRIMARY KEY, seq INTEGER); CREATE TABLE IF NOT EXISTS _litestream_lock (id INTEGER); insert into _litestream_seq values (1, 1);").await;
+    assert_eq!(p.run(async |o, log| reylo_migrate::init(o, &[], log).await).await, 0, "{}", p.peek());
+    p.output();
+    let schema = std::fs::read_to_string(p.dir.join("schema.sql")).unwrap();
+    for table in ["_cf_parent", "child", "_cf_METADATA", "d1_migrations", "releases", "notes"] {
+        assert!(has(&schema, &format!(r"(?i)create table {table}\b")), "{table}: {schema}");
+    }
+    assert!(!has(&schema, "(?i)litestream"), "{schema}");
+    assert_eq!(p.dry_run().await, 0, "{}", p.peek());
+    assert_eq!(p.run(async |o, log| reylo_migrate::db_wipe(o, false, log).await).await, 0, "{}", p.peek());
+    assert_eq!(p.rows("select * from _litestream_seq").await.len(), 1);
 }
 
 // reylo run on a SQLite file that isn't there refuses, as the migrations' commands do, rather than

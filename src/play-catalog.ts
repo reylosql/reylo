@@ -56,8 +56,8 @@ export const CATALOG_QUERIES: Record<Dialect, Queries> = {
   sqlite: {
     // Each column named apart: a host may read a row by its columns' names.
     tables: `select m.name as table_name, p.name as column_name, p.type as column_type, not p."notnull" as nullable from sqlite_schema m join pragma_table_info(m.name) p
-  where m.type in ('table', 'view') and m.name not like 'sqlite_%' order by m.name, p.cid`,
-    functions: `select name, max(type = 'a') as aggregate, null as returns, 0 as set_returning from pragma_function_list where name not like 'sqlite_%' group by name order by name`,
+  where m.type in ('table', 'view') and m.name not like 'sqlite\\_%' escape '\\' order by m.name, p.cid`,
+    functions: `select name, max(type = 'a') as aggregate, null as returns, 0 as set_returning from pragma_function_list where name not like 'sqlite\\_%' escape '\\' group by name order by name`,
   },
 };
 

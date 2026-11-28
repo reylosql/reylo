@@ -32,8 +32,6 @@ await query.run(pool, [1, "ada"]);
 // @ts-expect-error the module declares no tuple of the values
 type V = q.Values;
 const g: ExpectedRow | null = query["~standard"].types!.output;
-// As JSON: a BigInt is the integer it is (src/schema.ts).
-const h: { created_at: string; big: number | null } | null = query["~reylo"].json;
 // @ts-expect-error wrong parameter type
 await query.run(pool, { id: "1", name: "ada" });
 // @ts-expect-error a sqlite client cannot run a postgres query

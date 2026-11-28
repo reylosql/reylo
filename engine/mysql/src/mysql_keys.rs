@@ -23,7 +23,7 @@
 //! two strings of different collations compare under one the server picks, and an exact number
 //! compared with a FLOAT or DOUBLE compares as a double.
 
-use crate::mysql::{compares_as_is, const_limit, deterministic, is_variable, one_before_limit, reads_column, select_of, value_class, Class, Keys};
+use crate::mysql::{builtin, compares_as_is, const_limit, deterministic, is_dual, is_variable, one_before_limit, reads_column, select_of, value_class, Class, Keys};
 use crate::mysql_names::Reads;
 use syntax::mysql::ast::{self, Distinct, Expr, GroupByExpr, JoinConstraint, JoinOperator, ObjectNamePart, Query, Select, SelectItem, SelectItemQualifiedWildcardKind, SetExpr, TableFactor, TableWithJoins};
 use std::cell::RefCell;
@@ -114,11 +114,13 @@ struct From<'a> {
     /// another case is, on a server that keeps case, an enclosing item's spelled the same.
     enclosed: bool,
     keys: &'a Keys,
+    /// The WITH queries the SELECT sees, which its subqueries see too.
+    ctes: Ctes<'a>,
 }
 
 impl<'a> From<'a> {
     fn read(s: &'a Select, ctes: &[Cte<'a>], enclosed: bool, keys: &'a Keys) -> From<'a> {
-        let mut from = From { items: Vec::new(), conjuncts: Vec::new(), merged: false, refused: None, enclosed, keys };
+        let mut from = From { items: Vec::new(), conjuncts: Vec::new(), merged: false, refused: None, enclosed, keys, ctes: ctes.to_vec() };
         for twj in &s.from {
             from.flatten(twj, ctes, false);
         }
@@ -372,11 +374,123 @@ impl<'a> From<'a> {
     /// of `i`, only columns of `done` items and of enclosing queries, gives every row one value,
     /// and compares the column as it is.
     fn equates(&self, e: &Expr, i: usize, column: &str, class: Option<Class>, done: &[bool]) -> bool {
+        let own = |side: &Expr| matches!(self.place_expr(side), Some(Placed::Item(j, c)) if j == i && c == column);
+        if let Expr::InSubquery { expr, subquery, negated: false } = e {
+            return own(expr) && self.subquery_value(subquery, class, i, done, true);
+        }
         let Expr::BinaryOp { left, op: ast::BinaryOperator::Eq, right } = e else { return false };
         [(left, right), (right, left)].into_iter().any(|(side, value)| {
-            let own = matches!(self.place_expr(side), Some(Placed::Item(j, c)) if j == i && c == column);
-            own && self.reads(value).is_some_and(|read| read.iter().all(|j| *j != i && done[*j])) && self.compares(class, value)
+            own(side)
+                && match value.as_ref() {
+                    Expr::Subquery(q) => self.subquery_value(q, class, i, done, false),
+                    value => self.reads(value).is_some_and(|read| read.iter().all(|j| *j != i && done[*j])) && self.compares(class, value),
+                }
         })
+    }
+
+    /// Whether subquery `q`, compared with a key column of item `i` that compares as `class`, is one
+    /// value for every row: a plain SELECT of one column over tables, which reads no column of `i`,
+    /// of this FROM only `done` items' and otherwise only its own tables' and enclosing queries',
+    /// calls nothing that changes from row to row, and returns an exact number, as the key is one:
+    /// as with a column, both sides must be exact numbers ([`From::compares`]). The server refuses a
+    /// scalar subquery of more than one row; IN takes any number, so for it (`bounded`) the
+    /// subquery must be proved to return one row at most.
+    fn subquery_value(&self, q: &Query, class: Option<Class>, i: usize, done: &[bool], bounded: bool) -> bool {
+        let Some(s) = plain(q) else { return false };
+        let [SelectItem::UnnamedExpr(value) | SelectItem::ExprWithAlias { expr: value, .. }] = s.projection.as_slice() else { return false };
+        let GroupByExpr::Expressions(group, modifiers) = &s.group_by else { return false };
+        if q.with.is_some() || !modifiers.is_empty() || !class.is_some_and(Class::exact) {
+            return false;
+        }
+        let sub = From::read(s, &self.ctes, true, self.keys);
+        if sub.refused.is_some() || sub.merged || !sub.items.iter().all(|it| matches!(it.source, Source::Table(_)) && !it.renamed) {
+            return false;
+        }
+        // Its ORDER BY picks which row a LIMIT keeps, so a column of the query around there is a
+        // value per row as well.
+        let ordered: Vec<&Expr> = match q.order_by.as_ref().map(|o| &o.kind) {
+            None => Vec::new(),
+            Some(ast::OrderByKind::Expressions(terms)) => terms.iter().map(|t| &t.expr).collect(),
+            Some(_) => return false,
+        };
+        let limits: Vec<&Expr> = match &q.limit_clause {
+            None => Vec::new(),
+            Some(ast::LimitClause::LimitOffset { limit, offset, limit_by }) => limit.iter().chain(offset.iter().map(|o| &o.value)).chain(limit_by).collect(),
+            Some(ast::LimitClause::OffsetCommaLimit { offset, limit }) => vec![offset, limit],
+        };
+        // An ON clause sees only the items its join joins, so a bare name there that is not one of
+        // theirs is an enclosing query's even where a sibling of the join holds it: only a
+        // qualified name is placed there.
+        let on = sub.conjuncts.iter().filter(|c| c.may_pin.is_some()).map(|c| c.expr);
+        let exprs = std::iter::once(value).chain(sub.conjuncts.iter().filter(|c| c.may_pin.is_none()).map(|c| c.expr)).chain(group).chain(s.having.iter()).chain(ordered).chain(limits);
+        exprs.into_iter().all(|e| self.one_value_beside(&sub, e, i, done, true)) && on.into_iter().all(|e| self.one_value_beside(&sub, e, i, done, false))
+            && sub.output_class(value).is_some_and(Class::exact)
+            && (!bounded || at_most_one_in(q, &self.ctes, true, self.keys).is_ok())
+    }
+
+    /// Whether `e`, an expression of subquery `sub` of this FROM, reads only `sub`'s own columns,
+    /// enclosing queries' and `done` items' other than `i`, names none by a bare name unless
+    /// `bare`, and calls nothing that changes from row to row but `min`, `max` and `count`, which
+    /// give the subquery's rows one value.
+    fn one_value_beside(&self, sub: &From, e: &Expr, i: usize, done: &[bool], bare: bool) -> bool {
+        let all = |e: &Expr| self.one_value_beside(sub, e, i, done, bare);
+        if is_variable(e) {
+            return false;
+        }
+        match e {
+            Expr::Identifier(_) if !bare => false,
+            // In an ON clause, a qualifier this FROM also has may name its item rather than the
+            // subquery's: a sibling of the join, which the clause does not see, may reuse it.
+            Expr::CompoundIdentifier(parts) if !bare && parts.len() >= 2 && self.items.iter().any(|it| crate::mysql_names::may_match(&it.alias, &parts[parts.len() - 2].value)) => false,
+            Expr::Identifier(_) | Expr::CompoundIdentifier(_) => match sub.place_expr(e) {
+                Some(Placed::Item(..)) => true,
+                Some(Placed::Outside) => match self.place_expr(e) {
+                    Some(Placed::Item(j, _)) => j != i && done[j],
+                    Some(Placed::Outside) => true,
+                    _ => false,
+                },
+                _ => false,
+            },
+            Expr::Value(_) | Expr::TypedString { .. } => true,
+            Expr::Nested(inner) | Expr::UnaryOp { expr: inner, .. } | Expr::Cast { expr: inner, .. } | Expr::IsNull(inner) | Expr::IsNotNull(inner) => all(inner),
+            Expr::BinaryOp { left, right, .. } => all(left) && all(right),
+            Expr::InList { expr, list, .. } => all(expr) && list.iter().all(all),
+            Expr::Between { expr, low, high, .. } => all(expr) && all(low) && all(high),
+            Expr::Function(f) if f.over.is_none() && f.filter.is_none() && f.within_group.is_empty() => {
+                let counted = matches!(builtin(f).as_str(), "min" | "max" | "count");
+                (counted || deterministic(&Expr::Function(ast::Function { args: ast::FunctionArguments::None, ..f.clone() })))
+                    && match &f.args {
+                        ast::FunctionArguments::None => true,
+                        ast::FunctionArguments::List(list) => list.clauses.is_empty() && list.args.iter().all(|a| match a {
+                            ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(x)) => all(x),
+                            ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Wildcard) => counted,
+                            _ => false,
+                        }),
+                        ast::FunctionArguments::Subquery(_) => false,
+                    }
+            }
+            _ => false,
+        }
+    }
+
+    /// What a subquery's one column compares as: a column of its own, as `min` and `max` keep it,
+    /// or a count, a BIGINT.
+    fn output_class(&self, e: &Expr) -> Option<Class> {
+        match e {
+            Expr::Nested(inner) => self.output_class(inner),
+            Expr::Function(f) if builtin(f) == "count" => Some(Class::Wide),
+            Expr::Function(f) if matches!(builtin(f).as_str(), "min" | "max") => match &f.args {
+                ast::FunctionArguments::List(list) if list.clauses.is_empty() => match list.args.as_slice() {
+                    [ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(x))] => self.output_class(x),
+                    _ => None,
+                },
+                _ => None,
+            },
+            _ => match self.place_expr(e)? {
+                Placed::Item(j, c) => self.class(j, &c),
+                _ => None,
+            },
+        }
     }
 
     /// Whether a key column of `class` compared with `value` compares as it is, and the value is
@@ -431,8 +545,10 @@ impl<'a> From<'a> {
     fn determined(&self, mut done: Vec<bool>, keys: &[Vec<Key>], constant: bool) -> Vec<bool> {
         let n = self.items.len();
         let per_row: Vec<bool> = self.items.iter().map(|it| matches!(it.source, Source::Lateral(..))).collect();
+        let varies = self.varying();
         loop {
             let mut changed = false;
+            let steady: Vec<bool> = done.iter().zip(&varies).map(|(d, v)| *d && !v).collect();
             for i in 0..n {
                 if done[i] {
                     continue;
@@ -440,10 +556,10 @@ impl<'a> From<'a> {
                 let item = &self.items[i];
                 let rest = || (0..n).all(|j| j == i || done[j] || (!constant && per_row[j]));
                 let pinned = match &item.source {
-                    Source::Table(_) => self.key_pinned(i, &keys[i], &done, constant),
+                    Source::Table(_) => self.key_pinned(i, &keys[i], &steady, constant),
                     _ if constant && item.nullable => false,
-                    Source::Query(q, ctes, enclosed) => at_most_one_in(q, ctes, *enclosed, self.keys).is_ok() || self.key_pinned(i, &keys[i], &done, constant),
-                    Source::Lateral(q, ctes) => rest() && (at_most_one_in(q, ctes, true, self.keys).is_ok() || self.key_pinned(i, &keys[i], &done, constant)),
+                    Source::Query(q, ctes, enclosed) => at_most_one_in(q, ctes, *enclosed, self.keys).is_ok() || self.key_pinned(i, &keys[i], &steady, constant),
+                    Source::Lateral(q, ctes) => rest() && (at_most_one_in(q, ctes, true, self.keys).is_ok() || self.key_pinned(i, &keys[i], &steady, constant)),
                     Source::Other => false,
                 };
                 if pinned {
@@ -457,6 +573,22 @@ impl<'a> From<'a> {
         }
     }
 
+    /// Which items' columns may differ from row to row however few rows they have: the server may
+    /// merge a derived table, a WITH query or a view into the query that reads it and call a
+    /// function of it again for each row it meets, where it calls one whose every call may differ
+    /// ([`calls_nondeterministic`]). Such an item pins no other, and its columns are no one value
+    /// to group or to tell rows apart by.
+    fn varying(&self) -> Vec<bool> {
+        self.items
+            .iter()
+            .map(|it| match &it.source {
+                Source::Query(q, ctes, _) => !materialized(q) && query_varies(q, ctes, self.keys, VIEW_DEPTH),
+                Source::Lateral(q, ctes) => query_varies(q, ctes, self.keys, VIEW_DEPTH),
+                _ => false,
+            })
+            .collect()
+    }
+
     fn all_keys(&self) -> Vec<Vec<Key>> {
         (0..self.items.len()).map(|i| self.item_keys(i)).collect()
     }
@@ -466,7 +598,10 @@ impl<'a> From<'a> {
     fn pinned(&self, e: &Expr, constant: &[bool]) -> bool {
         match self.place_expr(e) {
             Some(Placed::Item(i, column)) => {
-                constant[i] || {
+                // A varying item's column is no one value, a WHERE's equality with it included: a
+                // merged derived table computes it again in the WHERE and in the select list.
+                let varies = self.varying()[i];
+                (constant[i] && !varies) || !varies && {
                     let class = self.class(i, &column);
                     let none = vec![false; self.items.len()];
                     self.conjuncts.iter().any(|c| c.may_pin.is_none() && self.equates(c.expr, i, &column, class, &none))
@@ -517,6 +652,187 @@ impl<'a> From<'a> {
             _ => None,
         })
     }
+}
+
+/// Whether a statement's text calls a built-in whose every call may give another value: `RAND()`,
+/// `UUID()`, `UUID_SHORT()`, `SYSDATE()`, `RANDOM_BYTES()`, and the counts of the statement's own
+/// writes, `LAST_INSERT_ID()`, `ROW_COUNT()` and `FOUND_ROWS()`. `NOW()` reads the statement's
+/// start, once.
+fn calls_nondeterministic(text: &str) -> bool {
+    const VARYING: &[&str] = &["rand", "uuid", "uuid_short", "sysdate", "random_bytes", "last_insert_id", "row_count", "found_rows"];
+    let lower = text.to_ascii_lowercase();
+    VARYING.iter().any(|name| {
+        lower.match_indices(name).any(|(at, _)| {
+            let before = lower[..at].chars().next_back().is_none_or(|c| !(c.is_ascii_alphanumeric() || c == '_' || c == '$' || c == '`'));
+            before && lower[at + name.len()..].trim_start().starts_with('(')
+        })
+    })
+}
+
+/// How many WITH queries and views deep [`query_varies`] reads before it takes a query to vary.
+const VIEW_DEPTH: usize = 4;
+
+/// Whether a query calls a function whose every call may differ ([`calls_nondeterministic`]), in
+/// its own text, in a WITH query in `ctes` it may read, or in a view it reads, `depth` deep. A
+/// WITH query of a RECURSIVE WITH, whose body the scope does not carry, may.
+fn query_varies(q: &Query, ctes: &[Cte], keys: &Keys, depth: usize) -> bool {
+    if calls_nondeterministic(&q.to_string()) || lists_unvouched(q) {
+        return true;
+    }
+    // The names it reads as it parses them, a WITH query's around it among them, since it reads
+    // those as it reads a table.
+    let read = tables_anywhere(q, keys.schema.as_deref());
+    let withs = ctes.iter().filter(|(name, ..)| read.iter().any(|t| crate::mysql_names::may_match(t, name))).any(|(_, body, sees, _)| depth == 0 || body.is_none_or(|b| query_varies(b, &ctes[..(*sees).min(ctes.len())], keys, depth - 1)));
+    withs || read.iter().filter_map(|t| keys.view(t)).any(|view| depth == 0 || query_varies(view, &[], keys, depth - 1))
+}
+
+/// MySQL 8.4's built-in functions that give every call over the same arguments in one statement
+/// one value, by name: its help tables' functions but its aggregates, window functions and those
+/// [`calls_nondeterministic`] names, and the locking ones. A newer release's are unknown, and
+/// [`calls_unvouched`] takes them to vary.
+const BUILTINS: &[&str] = &[
+    "abs", "acos", "adddate", "addtime", "aes_decrypt", "aes_encrypt", "any_value", "ascii", "asin", "atan", "atan2", "bin", "bin_to_uuid", "bit_count",
+    "bit_length", "cast", "ceil", "ceiling", "char", "char_length", "character_length", "charset", "coalesce", "coercibility", "collation", "compress",
+    "concat", "concat_ws", "conv", "convert", "convert_tz", "cos", "cot", "crc32", "curdate", "current_date", "current_role", "current_time",
+    "current_timestamp", "current_user", "curtime", "database", "date", "date_add", "date_format", "date_sub", "datediff", "day", "dayname", "dayofmonth",
+    "dayofweek", "dayofyear", "degrees", "div", "elt", "exp", "export_set", "extract", "field", "find_in_set", "floor", "format", "format_bytes",
+    "format_pico_time", "from_base64", "from_days", "from_unixtime", "geometrycollection", "get_format", "greatest", "grouping", "hex", "hour",
+    "icu_version", "if", "ifnull", "inet6_aton", "inet6_ntoa", "inet_aton", "inet_ntoa", "insert", "instr", "is_ipv4", "is_ipv4_compat", "is_ipv4_mapped",
+    "is_ipv6", "is_uuid", "json_array", "json_array_append", "json_array_insert", "json_contains", "json_contains_path", "json_depth", "json_extract",
+    "json_insert", "json_keys", "json_length", "json_merge", "json_merge_patch", "json_merge_preserve", "json_object", "json_overlaps", "json_pretty",
+    "json_quote", "json_remove", "json_replace", "json_schema_valid", "json_schema_validation_report", "json_search", "json_set", "json_storage_free",
+    "json_storage_size", "json_table", "json_type", "json_unquote", "json_valid", "json_value", "last_day", "lcase", "least", "left", "length", "like",
+    "linestring", "ln", "load_file", "localtime", "localtimestamp", "locate", "log", "log10", "log2", "lower", "lpad", "ltrim", "make_set", "makedate",
+    "maketime", "mbrcontains", "mbrcoveredby", "mbrcovers", "mbrdisjoint", "mbrequals", "mbrintersects", "mbroverlaps", "mbrtouches", "mbrwithin", "md5",
+    "microsecond", "mid", "minute", "mod", "month", "monthname", "multilinestring", "multipoint", "multipolygon", "name_const", "now", "nullif", "oct",
+    "octet_length", "ord", "period_add", "period_diff", "pi", "point", "polygon", "position", "pow", "power", "quarter", "quote", "radians", "regexp",
+    "regexp_instr", "regexp_like", "regexp_replace", "regexp_substr", "repeat", "replace", "reverse", "right", "roles_graphml", "round", "rpad", "rtrim",
+    "schema", "sec_to_time", "second", "session_user", "sha1", "sha2", "sign", "sin", "soundex", "space", "sqrt", "st_area", "st_asbinary", "st_asgeojson",
+    "st_astext", "st_buffer", "st_buffer_strategy", "st_centroid", "st_collect", "st_contains", "st_convexhull", "st_crosses", "st_difference",
+    "st_dimension", "st_disjoint", "st_distance", "st_distance_sphere", "st_endpoint", "st_envelope", "st_equals", "st_exteriorring", "st_frechetdistance",
+    "st_geohash", "st_geomcollfromtext", "st_geomcollfromwkb", "st_geometryn", "st_geometrytype", "st_geomfromgeojson", "st_geomfromtext",
+    "st_geomfromwkb", "st_hausdorffdistance", "st_interiorringn", "st_intersection", "st_intersects", "st_isclosed", "st_isempty", "st_issimple",
+    "st_isvalid", "st_latfromgeohash", "st_latitude", "st_length", "st_linefromtext", "st_linefromwkb", "st_lineinterpolatepoint",
+    "st_lineinterpolatepoints", "st_longfromgeohash", "st_longitude", "st_makeenvelope", "st_mlinefromtext", "st_mlinefromwkb", "st_mpointfromtext",
+    "st_mpointfromwkb", "st_mpolyfromtext", "st_mpolyfromwkb", "st_numgeometries", "st_numinteriorrings", "st_numpoints", "st_overlaps",
+    "st_pointatdistance", "st_pointfromgeohash", "st_pointfromtext", "st_pointfromwkb", "st_pointn", "st_polyfromtext", "st_polyfromwkb", "st_simplify",
+    "st_srid", "st_startpoint", "st_swapxy", "st_symdifference", "st_touches", "st_transform", "st_union", "st_validate", "st_within", "st_x", "st_y",
+    "str_to_date", "strcmp", "subdate", "substr", "substring", "substring_index", "subtime", "system_user", "tan", "time", "time_format", "time_to_sec",
+    "timediff", "timestamp", "timestampadd", "timestampdiff", "to_base64", "to_days", "to_seconds", "trim", "truncate", "ucase", "uncompress",
+    "uncompressed_length", "unhex", "unix_timestamp", "upper", "user", "utc_date", "utc_time", "utc_timestamp", "uuid_to_bin", "version", "week",
+    "weekday", "weekofyear", "weight_string", "year", "yearweek",
+];
+
+/// Whether an expression calls a function the engine cannot vouch gives every call one value:
+/// neither a built-in ([`BUILTINS`]) nor an aggregate, as a stored function the database declares
+/// `NOT DETERMINISTIC` may be; or holds a form the walk does not read. A select list that calls
+/// one varies ([`query_varies`]).
+fn calls_unvouched(e: &Expr) -> bool {
+    match e {
+        Expr::Identifier(_) | Expr::CompoundIdentifier(_) | Expr::Value(_) | Expr::TypedString { .. } => false,
+        Expr::Function(f) => {
+            let name = builtin(f);
+            let vouched = f.over.is_some() || crate::mysql::AGGREGATES.contains(&name.as_str()) || BUILTINS.contains(&name.as_str());
+            !vouched
+                || match &f.args {
+                    ast::FunctionArguments::None => false,
+                    ast::FunctionArguments::List(list) => list.args.iter().any(|a| match a {
+                        ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(x)) | ast::FunctionArg::Named { arg: ast::FunctionArgExpr::Expr(x), .. } | ast::FunctionArg::ExprNamed { arg: ast::FunctionArgExpr::Expr(x), .. } => calls_unvouched(x),
+                        ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Wildcard) => false,
+                        _ => true,
+                    }),
+                    ast::FunctionArguments::Subquery(q) => lists_unvouched(q),
+                }
+        }
+        Expr::Nested(inner)
+        | Expr::UnaryOp { expr: inner, .. }
+        | Expr::Cast { expr: inner, .. }
+        | Expr::IsNull(inner)
+        | Expr::IsNotNull(inner)
+        | Expr::IsTrue(inner)
+        | Expr::IsNotTrue(inner)
+        | Expr::IsFalse(inner)
+        | Expr::IsNotFalse(inner)
+        | Expr::IsUnknown(inner)
+        | Expr::IsNotUnknown(inner)
+        | Expr::Floor { expr: inner, .. }
+        | Expr::Ceil { expr: inner, .. }
+        | Expr::Extract { expr: inner, .. }
+        | Expr::Convert { expr: inner, .. }
+        | Expr::Collate { expr: inner, .. } => calls_unvouched(inner),
+        Expr::BinaryOp { left, right, .. } | Expr::IsDistinctFrom(left, right) | Expr::IsNotDistinctFrom(left, right) | Expr::Position { expr: left, r#in: right } => calls_unvouched(left) || calls_unvouched(right),
+        Expr::Like { expr, pattern, escape_char, .. } => calls_unvouched(expr) || calls_unvouched(pattern) || escape_char.as_deref().is_some_and(calls_unvouched),
+        Expr::RLike { expr, pattern, .. } => calls_unvouched(expr) || calls_unvouched(pattern),
+        Expr::Substring { expr, substring_from, substring_for, .. } => calls_unvouched(expr) || substring_from.as_deref().is_some_and(calls_unvouched) || substring_for.as_deref().is_some_and(calls_unvouched),
+        Expr::Trim { expr, trim_what, trim_characters, .. } => calls_unvouched(expr) || trim_what.as_deref().is_some_and(calls_unvouched) || trim_characters.iter().flatten().any(calls_unvouched),
+        Expr::InList { expr, list, .. } => calls_unvouched(expr) || list.iter().any(calls_unvouched),
+        Expr::Between { expr, low, high, .. } => calls_unvouched(expr) || calls_unvouched(low) || calls_unvouched(high),
+        Expr::Case { operand, conditions, else_result, .. } => operand.as_deref().is_some_and(calls_unvouched) || conditions.iter().any(|c| calls_unvouched(&c.condition) || calls_unvouched(&c.result)) || else_result.as_deref().is_some_and(calls_unvouched),
+        Expr::Interval(i) => calls_unvouched(&i.value),
+        Expr::MemberOf(m) => calls_unvouched(&m.value) || calls_unvouched(&m.array),
+        Expr::Tuple(items) => items.iter().any(calls_unvouched),
+        // The server folds a subquery of no table into the query around it (`(select pick())` is
+        // `pick()`, `pick() in (select 1)` is `pick() = 1`), and then merges as if it were not there.
+        Expr::Subquery(q) => lists_unvouched(q),
+        // EXISTS reads no value of its subquery's select list, only whether a row passes, unless a
+        // HAVING reads the list by an alias.
+        Expr::Exists { subquery, .. } => reads_unvouched(subquery, plain(subquery).is_none_or(|s| s.having.is_some())),
+        Expr::InSubquery { expr, subquery, .. } => calls_unvouched(expr) || lists_unvouched(subquery),
+        Expr::MatchAgainst { .. } => false,
+        _ => true,
+    }
+}
+
+/// Whether the server computes a derived table, WITH query or view once and stores its rows,
+/// never merging it into the query that reads it, so that every row reads one value of each of its
+/// columns: one with a LIMIT, a set operation, DISTINCT, GROUP BY, HAVING or an aggregate, or no
+/// table (https://dev.mysql.com/doc/refman/8.4/en/derived-table-optimization.html). A LATERAL one
+/// is computed again for each row it is joined to.
+fn materialized(q: &Query) -> bool {
+    if q.limit_clause.is_some() {
+        return true;
+    }
+    match q.body.as_ref() {
+        SetExpr::Query(inner) => materialized(inner),
+        SetExpr::Select(s) => {
+            let grouped = !matches!(&s.group_by, GroupByExpr::Expressions(keys, modifiers) if keys.is_empty() && modifiers.is_empty());
+            s.from.is_empty() || s.distinct.is_some() || grouped || s.having.is_some() || crate::mysql::lone_aggregate(s)
+        }
+        _ => true,
+    }
+}
+
+/// Whether a query, or a derived table or WITH query inside it, lists a value [`calls_unvouched`]
+/// makes, or decides which rows it keeps by one: the server may merge each level into the one
+/// around it.
+fn lists_unvouched(q: &Query) -> bool {
+    reads_unvouched(q, true)
+}
+
+/// [`lists_unvouched`], reading the select list only where `listed`: EXISTS reads no value of it.
+fn reads_unvouched(q: &Query, listed: bool) -> bool {
+    if q.with.iter().flat_map(|w| &w.cte_tables).any(|c| lists_unvouched(&c.query)) {
+        return true;
+    }
+    if let SetExpr::Query(inner) = q.body.as_ref() {
+        return reads_unvouched(inner, listed);
+    }
+    // A FROM item's: a derived table's own, and each join's ON, which decides which rows meet.
+    fn joined(twj: &TableWithJoins) -> bool {
+        factor(&twj.relation) || twj.joins.iter().any(|j| factor(&j.relation) || crate::mysql::join_on(&j.join_operator).is_some_and(calls_unvouched))
+    }
+    fn factor(f: &TableFactor) -> bool {
+        match f {
+            TableFactor::Derived { subquery, .. } => lists_unvouched(subquery),
+            TableFactor::NestedJoin { table_with_joins, .. } => joined(table_with_joins),
+            _ => false,
+        }
+    }
+    plain(q).is_some_and(|s| {
+        (listed && s.projection.iter().any(|item| matches!(item, SelectItem::UnnamedExpr(e) | SelectItem::ExprWithAlias { expr: e, .. } if calls_unvouched(e))))
+            || s.selection.iter().chain(s.having.iter()).any(calls_unvouched)
+            || s.from.iter().any(joined)
+    })
 }
 
 /// The terms of a condition's top-level `AND`.
@@ -949,6 +1265,11 @@ fn at_most_one_anew(q: &Query, outer: &[Cte], enclosed: bool, keys: &Keys) -> Re
         return Ok(());
     }
     let s = select_of(q)?;
+    // With no FROM, or FROM DUAL, there is one row for the WHERE, a GROUP BY or a HAVING to keep or
+    // remove; WITH ROLLUP adds a row for each level of the grouping.
+    if (s.from.is_empty() || is_dual(s)) && matches!(&s.group_by, GroupByExpr::Expressions(_, modifiers) if modifiers.is_empty()) {
+        return Ok(());
+    }
     let ctes = ctes_of(q, outer);
     let from = From::read(s, &ctes, enclosed, keys);
     if let Some(why) = from.refused {
@@ -974,9 +1295,6 @@ fn at_most_one_anew(q: &Query, outer: &[Cte], enclosed: bool, keys: &Keys) -> Re
     }
     if s.having.is_some() {
         return Err("HAVING leaves a row per group".into());
-    }
-    if s.from.is_empty() {
-        return Err("a SELECT with no FROM and a WHERE can return no row or one, and the engine proves that only through a LIMIT".into());
     }
     let determined = from.determined(vec![false; n], &all, false);
     if determined.iter().all(|d| *d) {
@@ -1013,8 +1331,15 @@ pub(crate) fn tables_anywhere(q: &Query, schema: Option<&str>) -> Vec<String> {
         let depth = ctes.len();
         if let Some(w) = &q.with {
             for c in &w.cte_tables {
-                ctes.push(c.alias.name.value.clone());
-                query(&c.query, ctes, schema, out);
+                // A WITH query's body sees the ones before it, and with RECURSIVE itself too: a
+                // name it reads otherwise is a table, or a WITH query of an enclosing query.
+                if w.recursive {
+                    ctes.push(c.alias.name.value.clone());
+                    query(&c.query, ctes, schema, out);
+                } else {
+                    query(&c.query, ctes, schema, out);
+                    ctes.push(c.alias.name.value.clone());
+                }
             }
         }
         body(&q.body, ctes, schema, out);
@@ -1028,6 +1353,18 @@ pub(crate) fn tables_anywhere(q: &Query, schema: Option<&str>) -> Vec<String> {
                     for j in &twj.joins {
                         factor(&j.relation, ctes, schema, out);
                     }
+                }
+                // A subquery in the WHERE, the select list or the HAVING, whose keys and columns
+                // say whether it is one value a key can be pinned to.
+                let mut found = Vec::new();
+                for e in s.selection.iter().chain(s.having.iter()).chain(s.projection.iter().filter_map(|i| match i {
+                    SelectItem::UnnamedExpr(e) | SelectItem::ExprWithAlias { expr: e, .. } => Some(e),
+                    _ => None,
+                })) {
+                    crate::mysql::subqueries(e, &mut found);
+                }
+                for sub in found {
+                    query(sub, ctes, schema, out);
                 }
             }
             SetExpr::SetOperation { left, right, .. } => {

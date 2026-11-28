@@ -5,7 +5,8 @@
 //! serde on each level of SQLite's), the walks of the expression rules, the
 //! row-count proof and the JSON shapes, and the drop of the tree. The depth of each parser's tree
 //! is bounded where the engine reads it (Postgres's by `engine/syntax/src/postgres`, SQLite's by
-//! the limit `engine/sqlite/csrc/reylo_sqlite.c` sets on its expression depth), so the stack all of that
+//! the limits `engine/sqlite/csrc/reylo_sqlite.c` sets on how deep its expressions and its SELECTs
+//! nest), so the stack all of that
 //! needs is bounded too, and every host gives the engine at least that much: natively the analysis
 //! runs on a thread of its own with [`STACK_BYTES`] of stack, whatever thread the host calls from
 //! (a tokio worker has 2 MiB, a Postgres backend whatever the server was started with); the
@@ -31,13 +32,16 @@ use std::cell::Cell;
 /// an unoptimized build reads there: the MySQL engine bounds its tree's nesting to 200 levels (198
 /// nested function calls or `CASE`s, 98 subqueries) and a chain of operators to 2,000
 /// (`engine/mysql/src/mysql.rs`), and the embedded SQLite reads an expression as deep as its own
-/// bound, 1,000 (`engine/sqlite/csrc/reylo_sqlite.c`).
+/// bound, 1,000, and SELECTs nested as deep as SQLite's bound on a chain of views, 1,000, which the
+/// engine holds a chain of WITH queries to as well: both at once (`engine/sqlite/csrc/reylo_sqlite.c`).
 pub const MAX_DEPTH: usize = 1_000;
 
-/// The stack an analysis runs on natively, with room for [`MAX_DEPTH`] in an unoptimized build.
+/// The stack an analysis runs on natively, with room for [`MAX_DEPTH`] in an unoptimized build, and
+/// for the deepest SQLite statement measured there: SELECTs nested to the bound, each a compound,
+/// over an expression as high as SQLite reads, take 74 MiB (`engine/sqlite/src/sqlite.rs` tests it).
 /// This is reserved address space, and only the pages a deep statement touches are ever backed by
 /// memory.
-pub const STACK_BYTES: usize = 64 << 20;
+pub const STACK_BYTES: usize = 128 << 20;
 
 #[cfg(not(target_family = "wasm"))]
 thread_local! {

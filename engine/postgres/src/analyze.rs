@@ -88,9 +88,9 @@ pub struct Analysis {
     /// ones, which the parse alone cannot know: a host with the catalog's word puts back a table
     /// no witness holds for.
     pub reductions: Vec<(String, Vec<Witness>)>,
-    /// Each WITH query's name beside every relation it reads, through the WITH queries it reads
-    /// in turn. The describe traces a column read through the query to its table, so an outer
-    /// join that nulls the query nulls those tables too ([`Analysis::nulled_tables`]).
+    /// Each WITH query's name beside every relation it reads itself. The describe traces a column
+    /// read through the query to its table, so an outer join that nulls the query nulls those
+    /// tables too, and those of the WITH queries among them in turn ([`Analysis::nulled_tables`]).
     pub with_tables: Vec<(String, Vec<String>)>,
     pub has_repeated_table: bool,
     pub has_set_op: bool,
@@ -413,10 +413,11 @@ fn analyze_here(sql: &str) -> Result<Analysis, AnalyzeError> {
         });
     }
 
-    // The relations each WITH query reads, by name: its own, then those of the WITH queries it
-    // reads, until nothing new is added. A name is read as a WITH query wherever one has it,
-    // which nulls more than the query's scope does, never less.
+    // The relations each WITH query reads directly, by name. A name is read as a WITH query
+    // wherever one has it, which nulls more than the query's scope does, never less; the WITH
+    // queries it reads in turn are followed where an outer join nulls it ([`Analysis::nulled_tables`]).
     let mut with_tables: Vec<(String, Vec<String>)> = Vec::new();
+    let mut with_at: HashMap<String, usize> = HashMap::new();
     visit(&tree, &mut |key, node| {
         if key != "CommonTableExpr" {
             return;
@@ -433,32 +434,14 @@ fn analyze_here(sql: &str) -> Result<Analysis, AnalyzeError> {
                 }
             }
         });
-        match with_tables.iter_mut().find(|(n, _)| n == name) {
-            Some((_, tables)) => tables.extend(read),
-            None => with_tables.push((name.to_string(), read)),
-        }
-    });
-    loop {
-        let mut grown = false;
-        for i in 0..with_tables.len() {
-            let more: Vec<String> = with_tables[i]
-                .1
-                .iter()
-                .filter_map(|t| with_tables.iter().find(|(n, _)| n == t))
-                .flat_map(|(_, tables)| tables.iter().cloned())
-                .filter(|t| !with_tables[i].1.contains(t))
-                .collect();
-            for t in more {
-                if !with_tables[i].1.contains(&t) {
-                    with_tables[i].1.push(t);
-                    grown = true;
-                }
+        match with_at.get(name) {
+            Some(&at) => with_tables[at].1.extend(read),
+            None => {
+                with_at.insert(name.to_string(), with_tables.len());
+                with_tables.push((name.to_string(), read));
             }
         }
-        if !grown {
-            break;
-        }
-    }
+    });
 
     let (read_set, write_set) = relations(&parsed.protobuf);
 
@@ -491,14 +474,18 @@ fn analyze_here(sql: &str) -> Result<Analysis, AnalyzeError> {
 impl Analysis {
     /// `tables`, the names an outer join nulls, with every relation a WITH query among them reads.
     pub fn nulled_tables(&self, mut tables: Vec<String>) -> Vec<String> {
-        for (query, read) in &self.with_tables {
-            if tables.iter().any(|t| t == query) {
-                for t in read {
-                    if !tables.contains(t) {
+        let at: HashMap<&str, usize> = self.with_tables.iter().enumerate().map(|(i, (name, _))| (name.as_str(), i)).collect();
+        let mut seen: std::collections::HashSet<String> = tables.iter().cloned().collect();
+        let mut next = 0;
+        while next < tables.len() {
+            if let Some(&i) = at.get(tables[next].as_str()) {
+                for t in &self.with_tables[i].1 {
+                    if seen.insert(t.clone()) {
                         tables.push(t.clone());
                     }
                 }
             }
+            next += 1;
         }
         tables
     }
@@ -895,6 +882,18 @@ mod tests {
         // A data-modifying query brings its target, whose RETURNING columns the describe traces.
         let c = analyze("WITH i AS (INSERT INTO tags VALUES (1, 'a') RETURNING *) SELECT * FROM bar b LEFT JOIN i ON false").unwrap();
         assert_eq!(c.nulled_tables(c.nullable_tables.clone()), vec!["i", "tags"]);
+    }
+
+    #[test]
+    fn a_long_chain_of_with_queries_reads_in_time_linear_in_its_length() {
+        // Each query reads the one before: an outer join that nulls the last nulls every query of
+        // the chain and the table under it, found once each rather than once per query per pass.
+        let n = 3_000;
+        let chain = (1..n).fold("WITH c0 AS (SELECT * FROM tags)".to_string(), |q, i| format!("{q}, c{i} AS (SELECT * FROM c{})", i - 1));
+        let a = analyze(&format!("{chain} SELECT * FROM people p LEFT JOIN c{} ON false", n - 1)).unwrap();
+        let nulled = a.nulled_tables(a.nullable_tables.clone());
+        assert_eq!(nulled.len(), n + 1);
+        assert_eq!(nulled.last().map(String::as_str), Some("tags"));
     }
 
     #[test]

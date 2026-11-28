@@ -8,7 +8,7 @@
 //! it is absent; where that turns on the object's kind (a node's `op`, a write's `kind`), the
 //! members of each kind are required once the object is read ([`Members`]). A member no struct
 //! declares is refused, so the walker writes nothing the analysis does not read.
-use serde::de::{self, value::MapAccessDeserializer, DeserializeSeed, Deserializer, IntoDeserializer, MapAccess, Visitor};
+use serde::de::{self, value::MapAccessDeserializer, DeserializeSeed, Deserializer, IntoDeserializer, MapAccess, SeqAccess, Visitor};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
@@ -22,7 +22,7 @@ static LOCK: Mutex<()> = Mutex::new(());
 /// The version of the tree's format, which the walker writes as the tree's first member
 /// (`REYLO_TREE_VERSION` in `csrc/reylo_sqlite.c`): a tree of another is refused, by both numbers,
 /// before anything in it is read. A change to what either side reads or writes moves both.
-pub const TREE_VERSION: u32 = 4;
+pub const TREE_VERSION: u32 = 6;
 
 #[derive(Debug, Deserialize)]
 #[serde(remote = "Self", rename_all = "camelCase", deny_unknown_fields)]
@@ -35,6 +35,11 @@ pub struct Tree {
     pub statement: Option<Sel>,
     #[serde(default)]
     pub dml: Option<Dml>,
+    /// An UPDATE ... FROM's SELECT, which SQLite builds to find the rows it writes: the target
+    /// table first, then the FROM's items, under the UPDATE's WHERE, resolved there alone (`dml`'s
+    /// WHERE is not). Absent for any other statement.
+    #[serde(default)]
+    pub update_from: Option<Sel>,
     #[serde(default)]
     pub returning: Option<Vec<Col>>,
     /// The public column metadata: the names tsc sees and the declared type.
@@ -141,7 +146,7 @@ pub struct ColumnInfo {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(remote = "Self", rename_all = "camelCase", deny_unknown_fields)]
 pub struct Sel {
     pub columns: Vec<Col>,
     /// The rows after the first of a multi-row VALUES, whose first row is `columns`; absent for
@@ -167,8 +172,74 @@ pub struct Sel {
     /// before it.
     #[serde(default)]
     pub op: Option<String>,
-    #[serde(default)]
+    /// The arms before this one, which the walker lists beside it ([`Arms`]).
+    #[serde(skip)]
     pub prior: Option<Box<Sel>>,
+}
+
+impl Sel {
+    /// This arm and the arms before it, the last first, for a walk to take one after another, as
+    /// SQLite's own walk does, where a walk into each `prior` would take a frame of stack for each.
+    pub fn arms(&self) -> impl Iterator<Item = &Sel> {
+        std::iter::successors(Some(self), |arm| arm.prior.as_deref())
+    }
+}
+
+/// A compound's arms drop one after another, not each inside the next, so a compound of any
+/// number of arms takes no more stack than one (`crate::stack`).
+impl Drop for Sel {
+    fn drop(&mut self) {
+        let mut prior = self.prior.take();
+        while let Some(mut arm) = prior {
+            prior = arm.prior.take();
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Sel {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        d.deserialize_any(Arms).map(|sel| *sel)
+    }
+}
+
+/// A SELECT: one arm's object, or a compound's arms, the last first, which the walker lists side
+/// by side, as SQLite walks them, rather than each inside the next, so that the tree nests no
+/// deeper for a subquery in whichever arm reads it; they are chained back through `prior`.
+struct Arms;
+
+// Boxed as it is read: an unoptimized build gives every frame that holds a `Sel` by value room
+// for it, and the frames of a SELECT's reading are on the stack for each SELECT it nests.
+impl<'de> Visitor<'de> for Arms {
+    type Value = Box<Sel>;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("an object, or a list of objects")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<Box<Sel>, A::Error> {
+        Sel::deserialize(MapAccessDeserializer::new(map)).map(Box::new)
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Box<Sel>, A::Error> {
+        let mut arms = Vec::new();
+        while let Some(Arm(arm)) = seq.next_element()? {
+            arms.push(arm);
+        }
+        let last = arms.into_iter().rev().reduce(|prior, mut arm| {
+            arm.prior = Some(prior);
+            arm
+        });
+        last.ok_or_else(|| de::Error::invalid_length(0, &self))
+    }
+}
+
+/// One arm of a compound, an object.
+struct Arm(Box<Sel>);
+
+impl<'de> Deserialize<'de> for Arm {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        Sel::deserialize(d).map(|arm| Arm(Box::new(arm)))
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -359,6 +430,9 @@ pub struct Node {
     /// A window call with a FILTER.
     #[serde(default)]
     pub filter: bool,
+    /// What a FILTER keeps, an aggregate's as well as a window call's; absent where there is none.
+    #[serde(default)]
+    pub filter_where: Option<Box<Node>>,
     /// A `truth` node's: `x IS NOT TRUE` or `x IS NOT FALSE`, the test of `x` against its `right`.
     #[serde(default)]
     pub is_not: bool,
@@ -394,7 +468,7 @@ impl Members for Tree {
         "the tree of a statement that prepared".into()
     }
     fn required(&self) -> Vec<&'static str> {
-        if self.error.is_some() { Vec::new() } else { vec!["statement", "dml", "returning", "columns", "params", "readonly", "tables"] }
+        if self.error.is_some() { Vec::new() } else { vec!["statement", "dml", "updateFrom", "returning", "columns", "params", "readonly", "tables"] }
     }
 }
 
@@ -589,8 +663,8 @@ pub fn analyze(ddl: &[String], sql: &str, sent: &str, functions: &[(&str, i32)],
 /// The walker's answer as a [`Tree`], or why it is not one: a member missing or not declared names it.
 fn parse(json: &str) -> Result<Tree, String> {
     // The tree nests as deeply as the statement, which SQLite bounds at 1,000 levels of an
-    // expression (SQLITE_MAX_EXPR_DEPTH), past serde_json's default limit of 128; the engine's
-    // stack has the room for SQLite's own bound (`crate::stack`).
+    // expression (SQLITE_MAX_EXPR_DEPTH) and the walker at as many nested SELECTs, past
+    // serde_json's default limit of 128; the engine's stack has the room for both at once (`crate::stack`).
     let mut reader = serde_json::Deserializer::from_str(json);
     reader.disable_recursion_limit();
     <Tree as Deserialize>::deserialize(&mut reader).map_err(|e| format!("the embedded SQLite's answer did not parse: {e}"))
@@ -606,7 +680,7 @@ mod tests {
         let column = json!({ "op": "column", "aff": "none", "outerOn": false, "innerOn": false, "cursor": 0, "index": 0, "register": false, "table": "t", "column": "a", "declared": "", "affinity": "blob", "coll": "BINARY", "notNull": false, "rowid": false, "generated": false, "subtype": false, "outer": false, "strict": false, "view": false });
         let from = json!({ "cursor": 0, "table": "t", "alias": null, "outer": false, "right": false, "leftOfRight": false, "tabFunc": false, "args": [], "vectorTable": null, "cte": false, "recursive": false, "view": false, "virtual": false, "subquery": null, "on": null });
         let statement = json!({ "columns": [{ "name": "a", "named": false, "expr": column }], "from": [from], "where": null, "groupBy": [], "having": null, "orderBy": [], "limit": null, "offset": null, "distinct": false, "aggregate": false, "values": false, "window": false });
-        json!({ "version": TREE_VERSION, "statement": statement, "dml": null, "returning": null, "columns": [{ "name": "a", "declared": null }], "params": [], "readonly": true, "tables": {}, "schemaErrors": [] })
+        json!({ "version": TREE_VERSION, "statement": statement, "dml": null, "updateFrom": null, "returning": null, "columns": [{ "name": "a", "declared": null }], "params": [], "readonly": true, "tables": {}, "schemaErrors": [] })
     }
 
     fn read(tree: &Value) -> Result<Tree, String> {

@@ -27,28 +27,58 @@ type Message = { kind: "schema"; ddl: string[] } | { kind: "explain"; id: number
 const send = (message: object) => process.send?.(message);
 const [wrangler, dir] = process.argv.slice(2);
 process.chdir(dir!);
-const { getPlatformProxy } = (await import(pathToFileURL(wrangler!).href)) as {
+type Config = { compatibility_date?: string; d1_databases?: { binding: string }[]; migrations?: { new_sqlite_classes?: string[] }[]; exports?: Record<string, { type?: string; storage?: string }> };
+const { getPlatformProxy, unstable_readConfig } = (await import(pathToFileURL(wrangler!).href)) as {
   getPlatformProxy(options: { configPath?: string; persist: boolean; remoteBindings: boolean }): Promise<{ env: Record<string, unknown>; dispose(): Promise<void> }>;
+  unstable_readConfig?(args: object, options: { hideWarnings: boolean }): Config;
 };
-const isD1 = (v: unknown): v is D1 => typeof (v as D1 | undefined)?.prepare === "function" && typeof (v as D1).batch === "function";
+// The config as wrangler reads it, the file `getPlatformProxy` starts from. A wrangler without the
+// reader has its bindings probed for D1 and the config's text read here instead.
+let config: Config | undefined;
+try {
+  config = unstable_readConfig?.({}, { hideWarnings: true });
+} catch {}
+// The D1 binding is found by its name in the config, since reading a property of another binding
+// can run code: on a service binding, wrangler's proxy calls the Worker it names, which throws when
+// that Worker isn't running locally, and answers to any method name when it is. A probe catches the
+// throw.
+const isD1 = (v: unknown): v is D1 => {
+  try {
+    return typeof (v as D1 | undefined)?.prepare === "function" && typeof (v as D1).batch === "function";
+  } catch {
+    return false;
+  }
+};
 let proxy = await getPlatformProxy({ persist: false, remoteBindings: false });
-let db = Object.values(proxy.env).find(isD1);
+let db = config ? d1Named(config.d1_databases?.[0]?.binding) : Object.values(proxy.env).find(isD1);
 let scratch: string | undefined;
-const config = ["wrangler.json", "wrangler.jsonc", "wrangler.toml"].filter((name) => existsSync(name)).map((name) => readFileSync(name, "utf8")).join("\n");
 // Only a SQLite-backed class has SQL storage: one its migrations declare under `new_sqlite_classes`,
 // or one `exports` declares with `storage` "sqlite". A key-value backed class (`new_classes`,
 // `storage` "legacy-kv") has none, and a binding to another Worker's class (`script_name`) leaves
 // that Worker's storage to that Worker.
-if (!db && /\bnew_sqlite_classes\b|\bstorage"?\s*[:=]\s*"sqlite"/.test(config)) {
+const sqliteClasses = config
+  ? !!config.migrations?.some((m) => m.new_sqlite_classes?.length) || Object.values(config.exports ?? {}).some((e) => e.type === "durable-object" && e.storage === "sqlite")
+  : /\bnew_sqlite_classes\b|\bstorage"?\s*[:=]\s*"sqlite"/.test(configText());
+if (!db && sqliteClasses) {
   await proxy.dispose().catch(() => {});
   scratch = mkdtempSync(join(tmpdir(), "reylo-d1-"));
-  const date = /compatibility_date"?\s*[:=]\s*"(\d{4}-\d{2}-\d{2})"/.exec(config)?.[1];
+  const date = config ? config.compatibility_date : /compatibility_date"?\s*[:=]\s*"(\d{4}-\d{2}-\d{2})"/.exec(configText())?.[1];
   const own = { name: "reylo-sqlite-check", ...(date && { compatibility_date: date }), d1_databases: [{ binding: "DB", database_name: "reylo-sqlite-check", database_id: "00000000-0000-0000-0000-000000000000" }] };
   writeFileSync(join(scratch, "wrangler.json"), JSON.stringify(own));
   proxy = await getPlatformProxy({ configPath: join(scratch, "wrangler.json"), persist: false, remoteBindings: false });
-  db = Object.values(proxy.env).find(isD1);
+  db = d1Named("DB");
 }
 send({ kind: "ready", d1: db !== undefined, storage: scratch ? "durable-object" : "d1" });
+
+/** The binding of that name, where there is one. */
+function d1Named(binding: string | undefined): D1 | undefined {
+  return binding === undefined ? undefined : (proxy.env[binding] as D1 | undefined);
+}
+
+/** The text of the project's wrangler config files, for a wrangler that cannot read the config itself. */
+function configText(): string {
+  return ["wrangler.json", "wrangler.jsonc", "wrangler.toml"].filter((name) => existsSync(name)).map((name) => readFileSync(name, "utf8")).join("\n");
+}
 
 /** Ends the proxy, and the directory of Reylo's own config where there is one. */
 async function end() {

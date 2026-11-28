@@ -95,6 +95,9 @@ It leaves out the history tables of other migration tools, as it leaves out its 
 | Django | `django_migrations` |
 | Entity Framework Core | `__EFMigrationsHistory` |
 | Atlas | `atlas_schema_revisions`, in its schema of that name on Postgres |
+| Wrangler, on D1 | `d1_migrations`, or the name its `migrations_table` gives it |
+
+It also leaves out Litestream's tables, and on D1 and Durable Objects, Cloudflare's own `_cf_` tables.
 
 On Supabase, it leaves out what every new Supabase database has, such as the `supabase_realtime` publication. It writes your changes to it, and each table's own grants:
 
@@ -213,7 +216,7 @@ Applying to postgres://db.example.com/app
 ✓ Applied 1 migration
 ```
 
-On MySQL, a table's change runs in strict mode, whatever the server's `sql_mode`. A value its new type can't hold fails the migration, and the row is kept.
+On MySQL, a table's change runs in strict mode, whatever the server's `sql_mode`. A value its new type can't hold fails the migration, and the row is kept. A column made `AUTO_INCREMENT` keeps the 0s it holds, rather than renumbering them, and a NULL in it fails the migration.
 
 It needs no shadow database. It refuses to run:
 
@@ -630,7 +633,7 @@ Most commands use shadow databases: throwaway databases where Reylo Migrate repl
 
 Each database makes them its own way:
 
-- **Postgres:** on your database's server, with `create database`, so your role needs `CREATEDB`. A local superuser has it, and so do Neon's and Supabase's roles. Reylo Migrate keeps up to 32 as a cache, so a run replays only new migrations. On Azure, list each extension your migrations create in the server's `azure.extensions` parameter. Timescale Cloud refuses `create database`, so point `shadow_url` at the `timescale/timescaledb-ha` image. On Supabase, each shadow gets Supabase's schemas too, so a migration can reference `auth.users`, and what every new Supabase database has, such as the `supabase_realtime` publication.
+- **Postgres:** on your database's server, with `create database`, so your role needs `CREATEDB`. A local superuser has it, and so do Neon's and Supabase's roles. Reylo Migrate keeps up to 32 as a cache, so a run replays only new migrations. On Azure, list each extension your migrations create in the server's `azure.extensions` parameter. Timescale Cloud refuses `create database`, so point `shadow_url` at the `timescale/timescaledb-ha` image. On Supabase, each shadow gets Supabase's schemas too, so a migration can reference `auth.users`, and what every new Supabase database has, such as the `supabase_realtime` publication. To create pg_cron, a shadow takes the name `contrib_regression` for a moment, the one database pg_cron allows besides the one `cron.database_name` names. That needs a connection with no pooler, such as Supabase's direct connection.
 - **MySQL:** on your database's server, with `create database`, so your user needs the `CREATE` privilege on every database. PlanetScale refuses `create database`, so point `shadow_url` at a plain MySQL 8.4 server.
 - **SQLite:** in memory. There's nothing to grant. A [Turso](/docs/turso#migrations) database's shadows run on libSQL's own engine.
 
