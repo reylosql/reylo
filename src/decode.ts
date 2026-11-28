@@ -387,6 +387,10 @@ const isPglite = (c: AnyClient) => typeof c.query === "function" && typeof c.exe
 
 /** The oids each statement's result had on its earlier runs, by the statement's text: PGlite's per-query table names only those. */
 const pgliteOids = new Map<string, Set<number>>();
+/** The parsers each statement's oids name, built once for each set of them. */
+const pgliteParsers = new WeakMap<Set<number>, Record<number, Decoder>>();
+/** json[] and jsonb[], which every PGlite statement names. */
+const JSON_ARRAY_OIDS = [199, 3807];
 const PGLITE_STATEMENTS = 2000;
 // Listed on PGlite's first statement, so that a bundle of another database's queries holds neither table.
 let builtinOids: number[] | undefined;
@@ -416,16 +420,20 @@ function hexOnToString(v: unknown): unknown {
 const PGLITE_JSON_ELEMENTS: JsonElements = "text";
 
 async function pglite(db: AnyClient, text: string, values: unknown[], columns: Columns | undefined): Promise<unknown[]> {
-  // Every statement names every built-in type Reylo decodes, so that one never reaches the
-  // instance's parser, which decodes an array's elements itself and leaves its dimensions unknown,
-  // even where another search_path makes a warmed statement's result one; a statement met for the
-  // first time names every oid the instance has a parser for too (its arrays, and the app's), and a
-  // later one those its results had. A transaction has no table to read.
+  // A statement met for the first time names every built-in type Reylo decodes, and every oid the
+  // instance has a parser for (its arrays, and the app's); a later one names those its results had,
+  // and json[] and jsonb[] always, whose elements the instance's parser would decode itself, leaving
+  // their dimensions unknown, where another search_path makes a warmed statement's result one. A
+  // transaction has no table to read.
   let named = pgliteOids.get(text);
   builtinOids ??= [...Object.keys(SCALAR_OIDS).map(Number), ...ARRAY_OIDS.keys()];
-  const oids = new Set([...builtinOids, ...(named ?? Object.keys(db.parsers ?? {}).map(Number))]);
-  const parsers: Record<number, Decoder> = {};
-  for (const oid of oids) parsers[oid] = builtinDecoder(oid) ?? keepText;
+  let parsers = named && pgliteParsers.get(named);
+  if (parsers === undefined) {
+    const oids = named ? new Set([...named, ...JSON_ARRAY_OIDS]) : new Set([...builtinOids, ...Object.keys(db.parsers ?? {}).map(Number)]);
+    parsers = {};
+    for (const oid of oids) parsers[oid] = builtinDecoder(oid) ?? keepText;
+    if (named) pgliteParsers.set(named, parsers);
+  }
   const result = await db.query(text, values.map(hexOnToString), { rowMode: "object", parsers });
   const rows: Record<string, unknown>[] = result.rows;
   const fields: Field[] = (result.fields ?? []).map((f: { name: string; dataTypeID: number }) => ({ name: f.name, oid: f.dataTypeID }));
@@ -434,7 +442,7 @@ async function pglite(db: AnyClient, text: string, values: unknown[], columns: C
   const byColumn = columns && columns.length === fields.length ? columns : undefined;
   // A row holds the last column of each name, which only that column's kind decodes.
   const last = new Map(fields.map((f, i) => [f.name, i]));
-  const after = fields.map((f, i) => [f, i] as const).filter(([f, i]) => last.get(f.name) === i && (f.oid >= FIRST_USER_OID || !oids.has(f.oid) || (byColumn !== undefined && isRowKind(byColumn[i]![1]))));
+  const after = fields.map((f, i) => [f, i] as const).filter(([f, i]) => last.get(f.name) === i && (f.oid >= FIRST_USER_OID || !(f.oid in parsers) || (byColumn !== undefined && isRowKind(byColumn[i]![1]))));
   if (after.length) {
     const load: Load = async (sql) => (await db.query(sql, [], { rowMode: "array", parsers: { 25: keepText } })).rows;
     const decoders = await fieldDecoders(fields, columns, db, load);
