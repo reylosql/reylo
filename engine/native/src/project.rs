@@ -64,6 +64,32 @@ pub fn package_dir(from: &Path, env: &HashMap<String, String>) -> Option<PathBuf
     ancestors(from, env).find(|d| d.join("package.json").exists() || d.join("Cargo.toml").exists()).map(Path::to_path_buf)
 }
 
+/// The SQLite engines an app runs on, beside the SQLite the type check carries, as the dependencies of
+/// its nearest `package.json` name them (`dependencies`, `devDependencies` and
+/// `optionalDependencies`, the drivers src/sqlite-drivers.ts checks each statement on). They answer
+/// some calls differently: Turso's own engine answers `uuid4()` with bytes where sqlean, which Turso
+/// Cloud loads, writes the text.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SqliteEngines {
+    /// Turso's own engine, a rewrite of SQLite: `@tursodatabase/database` or `@tursodatabase/sync`.
+    pub turso: bool,
+    /// libSQL, SQLite's fork that Turso Cloud runs: `@libsql/client`, `libsql`, or
+    /// `@tursodatabase/serverless`, which reaches Turso Cloud.
+    pub libsql: bool,
+}
+
+/// The [`SqliteEngines`] of the project at or above `from`; none where it has no `package.json`
+/// or one that can't be read.
+pub fn sqlite_engines(from: &Path, env: &HashMap<String, String>) -> SqliteEngines {
+    let Some(text) = package_dir(from, env).and_then(|dir| std::fs::read_to_string(dir.join("package.json")).ok()) else { return SqliteEngines::default() };
+    let Ok(package) = serde_json::from_str::<serde_json::Value>(&text) else { return SqliteEngines::default() };
+    let listed = |name: &str| ["dependencies", "devDependencies", "optionalDependencies"].iter().any(|key| package[key].get(name).is_some());
+    SqliteEngines {
+        turso: ["@tursodatabase/database", "@tursodatabase/sync"].iter().any(|n| listed(n)),
+        libsql: ["@libsql/client", "libsql", "@tursodatabase/serverless"].iter().any(|n| listed(n)),
+    }
+}
+
 /// The project file for the working directory: `REYLO_CONFIG`, else the one beside the package's
 /// `package.json`, else, outside any package, the nearest one at or above it, below the home
 /// directory.
@@ -808,6 +834,24 @@ mod tests {
         assert_eq!(resolve("direct_url: postgres://${NOPE}/db\nenv: [config/.env, ../shared.env]\n", &[]), Err("../.reylo.yaml: \"direct_url\" names ${NOPE}, which neither the environment nor ../config/.env nor ../../shared.env sets.".to_string()));
         // A column counts characters.
         assert_eq!(resolve("direct_url: \"postgres://ü😀:$(x\"\n", &[]), Err("../.reylo.yaml: \"direct_url\" opens $( at column 15 and never closes it.".to_string()));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn reads_the_sqlite_engines_an_app_runs_from_its_dependencies() {
+        let root = std::env::temp_dir().join(format!("reylo-engines-{}", std::process::id()));
+        let app = root.join("app");
+        std::fs::create_dir_all(app.join("src")).unwrap();
+        let engines = |package: &str| {
+            std::fs::write(app.join("package.json"), package).unwrap();
+            sqlite_engines(&app.join("src"), &HashMap::new())
+        };
+        assert_eq!(engines(r#"{"dependencies": {"@tursodatabase/database": "^0.8.4"}}"#), SqliteEngines { turso: true, libsql: false });
+        assert_eq!(engines(r#"{"devDependencies": {"@tursodatabase/sync": "*"}, "optionalDependencies": {"@tursodatabase/serverless": "*"}}"#), SqliteEngines { turso: true, libsql: true });
+        assert_eq!(engines(r#"{"dependencies": {"@libsql/client": "*"}}"#), SqliteEngines { turso: false, libsql: true });
+        // A peer dependency is the host's to install, and a package.json that can't be read names none.
+        assert_eq!(engines(r#"{"peerDependencies": {"@tursodatabase/database": "*"}}"#), SqliteEngines::default());
+        assert_eq!(engines("{"), SqliteEngines::default());
         std::fs::remove_dir_all(&root).unwrap();
     }
 

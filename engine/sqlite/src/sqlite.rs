@@ -1664,6 +1664,13 @@ fn skipping_triggers(triggers: &[String]) -> HashMap<String, i32> {
     out
 }
 
+/// The SQLite engines beside its own that the app runs on ([`Analyzer::app_runs`]).
+#[derive(Debug, Clone, Copy)]
+struct AppEngines {
+    turso: bool,
+    libsql: bool,
+}
+
 /// When a function's result can be NULL.
 #[derive(Clone, Copy)]
 enum Nulls {
@@ -1842,6 +1849,8 @@ impl Analyzer<'_> {
                 "like" | "glob" | "regexp" | "match" => self.extras.function(n.name.as_deref().unwrap_or(""), n.args.len()).is_none(),
                 // sqlean's tests, which answer 1 or 0.
                 "starts_with" | "text_has_prefix" | "text_has_suffix" | "text_contains" | "text_like" | "regexp_like" => self.extras.function(n.name.as_deref().unwrap_or(""), n.args.len()).is_none(),
+                // Turso's own engine's, which answer 1 or 0 too.
+                "fts_match" | "time_after" | "time_before" | "time_equal" => self.extras.function(n.name.as_deref().unwrap_or(""), n.args.len()).is_none(),
                 "likely" | "unlikely" | "likelihood" => n.args.first().is_some_and(|a| self.truth(a, scope, declared)),
                 "coalesce" | "ifnull" => every(&mut n.args.iter()),
                 "iif" | "if" => every(&mut iif_values(n.args.len()).into_iter().filter_map(|i| n.args.get(i))),
@@ -2218,6 +2227,9 @@ impl Analyzer<'_> {
             "json_remove" => done("text", if args.len() == 1 { Nulls::IfArgs } else { Nulls::Always }),
             // `unicode('')` is NULL: an empty string has no first character.
             "unicode" => done("integer", Nulls::Always),
+            // Turso's own engine answers `regexp` with NULL for a pattern it can't compile, where
+            // sqlean's raises an error.
+            "regexp" if self.app_runs().turso => done("integer", Nulls::Always),
             "like" | "glob" | "regexp" | "match" | "likely" | "unlikely" | "likelihood" => {
                 if matches!(name, "likely" | "unlikely" | "likelihood") { first.clone() } else { done("integer", Nulls::IfArgs) }
             }
@@ -2298,7 +2310,17 @@ impl Analyzer<'_> {
             // The sqlean extensions Turso Cloud loads (`csrc/reylo_sqlite.c`, `aTurso`), as
             // libsql-ffi 0.10.0 builds them, each by its own name ([`sqlean_alias`]).
             // uuid: a new identifier every call, and a malformed one read as NULL.
-            "uuid4" | "gen_random_uuid" | "uuid7" => done("text", Nulls::Never),
+            // Turso's own engine answers `uuid4()` and `uuid7()` with the 16 bytes, where sqlean's,
+            // which Turso Cloud loads, write the text; an app that runs both gets either
+            // ([`Analyzer::app_runs`]). `uuid7(seconds)`, Turso's alone, is NULL for a value it can't
+            // read as a time.
+            "uuid4" | "uuid7" if args.is_empty() => match self.app_runs() {
+                AppEngines { turso: true, libsql: false } => done("blob", Nulls::Never),
+                AppEngines { turso: false, .. } => done("text", Nulls::Never),
+                AppEngines { turso: true, libsql: true } => Fact { ty: Ty::Unknown, non_null: true },
+            },
+            "uuid7" => done("blob", Nulls::Always),
+            "gen_random_uuid" | "uuid4_str" | "uuid7_str" => done("text", Nulls::Never),
             "uuid_str" => done("text", Nulls::Always),
             "uuid_blob" => done("blob", Nulls::Always),
             "uuid7_timestamp_ms" => done("integer", Nulls::Always),
@@ -2330,8 +2352,49 @@ impl Analyzer<'_> {
             // Where nothing matches, or the replacement is NULL, it hands back its value as it was:
             // `regexp_replace(123, 'z', 'x')` is the integer 123.
             "regexp_replace" => Fact { ty: if scalar_name(&first.ty) == Some("text") { first.ty.clone() } else { Ty::Unknown }, non_null: first.non_null },
+            // Turso's own engine (`csrc/reylo_sqlite.c`, `aTurso`), as `@tursodatabase/database`
+            // 0.8.4 answers. Full-text search: a match is 1 or 0 and a score a real, whatever the
+            // arguments, a NULL among them included. A highlight, `fts_highlight(cols…, open, close,
+            // query)`, skips a NULL text column and is NULL for a NULL marker or query.
+            "fts_match" => done("integer", Nulls::Never),
+            "fts_score" => done("real", Nulls::Never),
+            "fts_highlight" => Fact::new("text", args.len() >= 3 && args[args.len() - 3..].iter().all(|a| a.non_null)),
+            // Its vectors: an error on a NULL argument, as libSQL's are. A dot product of vectors
+            // with infinite components is NaN, which SQLite stores as NULL, and so is the Jaccard
+            // distance of two zero vectors.
+            "vector32_sparse" | "vector_concat" | "vector_slice" => done("blob", Nulls::Never),
+            "vector_distance_dot" | "vector_distance_jaccard" => done("real", Nulls::Always),
+            // sqlean's time functions: a time is its blob and a duration an integer of
+            // nanoseconds. Each is an error on an argument it can't read, NULL included, and an
+            // arithmetic overflow is an error too, or clamped. Only `time_date` is NULL, for a date
+            // past what it can hold, as the year 300000. `time_get` answers a real for `second` and
+            // `epoch`, which carry a fraction, and an integer for every other field it knows (by
+            // its exact name), so a field it isn't written with is either.
+            "time_date" => done("blob", Nulls::Always),
+            "time_now" | "time_unix" | "time_milli" | "time_micro" | "time_nano" | "time_add" | "time_add_date" | "time_trunc" | "time_round"
+            | "time_parse" => done("blob", Nulls::Never),
+            "time_get_year" | "time_get_month" | "time_get_day" | "time_get_hour" | "time_get_minute" | "time_get_second" | "time_get_nano" | "time_get_weekday"
+            | "time_get_yearday" | "time_get_isoyear" | "time_get_isoweek" | "time_to_unix" | "time_to_milli" | "time_to_micro" | "time_to_nano" | "time_after"
+            | "time_before" | "time_compare" | "time_equal" | "time_sub" | "time_since" | "time_until" | "dur_ns" | "dur_us" | "dur_ms" | "dur_s" | "dur_m" | "dur_h" => {
+                done("integer", Nulls::Never)
+            }
+            "time_get" => match n.args.get(1).and_then(literal_text) {
+                Some("second" | "epoch") => done("real", Nulls::Never),
+                Some(_) => done("integer", Nulls::Never),
+                None => done("number", Nulls::Never),
+            },
+            "time_fmt_iso" | "time_fmt_datetime" | "time_fmt_date" | "time_fmt_time" => done("text", Nulls::Never),
             _ => Fact::unknown(),
         }
+    }
+
+    /// The SQLite engines the app runs on, which the host names by a function each has alone: Turso's
+    /// own engine's `uuid4_str`, and libSQL's `libsql_vector_idx` (as engine/native's SQLite program
+    /// lists them from the project's `package.json`). Neither where it names none, as a host that
+    /// knows nothing of the app.
+    fn app_runs(&self) -> AppEngines {
+        let lists = |name: &str| self.extras.host.as_ref().is_some_and(|h| h.iter().any(|f| f.name.eq_ignore_ascii_case(name)));
+        AppEngines { turso: lists("uuid4_str"), libsql: lists("libsql_vector_idx") }
     }
 
     // ---- built JSON ----------------------------------------------------------------------------
@@ -3198,6 +3261,20 @@ impl Analyzer<'_> {
             "bm25" if i > 0 => real(),
             // libSQL takes a vector as its text (`'[1,2,3]'`) or its blob: a parameter is the text.
             "vector" | "vector32" | "vector64" | "vector1bit" | "vector8" | "vector16" | "vectorb16" | "vector_extract" | "vector_distance_cos" | "vector_distance_l2" => text(),
+            // Turso's own engine: its vectors and indexes, full-text search's text and query, a
+            // UUID's seconds, and sqlean's times, each a time's blob, a count or a duration's
+            // integer, or a field's or a date's text.
+            "vector_slice" if i > 0 => integer(),
+            "vector32_sparse" | "vector_concat" | "vector_slice" | "vector_distance_dot" | "vector_distance_jaccard" | "fts_match" | "fts_score" | "fts_highlight" => text(),
+            // A UUID's seconds; Turso reads no argument after them.
+            "uuid7" | "uuid7_str" if i == 0 => integer(),
+            "uuid7" | "uuid7_str" => Ctx::None,
+            "time_date" | "time_unix" | "time_milli" | "time_micro" | "time_nano" => integer(),
+            "time_parse" => text(),
+            "time_get" if i == 1 => text(),
+            "time_add" | "time_add_date" | "time_round" | "time_fmt_iso" | "time_fmt_datetime" | "time_fmt_date" | "time_fmt_time" if i > 0 => integer(),
+            "time_trunc" if i > 0 => Ctx::None,
+            t if t.starts_with("time_") => Ctx::Typed(Some(Fact::new("blob", true))),
             // sqlean's, each alias by the name it stands for ([`sqlean_alias`]).
             _ => match name {
                 // A count or a length after the text: `left(s, n)`, `lpad(s, n, fill)`,
@@ -5100,6 +5177,104 @@ mod tests {
     /// The SQLite that reads the file lists none of libSQL's functions, as the engine's program's does.
     fn sqlite_host() -> Extras {
         Extras { total: vec![], host: Some(["lower", "upper", "length", "count"].map(|name| HostFunction { name: name.into(), arity: -1, kind: 's' }).to_vec()) }
+    }
+
+    /// A schema as Turso's own engine (`@tursodatabase/database` 0.8.4) writes it into
+    /// `sqlite_schema` for a full-text index: the table that holds the index's data, its
+    /// `backing_btree` index, and the `fts` index, neither of which SQLite can make.
+    fn turso_schema() -> Vec<String> {
+        [
+            "CREATE TABLE docs (id integer PRIMARY KEY, title text, body text NOT NULL)",
+            "CREATE TABLE __turso_internal_fts_dir_docs_fts (path TEXT NOT NULL, chunk_no INTEGER NOT NULL, bytes BLOB NOT NULL)",
+            "CREATE INDEX IF NOT EXISTS __turso_internal_fts_dir_docs_fts_key ON __turso_internal_fts_dir_docs_fts USING backing_btree (path, chunk_no, bytes)",
+            "CREATE INDEX docs_fts ON docs USING fts (title, body)",
+            "CREATE TABLE users (id integer PRIMARY KEY, public_id text NOT NULL UNIQUE DEFAULT (uuid4_str()), stamp blob NOT NULL DEFAULT (time_now()), trace text DEFAULT (uuid7_str(1700000000, 1)))",
+        ]
+        .map(String::from)
+        .to_vec()
+    }
+
+    /// The functions Turso's own engine lists, as many as these tests read, beside the engine's own.
+    fn turso_host(libsql_too: bool) -> Extras {
+        let mut names = vec!["lower", "uuid4", "uuid4_str", "uuid7", "fts_match"];
+        if libsql_too {
+            names.push("libsql_vector_idx");
+        }
+        Extras { total: vec![], host: Some(names.into_iter().map(|name| HostFunction { name: name.into(), arity: -1, kind: 's' }).collect()) }
+    }
+
+    #[test]
+    fn turso_s_own_engine_s_schema_and_functions_are_typed() {
+        // Measured on `@tursodatabase/database` 0.8.4.
+        for extras in [Extras::default(), sqlite_host(), turso_host(false)] {
+            let a = |sql: &str| {
+                let a = analyze_ddl(sql, &turso_schema(), &extras).analysis;
+                assert!(a.diagnostics.is_empty(), "{sql}: {:?}", a.diagnostics);
+                a
+            };
+            // The schema replays without the indexes SQLite can't make, and says nothing of them.
+            let plain = a("select id, body from docs where id = :id");
+            assert_eq!((col(&plain, "id"), col(&plain, "body")), (("integer".into(), false), ("text".into(), false)));
+        }
+        // Turso's own functions are an app's that runs Turso's engine, and no other SQLite's: sqlean's
+        // `uuid7()` takes no seconds.
+        for extras in [Extras::default(), sqlite_host()] {
+            for sql in ["select fts_match(body, 'kiwi') as m from docs", "select uuid7(1) as u", "select time_unix(1) as t"] {
+                assert!(!analyze_ddl(sql, &turso_schema(), &extras).analysis.diagnostics.is_empty(), "{sql}");
+            }
+        }
+        {
+            let extras = turso_host(false);
+            let a = |sql: &str| {
+                let a = analyze_ddl(sql, &turso_schema(), &extras).analysis;
+                assert!(a.diagnostics.is_empty(), "{sql}: {:?}", a.diagnostics);
+                a
+            };
+            // A default that calls one of Turso's functions: an insert runs it.
+            let added = a("insert into users default values returning id, public_id, trace");
+            assert_eq!((col(&added, "public_id"), col(&added, "trace")), (("text".into(), false), ("text".into(), true)));
+            let search = a("select id, fts_score(title, body, :q) as score, fts_match(title, body, :q2) as hit, fts_highlight(title, body, '<b>', '</b>', :q3) as a, fts_highlight(title, '<b>', '</b>', 'kiwi') as b, fts_highlight(body, :open, '</b>', 'kiwi') as c from docs where fts_match(title, body, :q4) order by score desc");
+            assert_eq!(["score", "hit", "a", "b", "c"].map(|c| col(&search, c)), [("real", false), ("bool", false), ("text", false), ("text", false), ("text", false)].map(|(t, n)| (t.to_string(), n)));
+            assert_eq!(["q", "q2", "q3", "q4", "open"].map(|p| param(&search, p)), ["text"; 5].map(String::from));
+            // Turso checks a call's argument count only as it runs, so the type check does: a highlight
+            // takes a text column at least, and a date three parts, or six, seven or eight.
+            for sql in ["select fts_highlight('<b>', '</b>', 'kiwi') as h", "select time_date(2024, 1) as d", "select time_now(1) as t", "select fts_match('kiwi') as m"] {
+                assert!(!analyze_ddl(sql, &turso_schema(), &extras).analysis.diagnostics.is_empty(), "{sql}");
+            }
+            // Any number of text columns.
+            let columns = vec!["''"; 99].join(", ");
+            a(&format!("select fts_match({columns}, 'kiwi') as m, fts_highlight({columns}, '[', ']', 'kiwi') as h"));
+            // A UUID's seconds come first, and Turso reads nothing after them.
+            let ignored = a("select uuid7_str(1700000000, :ignored) as u");
+            assert_eq!(param(&ignored, "ignored"), "unknown");
+            // A NULL query or marker makes the highlight NULL; a NULL text column is skipped.
+            let nullable = a("select fts_highlight(body, title, '</b>', 'kiwi') as a from docs");
+            assert_eq!(col(&nullable, "a"), ("text".into(), true));
+            let ids = a("select uuid4_str() as a, uuid7_str() as b, uuid7_str(:at) as c, uuid7(:at2) as d, gen_random_uuid() as e");
+            assert_eq!(["a", "b", "c", "d", "e"].map(|c| col(&ids, c)), [("text", false), ("text", false), ("text", false), ("blob", true), ("text", false)].map(|(t, n)| (t.to_string(), n)));
+            assert_eq!((param(&ids, "at"), param(&ids, "at2")), ("integer".into(), "integer".into()));
+            let fields = a("select time_get(stamp, 'second') as a, time_get(stamp, 'epoch') as b, time_get(stamp, 'year') as c, time_date(:year, 1, 1) as d from users");
+            assert_eq!(["a", "b", "c", "d"].map(|c| col(&fields, c)), [("real", false), ("real", false), ("integer", false), ("blob", true)].map(|(t, n)| (t.to_string(), n)));
+            let times = a("select time_now() as a, time_unix(:s) as b, time_get_year(stamp) as c, time_get(stamp, :field) as d, time_fmt_iso(stamp, :offset) as e, time_after(stamp, time_now()) as f, time_sub(time_now(), stamp) as g, dur_h() as h, time_trunc(stamp, 'day') as i, time_parse(:text) as j from users");
+            assert_eq!(["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"].map(|c| col(&times, c)), [("blob", false), ("blob", false), ("integer", false), ("number", false), ("text", false), ("bool", false), ("integer", false), ("integer", false), ("blob", false), ("blob", false)].map(|(t, n)| (t.to_string(), n)));
+            assert_eq!(["s", "field", "offset", "text"].map(|p| param(&times, p)), ["integer", "text", "integer", "text"].map(String::from));
+            let vectors = a("select vector_concat(vector(:a), vector(:b)) as a, vector_slice(vector(:c), :from, 2) as b, vector_distance_dot(vector(:d), vector(:e)) as c, vector_distance_jaccard(vector(:f), vector(:g)) as d, vector32_sparse(:h) as e");
+            assert_eq!(["a", "b", "c", "d", "e"].map(|c| col(&vectors, c)), [("blob", false), ("blob", false), ("real", true), ("real", true), ("blob", false)].map(|(t, n)| (t.to_string(), n)));
+            assert_eq!((param(&vectors, "a"), param(&vectors, "h"), param(&vectors, "from")), ("text".into(), "text".into(), "integer".into()));
+        }
+        // `uuid4()` and `uuid7()` answer with bytes on Turso's own engine and with text on sqlean's,
+        // and with either where the app runs both.
+        let fresh = |extras: &Extras| {
+            let a = analyze_ddl("select uuid4() as a, uuid7() as b", &turso_schema(), extras).analysis;
+            assert!(a.diagnostics.is_empty(), "{:?}", a.diagnostics);
+            (col(&a, "a"), col(&a, "b"))
+        };
+        assert_eq!(fresh(&turso_host(false)), (("blob".into(), false), ("blob".into(), false)));
+        assert_eq!(fresh(&sqlite_host()), (("text".into(), false), ("text".into(), false)));
+        assert_eq!(fresh(&turso_host(true)), (("unknown".into(), false), ("unknown".into(), false)));
+        // Turso's engine answers NULL for a pattern it can't compile, where sqlean's raises an error.
+        let matched = |extras: &Extras| col(&analyze_ddl("select body regexp :re as m from docs", &turso_schema(), extras).analysis, "m");
+        assert_eq!((matched(&turso_host(false)), matched(&sqlite_host())), (("bool".into(), true), ("bool".into(), false)));
     }
 
     #[test]
