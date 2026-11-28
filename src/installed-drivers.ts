@@ -1,17 +1,18 @@
 // The drivers an app depends on, which a module a build step writes passes its define function
 // (src/loader.ts), so that the app's bundle holds the code of the drivers it can run on and no
-// other's. They are read from what the app being built declares: its package.json's dependencies of
-// every kind, and the dependencies its workspace's packages bring it, followed by name through the
-// workspace (a package of queries the app depends on brings its dependencies, never its
-// devDependencies, which the app does not install). The app is the package the bundler builds, its
-// root, never the `.sql` file's: a package of queries shared by several apps runs on each app's
-// driver.
+// other's. They are read from what the app being built declares, its package.json's dependencies of
+// every kind; from the `.sql` file's own package; from each workspace package either depends on,
+// followed by name through the workspace; and from the workspace's root. The app is the package the
+// bundler builds, its root. Leaving out a driver the app runs on refuses its queries, where taking
+// in one too many costs only its bytes, so the list is narrowed only where a runtime dependency names
+// a driver's own package.
 //
 // Bun's drivers have no package: Bun's lockfile, its types or a `packageManager` naming Bun say the
 // app runs on Bun. Node's `node:sqlite` and Cloudflare's SQLite (a Durable Object's storage and
 // D1) have none either, and are small, so every SQLite module passes them. An app that declares no
-// driver's own package of the dialect (one that declares only a wrapper such as drizzle-orm, or no
-// package.json at all) says nothing of which driver it has, and its modules pass every one.
+// driver's own package of the dialect as a runtime dependency (one that declares only a wrapper such
+// as drizzle-orm, or a driver its tests use, or no package.json at all) says nothing of which driver
+// it has, and its modules pass every one, as does a build rooted at a workspace's root.
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import type { Dialect } from "./execute.ts";
@@ -34,18 +35,18 @@ const DRIVERS: Partial<Record<Dialect, readonly Entry[]>> = {
     ["pgPromiseDriver", ["pg-promise"]],
     ["pgliteDriver", ["@electric-sql/pglite"]],
     // Neon's Pool and Client and @vercel/postgres's are pg's shape, and pg-promise hands out pg's Pool (db.$pool).
-    ["pgDriver", ["pg", "@neondatabase/serverless", "@vercel/postgres", "pg-promise"]],
-    ["neonDriver", ["@neondatabase/serverless", "@vercel/postgres"]],
+    ["pgDriver", ["pg", "@neondatabase/serverless", "@vercel/postgres", "@neondatabase/vercel-postgres-compat", "pg-promise", "pg-mem", "@prisma/adapter-pg", "@prisma/adapter-neon", "@payloadcms/db-postgres", "@payloadcms/db-vercel-postgres"]],
+    ["neonDriver", ["@neondatabase/serverless", "@vercel/postgres", "@neondatabase/vercel-postgres-compat", "@prisma/adapter-neon"]],
     ["postgresJsDriver", ["postgres"]],
     ["bunPostgresDriver", [BUN]],
   ],
   mysql: [
     ["knexDriver", ["knex"], true],
     ["bunMysqlDriver", [BUN]],
-    ["mariadbDriver", ["mariadb"]],
+    ["mariadbDriver", ["mariadb", "@prisma/adapter-mariadb"]],
     // Effect SQL's MySQL client runs on mysql2's connection (src/effect.ts).
     ["mysql2Driver", ["mysql2", "@effect/sql-mysql2"]],
-    ["planetscaleDriver", ["@planetscale/database"]],
+    ["planetscaleDriver", ["@planetscale/database", "@prisma/adapter-planetscale"]],
   ],
   sqlite: [
     ["knexDriver", ["knex"], true],
@@ -54,12 +55,13 @@ const DRIVERS: Partial<Record<Dialect, readonly Entry[]>> = {
     ["sqliteWasmDriver", ["@sqlite.org/sqlite-wasm"]],
     ["sqlJsDriver", ["sql.js", "sql.js-fts5"]],
     // node:sqlite's way, which better-sqlite3, bun:sqlite, libsql's Database and Turso's compat Database share.
-    ["syncSqliteDriver", [ALWAYS, "better-sqlite3", "libsql", "@tursodatabase/database", "@tursodatabase/database-wasm"]],
+    ["syncSqliteDriver", [ALWAYS, "better-sqlite3", "libsql", "@tursodatabase/database", "@tursodatabase/database-wasm", "@prisma/adapter-better-sqlite3"]],
     ["bunSqliteDriver", [BUN]],
-    ["libsqlDriver", ["@libsql/client", "@libsql/client-wasm"]],
+    // Astro DB's `db` and Payload's SQLite adapter run on libSQL's client.
+    ["libsqlDriver", ["@libsql/client", "@libsql/client-wasm", "@prisma/adapter-libsql", "@astrojs/db", "@payloadcms/db-sqlite"]],
     ["tursoDriver", ["@tursodatabase/database", "@tursodatabase/database-wasm", "@tursodatabase/sync"]],
     ["sqlitePackageDriver", ["sqlite"]],
-    ["sqlite3Driver", ["sqlite3"]],
+    ["sqlite3Driver", ["sqlite3", "@vscode/sqlite3"]],
     ["d1Driver", [ALWAYS]],
   ],
 };
@@ -68,42 +70,47 @@ type Manifest = { name?: string; packageManager?: string; engines?: Record<strin
 
 /** What was read for an app, kept while none of the files it read has changed. */
 const cache = new Map<string, { read: Read; stamps: string }>();
-type Read = { names: Set<string>; bun: boolean; watched: string[] } | undefined;
+/** The packages an app depends on, those of its runtime dependencies apart, and whether it runs on Bun; undefined where nothing says (no package.json, or an app that is a workspace's root). */
+type Read = { names: Set<string>; runtime: Set<string>; bun: boolean; watched: string[] } | undefined;
 
 /**
  * The drivers of `dialect` the app at `app` depends on, in the order they are tried, and the files
  * that say so, which a bundler watches, so that the module is written again when the app adds a
- * driver. `null` is a module no bundler builds (Node's preload, Jest), whose size is nothing to
- * anyone: it passes every driver. Undefined for a dialect whose module names no drivers.
+ * driver. The package of the `.sql` file in `dir` is read beside the app's. `null` is a module no
+ * bundler builds (Node's preload, Jest, `reylo generate`'s file, which runs anywhere), whose size
+ * is nothing to anyone: it passes every driver. Undefined for a dialect whose module names no
+ * drivers.
  */
-export function installedDrivers(dialect: Dialect, app: string | null): { drivers: string[]; watched: string[] } | undefined {
+export function installedDrivers(dialect: Dialect, app: string | null, dir?: string): { drivers: string[]; watched: string[] } | undefined {
   const all = DRIVERS[dialect];
   if (!all) return undefined;
-  const read = app === null ? undefined : readApp(resolve(app));
+  const read = app === null ? undefined : readApp(resolve(app), dir === undefined ? undefined : resolve(dir));
   const has = (from: string | symbol) => from === ALWAYS || (from === BUN ? read!.bun : read!.names.has(from as string));
-  // A driver's own package says which driver the app has; a wrapper and a runtime do not.
-  const evidence = read !== undefined && all.some(([, from, wrapper]) => !wrapper && from.some((f) => typeof f === "string" && read.names.has(f)));
+  // A driver's own package among the runtime dependencies says which driver the app runs on; a
+  // wrapper, a runtime and a package only its tests or scripts use (a devDependency) do not.
+  const evidence = read !== undefined && all.some(([, from, wrapper]) => !wrapper && from.some((f) => typeof f === "string" && read.runtime.has(f)));
   return { drivers: (evidence ? all.filter(([, from]) => from.some(has)) : all).map(([driver]) => driver), watched: read?.watched ?? [] };
 }
 
-/** The names of the packages the app at `dir` depends on, through its workspace, and whether it runs on Bun; undefined where no package.json is at or above `dir`. */
-function readApp(dir: string): Read {
-  const hit = cache.get(dir);
+/** What the app at `app` depends on, with the package of the `.sql` file in `dir` (`Read`), kept while none of the files read has changed. */
+function readApp(app: string, dir: string | undefined): Read {
+  const key = `${app}\0${dir ?? ""}`;
+  const hit = cache.get(key);
   if (hit && hit.stamps === stamps(hit.read?.watched ?? [])) return hit.read;
-  const read = readAppNow(dir);
-  cache.set(dir, { read, stamps: stamps(read?.watched ?? []) });
+  const read = readAppNow(app, dir);
+  cache.set(key, { read, stamps: stamps(read?.watched ?? []) });
   return read;
 }
 
-function readAppNow(dir: string): Read {
-  let appDir: string | undefined;
-  for (let d = dir; ; d = dirname(d)) {
-    if (existsSync(join(d, "package.json"))) {
-      appDir = d;
-      break;
+function readAppNow(app: string, dir: string | undefined): Read {
+  const nearest = (from: string): string | undefined => {
+    for (let d = from; ; d = dirname(d)) {
+      if (existsSync(join(d, "package.json"))) return d;
+      if (dirname(d) === d) return undefined;
     }
-    if (dirname(d) === d) return undefined;
-  }
+  };
+  const appDir = nearest(app);
+  if (appDir === undefined) return undefined;
   const watched = new Set<string>();
   const manifest = (d: string): Manifest | undefined => {
     try {
@@ -114,44 +121,54 @@ function readAppNow(dir: string): Read {
       return undefined;
     }
   };
-  const app = manifest(appDir);
-  if (!app) return undefined;
   const root = workspaceRoot(appDir);
+  // A build rooted at a workspace's root builds whichever of its apps it is given, which the root does not say.
+  if (root === appDir) return undefined;
   const packages = root ? workspacePackages(root, watched) : new Map<string, string>();
   const names = new Set<string>();
+  const runtime = new Set<string>();
   let bun = false;
   const seen = new Set<string>();
-  /** Adds what the package at `d` declares: every kind of dependency for the app itself, and for a workspace package it brings, all but its devDependencies. */
-  const add = (d: string, m: Manifest, own: boolean) => {
+  /**
+   * Adds every dependency the package at `d` declares, and those of each workspace package it
+   * depends on, by name, alias or `workspace:`, `file:` or `link:` spec: a workspace installs a
+   * member's devDependencies too, where a bundler resolves its imports.
+   */
+  const add = (d: string) => {
     if (seen.has(d)) return;
     seen.add(d);
+    const m = manifest(d);
+    if (!m) return;
     if (m.packageManager?.startsWith("bun@") || m.engines?.bun !== undefined) bun = true;
-    for (const deps of [m.dependencies, m.optionalDependencies, m.peerDependencies, own ? m.devDependencies : undefined]) {
+    for (const [deps, isRuntime] of [[m.dependencies, true], [m.optionalDependencies, true], [m.peerDependencies, true], [m.devDependencies, false]] as const) {
       for (const [key, spec] of Object.entries(deps ?? {})) {
-        // An alias, `"pg8": "npm:pg@^8"`, is the package it names.
-        const name = typeof spec === "string" && spec.startsWith("npm:") ? spec.slice(4).replace(/(?!^)@.*$/, "") : key;
-        names.add(name);
-        const local = packages.get(key) ?? (typeof spec === "string" && /^(?:file|link):/.test(spec) ? resolve(d, spec.replace(/^(?:file|link):/, "")) : undefined);
-        const brought = local === undefined ? undefined : manifest(local);
-        if (local !== undefined && brought) add(local, brought, false);
+        // An alias, `"pg8": "npm:pg@^8"`, imports as its key and installs the package it names.
+        const target = typeof spec === "string" ? /^(?:npm|workspace):((?:@[^/@]+\/)?[^@]+)(?:@|$)/.exec(spec)?.[1] : undefined;
+        for (const name of target === undefined ? [key] : [key, target]) {
+          names.add(name);
+          if (isRuntime) runtime.add(name);
+        }
+        const local = packages.get(key) ?? (target === undefined ? undefined : packages.get(target)) ?? (typeof spec === "string" && /^(?:file|link):/.test(spec) ? resolve(d, spec.replace(/^(?:file|link):/, "")) : undefined);
+        if (local !== undefined) add(local);
       }
     }
   };
-  add(appDir, app, true);
+  add(appDir);
+  // The `.sql` file's own package, which an app may reach by a path rather than a dependency.
+  const sqlDir = dir === undefined ? undefined : nearest(dir);
+  if (sqlDir !== undefined) add(sqlDir);
+  // A workspace's root declares what every package of it resolves.
+  if (root !== undefined) add(root);
   if (names.has("@types/bun") || names.has("bun-types")) bun = true;
-  for (const d of new Set([appDir, ...(root ? [root] : [])])) {
-    for (const lock of ["bun.lock", "bun.lockb"]) {
-      if (existsSync(join(d, lock))) {
+  for (const d of new Set([appDir, ...(root === undefined ? [] : [root])])) {
+    for (const f of ["bun.lock", "bun.lockb", "bunfig.toml"]) {
+      if (existsSync(join(d, f))) {
         bun = true;
-        watched.add(join(d, lock));
+        watched.add(join(d, f));
       }
     }
-    if (root === d) {
-      const m = manifest(d);
-      if (m?.packageManager?.startsWith("bun@")) bun = true;
-    }
   }
-  return { names, bun, watched: [...watched] };
+  return { names, runtime, bun, watched: [...watched] };
 }
 
 /** The root of the workspace `dir` is in: the nearest directory at or above it with a pnpm-workspace.yaml, a package.json that lists workspaces, or a deno.json that does. */
@@ -234,7 +251,7 @@ function globMatcher(glob: string): RegExp {
     else if (c === "?") re += "[^/]";
     else if (c === "{") {
       const end = glob.indexOf("}", i);
-      re += `(?:${glob.slice(i + 1, end).split(",").map((s) => s.replace(/[.+^$()|[\]\\]/g, "\\$&")).join("|")})`;
+      re += `(?:${glob.slice(i + 1, end).split(",").map((s) => s.replace(/[.+^$()|[\]\\]/g, "\\$&").replace(/\*/g, "[^/]*")).join("|")})`;
       i = end;
     } else re += c.replace(/[.+^$()|[\]\\]/g, "\\$&");
   }

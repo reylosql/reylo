@@ -96,7 +96,7 @@ export async function moduleInputOf(path: string, sql: string, app: string | nul
   const marks = await marksOf(analysis, trimmedStatement(analysis.rewritten.sql), dialect, (region) => session.lex(region));
   const input: ModuleInput = { analysis, raw: sql, params, marks, source: sourceName(path), dialect, codecs: session.project.codecs, sqlcommenter: session.project.sqlcommenter, allowNestedArrays: session.project.allowNestedArrays };
   // The drivers the app depends on, which the module passes, so that the app bundles theirs alone.
-  const installed = installedDrivers(dialect, app);
+  const installed = installedDrivers(dialect, app, dirname(path));
   if (installed) Object.assign(input, { drivers: installed.drivers, driversWatched: installed.watched });
   // The libraries a codec builds values with are imported from the app's own install beside the
   // `.sql` file.
