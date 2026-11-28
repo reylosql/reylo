@@ -7,7 +7,8 @@ import { pathToFileURL } from "node:url";
 import { Session } from "../src/analyze.ts";
 import { sqlModule } from "../src/loader.ts";
 import { renderType } from "../src/render.ts";
-import { columnKind, textDecoder } from "../src/values.ts";
+import { columnKind, installPostgresTypes, textDecoder } from "../src/values.ts";
+import { postgresTypes } from "../src/postgres-types.ts";
 import { pg as pgType } from "./descriptors.ts";
 import { DRIVERS, INDEX, MYSQL, driver, mysqlDatabase, mysqlLive, pgLive, postgresDatabase } from "./helpers.ts";
 
@@ -25,6 +26,9 @@ const EDGES: Record<string, string[]> = {
   interval: ["-178000000 years", "178000000 years", "-00:00:00.000001", "infinity", "-infinity"],
   bytea: ["\\x"], text: [""], uuid: ["00000000-0000-0000-0000-000000000000"],
 };
+
+// Postgres's rarer types (a money, a range among them), as a module of one of them installs them.
+installPostgresTypes(postgresTypes);
 
 test("every Postgres type's values at its edges decode as the type the module declares", () => {
   for (const [name, texts] of Object.entries(EDGES)) {
