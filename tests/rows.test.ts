@@ -195,14 +195,18 @@ test("an array member tells its levels from its elements as a parameter does, so
 
 test("a jsonb[] member's element is any JSON but an array, which Postgres would read as one more dimension", () => {
   const docsOf = structured(false, [["docs", array({ kind: "json", label: "jsonb" } as EngineType), "jsonb[]", true, true]]);
-  assert.equal(renderParamType(docsOf.type, "postgres", false, docsOf.members), "readonly { docs?: Exclude<JsonInput, readonly unknown[]>[] | null }[]");
+  assert.equal(renderParamType(docsOf.type, "postgres", false, docsOf.members), "readonly { docs?: (Exclude<JsonInput, readonly unknown[]> | null)[] | null }[]");
   assert.deepEqual(prepareRows("docs", docsOf.rows, [{ docs: [{ a: [1] }, "x", null] }], "postgres", true).value, [{ docs: [{ a: [1] }, "x", null] }]);
   assert.throws(() => prepareRows("docs", docsOf.rows, [{ docs: [[1, 2]] }], "postgres", true), /"docs" element 1 is a JSON array, which an element of jsonb\[\] can't be: Postgres reads it as one more dimension/);
   // A value whose toJSON() writes an array is one too.
   assert.throws(() => prepareRows("docs", docsOf.rows, [{ docs: [{ toJSON: () => [1] }] }], "postgres", true), /"docs" element 1 is a JSON array/);
+  // It is read once, at the element's index, as JSON.stringify reads it.
+  const keys: string[] = [];
+  assert.deepEqual(prepareRows("docs", docsOf.rows, [{ docs: [null, { toJSON: (key: string) => (keys.push(key), { k: 1 }) }] }], "postgres", true).value, [{ docs: [null, { k: 1 }] }]);
+  assert.deepEqual(keys, ["1"]);
   // An element a schema types is any value of it but an array.
   const typed = structured(false, [["docs", array(checked({ type: ["object", "array"] }), true), "doc[]", true, true]]);
-  assert.match(renderParamType(typed.type, "postgres", false, typed.members), /docs\?: Exclude<.*, readonly unknown\[\]>\[\] \| null/);
+  assert.match(renderParamType(typed.type, "postgres", false, typed.members), /docs\?: \(Exclude<.*, readonly unknown\[\]> \| null\)\[\] \| null/);
 });
 
 test("an hstore member takes an object of its keys, written as the text hstore reads", () => {

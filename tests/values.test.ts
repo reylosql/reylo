@@ -1209,7 +1209,9 @@ test("a JSON parameter's BigInt is written as its digits, whatever toJSON an app
 
 test("a driver's own array of JSON keeps its levels where each JSON value is still its text, so a deeper one is refused as from text", () => {
   // As Slonik's tag hands an array of JSON over: pg's array parser, each element its text.
-  assert.deepEqual(withinDimensions(coerce("json[]", ["[1, 2]", "[3, 4]"], "docs", ",", true), "json[]", "docs"), [[1, 2], [3, 4]]);
-  assert.throws(() => withinDimensions(coerce("json[]", [["1", "2"], ["3", "4"]], "docs", ",", true), "json[]", "docs"), /Column "docs" holds an array of 2 dimensions, and its type has one/);
-  assert.throws(() => withinDimensions(coerce("json[]", [["1"]], "docs", ",", true), "json[]", "docs", undefined, true), /Column "docs" holds an array of 2 dimensions/);
+  assert.deepEqual(withinDimensions(coerce("json[]", ["[1, 2]", "[3, 4]"], "docs", ",", true, true), "json[]", "docs"), [[1, 2], [3, 4]]);
+  assert.throws(() => withinDimensions(coerce("json[]", [["1", "2"], ["3", "4"]], "docs", ",", true, true), "json[]", "docs"), /Column "docs" holds an array of 2 dimensions, and its type has one/);
+  assert.throws(() => withinDimensions(coerce("json[]", [["1"]], "docs", ",", true, true), "json[]", "docs", undefined, true), /Column "docs" holds an array of 2 dimensions/);
+  // A driver that may have parsed each JSON value leaves its levels unknown, so nothing is refused by them.
+  assert.deepEqual(withinDimensions(coerce("json[]", [["\"a\""]], "docs", ",", true), "json[]", "docs"), [["a"]]);
 });

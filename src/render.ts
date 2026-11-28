@@ -483,7 +483,7 @@ export function renderParamType(t: EngineType, dialect: Dialect = "postgres", in
       const fields = record.fields.map((f) => {
         // A JSON array inside a member is read as one more dimension, so a jsonb[] member's element is any JSON but an array (src/rows.ts).
         const element = f.type.kind === "array" && dialect === "postgres" && columnKind(f.type, dialect) === "json[]" && f.type.element.type.kind === "json" ? f.type.element.type : undefined;
-        const type = element ? `Exclude<${renderParamType(element, dialect, true, undefined, codecs)}, readonly unknown[]>[]` : renderParamType(f.type, dialect, true, undefined, codecs);
+        const type = element ? `(Exclude<${renderParamType(element, dialect, true, undefined, codecs)}, readonly unknown[]> | null)[]` : renderParamType(f.type, dialect, true, undefined, codecs);
         return `${ident(f.name)}${f.optional ? "?" : ""}: ${f.nullable ? orNull(type) : type}`;
       });
       const row = fields.length ? `{ ${fields.join("; ")} }` : "Record<never, never>";

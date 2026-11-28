@@ -123,8 +123,15 @@ function jsonMember(f: RowField, v: unknown, dialect: Dialect, fail: (message: s
   return dialect !== "postgres" && f.type.kind === "json" ? new Raw(writeJson(v, dialect, fail)!) : v;
 }
 
-/** What JSON.stringify writes a value as, read through its toJSON(), as a member's JSON is written. */
-const jsonOf = (v: unknown): unknown => (v !== null && typeof v === "object" && typeof (v as { toJSON?: unknown }).toJSON === "function" ? (v as { toJSON(key: string): unknown }).toJSON("") : v);
+/** What JSON.stringify writes a value as at `key`, read through its toJSON() as it does; `fail` says why a toJSON() that throws gives no JSON value. */
+function jsonOf(v: unknown, key: string, fail: (message: string) => never): unknown {
+  if (v === null || typeof v !== "object" || typeof (v as { toJSON?: unknown }).toJSON !== "function") return v;
+  try {
+    return (v as { toJSON(key: string): unknown }).toJSON(key);
+  } catch (e) {
+    return fail(`holds a JSON value: ${(e as Error).message}.`);
+  }
+}
 
 /**
  * A whole array's text, from the value `check` gave it: each element in its checked form, a row
@@ -176,8 +183,12 @@ function check(type: EngineType, written: string, v: unknown, dialect: Dialect, 
             const inner = type.element.type;
             return Array.isArray(checked) && inner.kind === "array" ? wholeText(inner, checked) : checked;
           }
-          // Postgres reads a JSON array inside a member as one more dimension of the array, so a JSON element may be anything but one.
-          if (dialect === "postgres" && kind === "json" && (Array.isArray(e) || Array.isArray(jsonOf(e)))) return at(`is a JSON array, which an element of ${written} can't be: Postgres reads it as one more dimension of the array. Pass the array as one value of a jsonb column, or wrap it in an object.`);
+          // Postgres reads a JSON array inside a member as one more dimension of the array, so a JSON element may be anything but one, read as JSON.stringify writes it, through its toJSON() once.
+          if (dialect === "postgres" && kind === "json") {
+            const value = jsonOf(e, String(i), at);
+            if (Array.isArray(value)) return at(`is a JSON array, which an element of ${written} can't be: Postgres reads it as one more dimension of the array. Pass the array as one value of a jsonb column, or wrap it in an object.`);
+            return check(type.element.type, element, value, dialect, at);
+          }
           const level = dialect === "postgres" && Array.isArray(e) && isLevel(kind, e);
           return check(level ? type : type.element.type, level ? written : element, e, dialect, at);
         });
