@@ -394,7 +394,12 @@ async function startD1(entry: string, dir: string, ended: () => void): Promise<D
   let next = 0;
   // The schema D1 was last given, so it is sent again only when it changes.
   let sent: string | undefined;
-  const gone = new Promise<never>((_, fail) => child.once("exit", () => fail(new Error("D1's process ended"))));
+  // A child that could not start, or a message sent once its channel had closed, is an `error`,
+  // which ends it as its exit does.
+  const gone = new Promise<never>((_, fail) => {
+    child.once("exit", () => fail(new Error("D1's process ended")));
+    child.once("error", (e) => fail(new Error(`D1's process ended: ${e.message}`)));
+  });
   gone.catch(() => {});
   child.on("message", (m: Reply) => {
     if (m.kind !== "explain") return;
@@ -404,11 +409,18 @@ async function startD1(entry: string, dir: string, ended: () => void): Promise<D
   });
   let running = false;
   let storage: D1Process["storage"] = "d1";
-  child.once("exit", () => {
-    if (running) ended();
+  const settleAll = () => {
     for (const settle of pending.values()) settle(undefined);
     pending.clear();
     holding(false);
+  };
+  child.once("exit", () => {
+    if (running) ended();
+    settleAll();
+  });
+  child.on("error", () => {
+    settleAll();
+    child.kill();
   });
   const stop = () => {
     if (child.connected) child.send({ kind: "close" });

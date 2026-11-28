@@ -170,6 +170,9 @@ test("a D1 child that ends before it is ready or under a statement leaves the ch
     statement: `const statement = { bind: () => statement, all: () => process.exit(1), run: async () => ({}) };
 export const unstable_readConfig = () => ({ d1_databases: [{ binding: "DB" }] });
 export const getPlatformProxy = async () => ({ env: { DB: { prepare: () => statement, batch: async () => [] } }, dispose: async () => {} });`,
+    // Gone once it is ready, before the process that asked has seen it go: a statement sent then meets a closed channel.
+    ready: `export const unstable_readConfig = () => ({ d1_databases: [{ binding: "DB" }] });
+export const getPlatformProxy = async () => (setTimeout(() => process.exit(1), 50), { env: { DB: { prepare() {}, batch() {} } }, dispose: async () => {} });`,
   };
   for (const [when, source] of Object.entries(ending)) {
     const root = mkdtempSync(join(tmpdir(), "reylo-d1-ends-"));
@@ -182,6 +185,7 @@ export const getPlatformProxy = async () => ({ env: { DB: { prepare: () => state
     // A file rather than `--eval`, whose `--input-type` the D1 child would be forked with too.
     writeFileSync(join(root, "check.mjs"), `const { openProjectDrivers } = await import(${JSON.stringify(new URL("../src/sqlite-drivers.ts", import.meta.url).href)});
 const drivers = await openProjectDrivers(${JSON.stringify(root)}, ${JSON.stringify(join(root, "app.db"))});
+for (const end = Date.now() + 1000; Date.now() < end; );
 const refusals = await Promise.all(drivers.map((d) => d.refuses("select 1", 0)));
 console.log(JSON.stringify({ drivers: drivers.length, refusals }));`);
     const run = spawnSync(process.execPath, [join(root, "check.mjs")], { encoding: "utf8", timeout: 50_000 });
