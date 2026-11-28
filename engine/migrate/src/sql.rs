@@ -313,9 +313,16 @@ fn split(sql: &str, dialect: Dialect, tokens: &[Token], openings: &[(usize, usiz
         // A body opens at BEGIN (and inside it, at a nested BEGIN or a CASE); END closes one, but for
         // END IF, END LOOP, END WHILE and END REPEAT, which close constructs never counted. A word
         // after a dot is a name (`new.end`), never one of these.
-        let w = if k > 0 && tokens[k - 1].kind == TokenKind::Symbol && tokens[k - 1].text == "." { String::new() } else { t.upper() };
+        let symbol_before = |text: &str| k > 0 && tokens[k - 1].kind == TokenKind::Symbol && tokens[k - 1].text == text;
+        let w = if symbol_before(".") { String::new() } else { t.upper() };
         let after = upper(tokens.get(k + 1));
-        if w == "BEGIN" && (depth > 0 || opens_body(&current, dialect, tokens.get(k + 1))) {
+        if dialect == Dialect::Sqlite && depth > 0 {
+            // A SQLite trigger's body closes at an END right after one of its statements' `;`, as
+            // `sqlite3_complete` reads one: a CASE's END, or a column named `end`, closes nothing.
+            if w == "END" && symbol_before(";") {
+                depth = 0;
+            }
+        } else if w == "BEGIN" && (depth > 0 || opens_body(&current, dialect, tokens.get(k + 1))) {
             depth += 1;
         } else if w == "CASE" && depth > 0 {
             depth += 1;

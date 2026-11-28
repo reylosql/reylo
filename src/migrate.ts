@@ -12,7 +12,7 @@
 // drives it through its own `begin` and `commit`, awaiting each answer.
 import { buildTime, type MigrateOptions } from "./build-time.ts";
 import { embedded } from "./embedded-migrations.ts";
-import { sameMigration, transactionControl } from "./migration-text.ts";
+import { sameMigration, transactionControl, turnsForeignKeysOn } from "./migration-text.ts";
 
 /** A Durable Object's storage, `ctx.storage`, as far as `migrate` uses it. */
 export type MigrationStorage = {
@@ -40,21 +40,16 @@ const HISTORY = "__reylo_migrations";
 type Step = { exec: string } | { all: string; values?: unknown[] } | { run: string; values: unknown[] } | "begin" | "commit" | "keys";
 
 /** The database the error messages name, where its migrations came from, and what to do about one it ran that they lack. */
-type Words = { database: string; any: string; source: string; sourceOrder: string; restore: string; atomic: boolean };
+type Words = { database: string; any: string; source: string; sourceOrder: string; restore: string };
 
-// A Durable Object's sql.exec refuses a migration's own transaction statements; a connection runs them, so they are refused first.
-const OBJECT: Words = { database: "this Durable Object", any: "an object", source: "this build", sourceOrder: "this build's order", restore: "deploy a build whose migrations include it", atomic: false };
-const CONNECTION: Words = { database: "this database", any: "a database", source: "the project", sourceOrder: "the lock's order", restore: "put it back in the project's migrations", atomic: true };
+const OBJECT: Words = { database: "this Durable Object", any: "an object", source: "this build", sourceOrder: "this build's order", restore: "deploy a build whose migrations include it" };
+const CONNECTION: Words = { database: "this database", any: "a database", source: "the project", sourceOrder: "the lock's order", restore: "put it back in the project's migrations" };
 
-/**
- * The steps of a deploy's last step on SQLite: the history table made, the history held against
- * `list`, then each migration the database hasn't run, in its own transaction with its row in the
- * history table. Each step's answer comes back as the value of its `yield`: a query's rows.
- */
-function* steps(list: readonly Migration[], words: Words): Generator<Step, string[], unknown[] | undefined> {
-  yield { exec: `create table if not exists ${HISTORY} (name text primary key, sql text not null, applied_at text, fingerprint text, catalog text)` };
-  // In the order they ran, as reylo migrate reads its history (`read_history`).
-  const ran = yield { all: `select name, sql from ${HISTORY} order by applied_at is null, applied_at, rowid, case when name = 'init.sql' then '' else name end` };
+// In the order they ran, as reylo migrate reads its history (`read_history`).
+const HISTORY_ROWS = `select name, sql from ${HISTORY} order by applied_at is null, applied_at, rowid, case when name = 'init.sql' then '' else name end`;
+
+/** The names of `ran`, the history, once it's held against `list`: each a migration of `list`, with its text, in its order. */
+function heldHistory(ran: unknown[] | undefined, list: readonly Migration[], words: Words): Set<string> {
   // A client whose statements answer some other way, as D1's `{ results }` or sqlite3's callbacks, runs nothing.
   if (!Array.isArray(ran)) throw new TypeError("reylo: migrate takes a SQLite connection whose prepare(sql).all() gives its rows, as Turso's @tursodatabase/database, better-sqlite3, node:sqlite and bun:sqlite do");
   const listed = new Map(list.map((m) => [m.name, m]));
@@ -65,13 +60,21 @@ function* steps(list: readonly Migration[], words: Words): Generator<Step, strin
     if (!sameMigration(m.sql, row.sql)) throw new Error(`reylo: the migration ${row.name} isn't the text ${words.database} ran: put the change in a new migration instead of editing one ${words.any} may have run`);
     if (list[i]?.name !== row.name) throw new Error(`reylo: ${words.database} ran ${row.name} where ${words.sourceOrder} has ${list[i]?.name ?? "nothing"} first: migrations run in the lock's order, so add a new one after those that ran`);
   });
-  const done = new Set((ran as { name: string }[]).map((r) => r.name));
-  // As a deploy refuses a migration that can't run atomically (`atomicity_problem` in
-  // engine/migrate/src/sql.rs), before any runs: one with its own commit would leave what ran before
-  // it in place, with no row to say so, and every start would run that part again.
+  return new Set((ran as { name: string }[]).map((r) => r.name));
+}
+
+/**
+ * The steps of a deploy's last step on SQLite: the history table made, the history held against
+ * `list`, then each migration the database hasn't run, in its own transaction with its row in the
+ * history table. Each step's answer comes back as the value of its `yield`: a query's rows.
+ * `refuse` says why a pending migration can't run here, and is asked of each before any runs.
+ */
+function* steps(list: readonly Migration[], words: Words, refuse: (m: Migration) => string | undefined = () => undefined): Generator<Step, string[], unknown[] | undefined> {
+  yield { exec: `create table if not exists ${HISTORY} (name text primary key, sql text not null, applied_at text, fingerprint text, catalog text)` };
+  const done = heldHistory(yield { all: HISTORY_ROWS }, list, words);
   for (const m of list) {
-    const control = words.atomic && !done.has(m.name) && m.name !== "init.sql" ? transactionControl(m.sql) : undefined;
-    if (control) throw new Error(`reylo: the migration ${m.name} can't run atomically: it has its own ${control}, and Reylo runs each migration in a transaction of its own, so take it out`);
+    const why = done.has(m.name) ? undefined : refuse(m);
+    if (why) throw new Error(`reylo: the migration ${m.name} ${why}`);
   }
   const applied: string[] = [];
   for (const m of list) {
@@ -81,14 +84,13 @@ function* steps(list: readonly Migration[], words: Words): Generator<Step, strin
     } catch (e) {
       throw new Error(`reylo: the migration ${m.name} couldn't begin its transaction on ${words.database}, and nothing of it ran: ${(e as Error).message}`, { cause: e });
     }
+    // Another start of the app, on the same file, may have run migrations since the history was
+    // read: held again under the transaction's lock, it still continues `list`, and names what ran.
+    if (heldHistory(yield { all: HISTORY_ROWS }, list, words).has(m.name)) {
+      yield "commit";
+      continue;
+    }
     try {
-      // Another start of the app, on the same file, may have run it since the history was read.
-      const [again] = ((yield { all: `select sql from ${HISTORY} where name = ?`, values: [m.name] }) ?? []) as { sql: string }[];
-      if (again) {
-        if (!sameMigration(m.sql, again.sql)) throw new Error(`it isn't the text another start ran under this name`);
-        yield "commit";
-        continue;
-      }
       yield { exec: m.sql };
       // As reylo migrate checks a SQLite migration's foreign keys before it commits (`run` in
       // engine/migrate/src/commands.rs): a deferred one it broke fails here, rolling back the
@@ -166,10 +168,13 @@ const quoted = (name: string) => `"${name.replace(/"/g, '""')}"`;
 /**
  * The rows of every table that break one of its foreign keys, as `pragma foreign_key_check` counts
  * them, read from each key's declaration: a row whose key columns are all set and that no parent
- * row matches. Turso's engine answers that pragma with no rows before 0.9, so it is held this way.
+ * row matches. As that pragma does, it fails on a key whose parent columns aren't the parent's
+ * primary key or a unique index on them, or whose parent is a view. Turso's engine answers that
+ * pragma with no rows before 0.9, so it is held this way.
  */
 export async function brokenKeys(rows: (sql: string, values?: unknown[]) => Promise<unknown[]>): Promise<number> {
   let broken = 0;
+  const same = (a: string[], b: string[]) => a.length === b.length && a.every((c) => b.some((d) => d.toLowerCase() === c.toLowerCase()));
   const tables = (await rows("select name from sqlite_schema where type = 'table' and name not like 'sqlite!_%' escape '!'")) as { name: string }[];
   for (const { name } of tables) {
     // The pragmas' statement forms: Turso's table-valued ones fail on a name holding a `"`.
@@ -179,12 +184,19 @@ export async function brokenKeys(rows: (sql: string, values?: unknown[]) => Prom
     for (const key of keys.values()) {
       const parent = key[0]!.table;
       const set = key.map((k) => `c.${quoted(k.from)} is not null`).join(" and ");
+      const mismatch = new Error(`foreign key mismatch - ${quoted(name)} referencing ${quoted(parent)}`);
+      const [kind] = (await rows("select type from sqlite_schema where type in ('table', 'view') and name = ? collate nocase", [parent])) as { type: string }[];
+      if (kind?.type === "view") throw mismatch;
       let unmatched = "";
       // A parent table that doesn't exist matches no row; a key that names no columns takes the parent's primary key.
-      if ((await rows("select 1 from sqlite_schema where type = 'table' and name = ? collate nocase", [parent])).length) {
-        const primary = async () => ((await rows(`pragma table_info(${quoted(parent)})`)) as { name: string; pk: number }[]).filter((c) => c.pk > 0).sort((a, b) => a.pk - b.pk).map((c) => c.name);
-        const to = key.every((k) => k.to) ? key.map((k) => k.to!) : await primary();
-        if (to.length !== key.length) continue;
+      if (kind) {
+        const primary = ((await rows(`pragma table_info(${quoted(parent)})`)) as { name: string; pk: number }[]).filter((c) => c.pk > 0).sort((a, b) => a.pk - b.pk).map((c) => c.name);
+        const to = key.every((k) => k.to) ? key.map((k) => k.to!) : primary;
+        let unique = same(to, primary);
+        for (const index of unique ? [] : ((await rows(`pragma index_list(${quoted(parent)})`)) as { name: string; unique: number; partial: number }[])) {
+          if (index.unique && !index.partial && same(to, ((await rows(`pragma index_info(${quoted(index.name)})`)) as { name: string }[]).map((c) => c.name))) unique = true;
+        }
+        if (!unique || to.length !== key.length) throw mismatch;
         // `+` takes the child's affinity off its value, so the parent column's affinity and collation decide the match, as a key compares.
         unmatched = ` and not exists (select 1 from ${quoted(parent)} as p where ${key.map((k, i) => `p.${quoted(to[i]!)} = +c.${quoted(k.from)}`).join(" and ")})`;
       }
@@ -203,19 +215,28 @@ export async function brokenKeys(rows: (sql: string, values?: unknown[]) => Prom
  * every key instead. After each migration, they are as the app had them, whatever the migration set.
  */
 export async function runMigrationsOn(db: MigrationConnection, list: readonly Migration[]): Promise<string[]> {
-  const run = steps(list, CONNECTION);
   const statement = async (sql: string) => (await db.prepare(sql)) as { all(...values: unknown[]): unknown; run(...values: unknown[]): unknown };
   const rows = async (sql: string, values: unknown[] = []) => (await (await statement(sql)).all(...values)) as unknown[];
   // Turso's engine, which has a function SQLite lacks; any other failure is no answer, and fails the run.
-  let turso: boolean | undefined;
-  const isTurso = () =>
-    rows("select turso_version()").then(
-      () => true,
-      (e: unknown) => {
-        if (/no such function/i.test(String((e as Error)?.message))) return false;
-        throw e;
-      },
-    );
+  const turso = await rows("select turso_version()").then(
+    () => true,
+    (e: unknown) => {
+      if (/no such function/i.test(String((e as Error)?.message))) return false;
+      throw e;
+    },
+  );
+  const run = steps(list, CONNECTION, (m) => {
+    // As a deploy refuses a migration that can't run atomically (`atomicity_problem` in
+    // engine/migrate/src/sql.rs): one with its own commit would leave what ran before it in place,
+    // with no row to say so, and every start would run that part again. Unlike a deploy, init.sql
+    // runs in a transaction here too, so it's held to the same.
+    const control = transactionControl(m.sql);
+    if (control) return `can't run atomically: it has its own ${control}, and Reylo runs each migration in a transaction of its own, so take it out`;
+    // SQLite takes the pragma only outside a transaction, but Turso's engine takes it inside, where a
+    // rebuilt table's drop would then cascade to the rows that reference it.
+    if (turso && turnsForeignKeysOn(m.sql)) return "turns foreign keys on, which Turso's engine takes inside the migration's transaction, so dropping a table others reference would cascade to their rows: take it out, since Reylo sets them back as the app had them after each migration";
+    return undefined;
+  });
   let open = false;
   // The app's own setting, read before each migration, and set back after it.
   let keys: boolean | undefined;
@@ -232,7 +253,6 @@ export async function runMigrationsOn(db: MigrationConnection, list: readonly Mi
       try {
         if (step === "begin") {
           // Outside a transaction, where SQLite takes the pragma.
-          turso ??= await isTurso();
           const [row] = (await rows("pragma foreign_keys")) as Record<string, unknown>[];
           keys = Number(row?.foreign_keys) === 1;
           if (keys) await db.exec("pragma foreign_keys = off");

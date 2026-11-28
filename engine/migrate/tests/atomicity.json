@@ -1,5 +1,5 @@
 {
-  "about": "SQLite migrations, and the first statement of each that controls the transaction, which a migration can't hold of its own: null where it has none. engine/migrate/src/sql.rs (atomicity_problem) and src/migration-text.ts (transactionControl) are both held to it.",
+  "about": "SQLite migrations, and the first statement of each that controls the transaction, which a migration can't hold of its own: null where it has none. engine/migrate/src/sql.rs (atomicity_problem) and src/migration-text.ts (transactionControl) are both held to it. A trigger ends at the ; after an end that itself follows a ;, as sqlite3_complete reads one.",
   "cases": [
     {
       "sql": "update a set b = 1; commit; insert into c values (1);",
@@ -116,6 +116,18 @@
     {
       "sql": "create trigger t after insert on a begin select 0xE-case when 1 then 2 end; end; create table z (a);",
       "control": null
+    },
+    {
+      "sql": "create trigger t after insert on b begin update b set x = end; end; create table z (a);",
+      "control": null
+    },
+    {
+      "sql": "create trigger t after insert on b begin update b set x = end; end; commit;",
+      "control": "commit"
+    },
+    {
+      "sql": "create trigger t after insert on b when (select end from b) begin select 1; end; rollback;",
+      "control": "rollback"
     }
   ]
 }

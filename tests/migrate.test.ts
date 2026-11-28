@@ -266,4 +266,57 @@ test("the key check Turso's engine runs counts the rows SQLite's foreign_key_che
     const rows = async (sql: string, values: unknown[] = []) => db.prepare(sql).all(...(values as [])) as unknown[];
     assert.equal(await brokenKeys(rows), db.prepare("pragma foreign_key_check").all().length, schema);
   }
+  // A key SQLite can't hold, which fails its check: to a column that's no key, a part of one, a view, or rowid.
+  const mismatched = [
+    "create table p (a int, b int); create table c (x references p (a)); insert into c values (1);",
+    "create table p (a int, b int, primary key (a, b)); create table c (x references p); insert into c values (1);",
+    "create table p (a int unique, b int); create unique index p_b on p (b) where b > 0; create table c (x references p (b)); insert into c values (1);",
+    "create table t (id integer primary key); create view v as select id from t; create table c (x references v (id)); insert into c values (1);",
+    "create table t (id int); create table c (x references t (rowid)); insert into c values (1);",
+  ];
+  for (const schema of mismatched) {
+    const db = new DatabaseSync(":memory:");
+    db.exec(`pragma foreign_keys = off; ${schema}`);
+    const rows = async (sql: string, values: unknown[] = []) => db.prepare(sql).all(...(values as [])) as unknown[];
+    assert.throws(() => db.prepare("pragma foreign_key_check").all(), /foreign key mismatch/, schema);
+    await assert.rejects(brokenKeys(rows), /^Error: foreign key mismatch - "c" referencing /, schema);
+  }
+});
+
+test("migrate(db) refuses, on Turso's engine, a migration that turns foreign keys on inside its transaction", async () => {
+  const PARENT = { name: "20261107120000_posts.sql", sql: "create table posts (id integer primary key, user_id integer references users (id) on delete cascade); insert into users (name) values ('ada'); insert into posts (user_id) values (1);" };
+  const REBUILD = { name: "20261108120000_rebuild.sql", sql: "pragma foreign_keys = on; create table users_new (id integer primary key, name text not null); insert into users_new select * from users; drop table users; alter table users_new rename to users;" };
+  const turso = await driver("@tursodatabase/database").connect(":memory:");
+  assert.deepEqual(await runMigrationsOn(turso, [USERS, PARENT]), [USERS.name, PARENT.name]);
+  await assert.rejects(runMigrationsOn(turso, [USERS, PARENT, REBUILD]), /^Error: reylo: the migration 20261108120000_rebuild\.sql turns foreign keys on, which Turso's engine takes inside the migration's transaction/);
+  const posts = (await (await turso.prepare("select count(*) as n from posts")).all()) as { n: number }[];
+  assert.equal(Number(posts[0]!.n), 1);
+  // SQLite takes the pragma only outside a transaction, so there it runs, and cascades to nothing.
+  const db = new DatabaseSync(":memory:");
+  db.exec("pragma foreign_keys = on");
+  assert.deepEqual(await runMigrationsOn(db, [USERS, PARENT, REBUILD]), [USERS.name, PARENT.name, REBUILD.name]);
+  assert.equal(Number((db.prepare("select count(*) as n from posts").get() as { n: number }).n), 1);
+});
+
+test("migrate(db) refuses an init.sql with its own commit, which runs in a transaction like any migration", async () => {
+  const INIT = { name: "init.sql", sql: "create table users (id integer primary key);\ncommit;\ncreate table nowhere (x);\n" };
+  await assert.rejects(runMigrationsOn(new DatabaseSync(":memory:"), [INIT]), /^Error: reylo: the migration init\.sql can't run atomically: it has its own commit/);
+});
+
+test("migrate(db) holds the whole history again under the transaction's lock, and refuses one another start changed", async () => {
+  const db = new DatabaseSync(":memory:");
+  await runMigrationsOn(db, [USERS]);
+  const AGE = { name: "20261106130000_age.sql", sql: "alter table users add column age int;" };
+  // As a second process with another build sees it: after its history read, the first commits AGE, which this build lacks.
+  let reads = 0;
+  const racing: MigrationConnection = {
+    exec: (sql: string) => db.exec(sql),
+    prepare(sql: string) {
+      const statement = db.prepare(sql);
+      if (!sql.startsWith("select name, sql from") || reads++) return statement;
+      return { all: () => { const rows = statement.all(); runMigrations(storage(db), [USERS, AGE]); return rows; }, run: statement.run.bind(statement) };
+    },
+  };
+  await assert.rejects(runMigrationsOn(racing, [USERS, BIO]), /^Error: reylo: this database ran the migration 20261106130000_age\.sql, which the project doesn't have/);
+  assert.deepEqual(await names(db), [USERS.name, AGE.name]);
 });

@@ -166,24 +166,27 @@ export const sameMigration = (a: string, b: string): boolean => canonical(normal
 const CONTROL = new Set(["BEGIN", "COMMIT", "END", "ROLLBACK", "SAVEPOINT", "RELEASE"]);
 
 /**
- * The first statement of a SQLite migration that controls the transaction (`begin`, `commit`,
- * `end`, `rollback`, `savepoint`, `release`), lowercase, as `atomicity_problem` refuses one
- * (engine/migrate/src/sql.rs), or none. Each migration runs in a transaction of its own, so one that
- * commits partway would leave what ran before its commit in place, with no row in the history to say
- * so. It reads the text as SQLite does: a `--` comment to the line's end, a `/*` one to the first
- * `*\/`, quotes doubled inside their own, and a trigger as one statement, which ends at the `;`
- * after the `end` that closes it, not after a `case`'s `end` or a column named `end` (`new.end`).
+ * The tokens of each statement of a SQLite migration, as SQLite reads the text: a `--` comment to
+ * the line's end, a `/*` one to the first `*\/`, a byte order mark as spacing, quotes doubled inside
+ * their own, and a trigger as one statement, which ends at the `;` after an `end` that itself follows
+ * a `;`, as SQLite completes one (`sqlite3_complete`), not after a `case`'s `end` or a column named
+ * `end`. A name is uppercase, a number as written, and a quoted text or name `'` followed by its
+ * content; symbols are left out.
  */
-export function transactionControl(sql: string): string | undefined {
+export function statementTokens(sql: string): string[][] {
+  const statements: string[][] = [];
   let head: string[] = [];
   let trigger = false;
-  let cases = 0;
+  let afterSemicolon = false;
   let afterEnd = false;
   let afterDot = false;
+  const token = (text: string) => {
+    head.push(text);
+    afterSemicolon = afterEnd = afterDot = false;
+  };
   let k = 0;
   while (k < sql.length) {
     const c = sql[k]!;
-    // SQLite reads a byte order mark as spacing, wherever it is.
     if (SPACING.test(c) || c === "\uFEFF") {
       k++;
       continue;
@@ -206,9 +209,8 @@ export function transactionControl(sql: string): string | undefined {
         if (close !== "]" && sql[end + 1] === close) end++;
         else break;
       }
+      token(`'${sql.slice(k + 1, end).replaceAll(close + close, close)}`);
       k = end + 1;
-      head.push("");
-      afterEnd = afterDot = false;
       continue;
     }
     // A number is one token, its dot and exponent included (`1.`, `2.5e-3`), so its dot qualifies no name.
@@ -217,9 +219,8 @@ export function transactionControl(sql: string): string | undefined {
       const decimal = !/^0[xX]/.test(sql.slice(k, k + 2));
       let end = k + 1;
       while (end < sql.length && (/[0-9A-Za-z_.]/.test(sql[end]!) || (decimal && /[+-]/.test(sql[end]!) && /[eE]/.test(sql[end - 1]!) && /[0-9]/.test(sql[end + 1] ?? "")))) end++;
+      token(sql.slice(k, end));
       k = end;
-      head.push("");
-      afterEnd = afterDot = false;
       continue;
     }
     // A name, as SQLite reads one: any character past ASCII is part of it.
@@ -227,29 +228,47 @@ export function transactionControl(sql: string): string | undefined {
       let end = k;
       while (end < sql.length && (/[A-Za-z0-9_$]/.test(sql[end]!) || sql.charCodeAt(end) >= 0x80)) end++;
       const word = sql.slice(k, end).toUpperCase();
-      k = end;
-      if (head.length === 0 && CONTROL.has(word)) return word.toLowerCase();
-      head.push(word);
+      // A trigger's body closes at an `end` right after one of its statements' `;`.
+      const closes = trigger && afterSemicolon && !afterDot && word === "END";
+      token(word);
+      afterEnd = closes;
       // `create trigger` or `create temp trigger`: elsewhere, as in `create table trigger`, it's a name.
       if (word === "TRIGGER" && head[0] === "CREATE" && (head.length === 2 || (head.length === 3 && (head[1] === "TEMP" || head[1] === "TEMPORARY")))) trigger = true;
-      const keyword = trigger && !afterDot;
-      afterEnd = false;
-      if (keyword && word === "CASE") cases++;
-      else if (keyword && word === "END") {
-        if (cases > 0) cases--;
-        else afterEnd = true;
-      }
-      afterDot = false;
+      k = end;
       continue;
     }
     if (c === ";" && (!trigger || afterEnd)) {
+      if (head.length) statements.push(head);
       head = [];
-      trigger = false;
-      cases = 0;
+      trigger = afterSemicolon = afterEnd = afterDot = false;
+      k++;
+      continue;
     }
+    afterSemicolon = c === ";";
     afterDot = c === ".";
     afterEnd = false;
     k++;
   }
-  return undefined;
+  if (head.length) statements.push(head);
+  return statements;
+}
+
+/**
+ * The first statement of a SQLite migration that controls the transaction (`begin`, `commit`,
+ * `end`, `rollback`, `savepoint`, `release`), lowercase, as `atomicity_problem` refuses one
+ * (engine/migrate/src/sql.rs), or none. Each migration runs in a transaction of its own, so one that
+ * commits partway would leave what ran before its commit in place, with no row in the history to say
+ * so.
+ */
+export function transactionControl(sql: string): string | undefined {
+  return statementTokens(sql).find((t) => CONTROL.has(t[0]!))?.[0]!.toLowerCase();
+}
+
+/** Whether a SQLite migration turns foreign keys on (`pragma foreign_keys = on`, or `1`, `true`, `yes`), as itself or as `pragma main.foreign_keys`. */
+export function turnsForeignKeysOn(sql: string): boolean {
+  return statementTokens(sql).some((t) => {
+    const at = t[0] === "PRAGMA" ? t.indexOf("FOREIGN_KEYS") : -1;
+    const value = at === 1 || at === 2 ? t[at + 1]?.replace(/^'/, "").toUpperCase() : undefined;
+    return value !== undefined && ["ON", "1", "TRUE", "YES"].includes(value);
+  });
 }
