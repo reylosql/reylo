@@ -73,8 +73,8 @@ impl AsyncAnswerer<Describe> for Answers<'_> {
     }
 }
 
-/// A catalog query with its values written into the text, as mysql2's `query()` writes them: each
-/// `?` in turn, a string quoted ([`quote`]).
+/// A catalog query with its values written into the text: each `?` in turn, a string as every
+/// session reads it ([`literal`]).
 pub fn interpolate(sql: &str, params: &[Value]) -> Option<String> {
     let mut out = String::with_capacity(sql.len());
     let mut params = params.iter();
@@ -87,7 +87,7 @@ pub fn interpolate(sql: &str, params: &[Value]) -> Option<String> {
             Value::Null => out.push_str("NULL"),
             Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
             Value::Number(n) => out.push_str(&n.to_string()),
-            Value::String(s) => out.push_str(&quote(s)),
+            Value::String(s) => out.push_str(&literal(s)),
             _ => return None,
         }
     }
@@ -95,16 +95,39 @@ pub fn interpolate(sql: &str, params: &[Value]) -> Option<String> {
 }
 
 /// A string as a MySQL literal that every session reads as written, whatever its `sql_mode`: a quote
-/// doubled and every other character as it is, where `sqlstring`'s `\'` and `\n` are text under
+/// doubled and every other character as it is, where [`quote`]'s `\'` and `\n` are text under
 /// NO_BACKSLASH_ESCAPES. A backslash alone has no such spelling, so it is escaped, as a session
 /// without that mode reads it, and NUL with it.
-pub fn quote(s: &str) -> String {
+fn literal(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('\'');
     for c in s.chars() {
         match c {
             '\0' => out.push_str("\\0"),
             '\'' => out.push_str("''"),
+            '\\' => out.push_str("\\\\"),
+            c => out.push(c),
+        }
+    }
+    out.push('\'');
+    out
+}
+
+/// A string as a MySQL literal, by `sqlstring`'s escapes, as mysql2's `query()` and the drivers
+/// that write a value into the statement's text write it.
+pub fn quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for c in s.chars() {
+        match c {
+            '\0' => out.push_str("\\0"),
+            '\u{8}' => out.push_str("\\b"),
+            '\t' => out.push_str("\\t"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\u{1a}' => out.push_str("\\Z"),
+            '"' => out.push_str("\\\""),
+            '\'' => out.push_str("\\'"),
             '\\' => out.push_str("\\\\"),
             c => out.push(c),
         }
