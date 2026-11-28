@@ -51,6 +51,17 @@ static Select *gInsertSelect;   /* the SELECT or VALUES that feeds the INSERT, a
 static int gUpdateFromNext;     /* the statement is an UPDATE ... FROM whose SELECT is not coded yet */
 static Table *gTables[128];
 static int gnTables;
+static int gDepth;              /* how many SELECTs the walker is inside */
+static int gFrames;             /* and how deep SQLite's code generator recurses to code the one it is in */
+static int gTooDeep;            /* it reached one nested past a bound selectJson holds them to */
+static int gTooTall;            /* an expression stands for one deeper than SQLite's bound (exprHeight) */
+static int gHeightDepth;        /* how many SELECTs selectHeight is inside */
+/* SQLite codes each arm of a compound inside the arm after it, so coding the first of 500 arms
+** recurses 500 levels, and a compound in each of a chain of WITH queries recurses that much per
+** link: its own build overflows its 8 MiB stack at 35 links of 500 arms, and SQLite's bound of
+** 500 arms skips a compound whose last arm is a one-row VALUES. The walker holds that recursion to
+** 20 compounds of 500 arms, one inside another, which the engine's stack takes many times over. */
+#define MAX_FRAMES 10000
 
 /* A table of the schema the statement reads. A WITH query's table is ephemeral, as a subquery's
 ** is: the statement owns it and frees it as the prepare ends, before tables() reads the list. */
@@ -348,14 +359,121 @@ static void expr(sqlite3_str *s, Expr *p, Select *pSel){
   closeObj(s);
 }
 
-static void selectJson(sqlite3_str *s, Select *pTop){
-  Select *p = pTop;
+/* ---- what an expression stands for ----------------------------------------------------------- */
+
+/* SQLite holds an expression to SQLITE_LIMIT_EXPR_DEPTH as it is written, but a column of a
+** subquery stands for the subquery's own expression, which the engine reads through and SQLite's
+** query flattener copies in its place: a chain of WITH queries or views, each wrapping the column
+** of the one before in an expression, adds them up past that bound (999 of 50 levels each overflow
+** sqlite3's own stack). exprHeight measures an expression with each column of a subquery standing
+** for that column's expression, and the hooks refuse one past SQLite's bound with its message: in
+** a SELECT, measured as the walker enters it, and in each expression a write's hook writes. */
+typedef struct Scope Scope;
+struct Scope { int iCursor; int nCol; int *aHeight; Scope *pOuter; };
+static int selectHeight(Select *p, Scope *pOuter, int *aCol);
+static int exprListHeight(ExprList *pList, Scope *pScope);
+static int exprHeight(Expr *p, Scope *pScope){
+  int h = 0, i, j;
+  Scope *q;
+  if( p==0 ) return 0;
+  if( p->op==TK_COLUMN || p->op==TK_AGG_COLUMN ){
+    for(q=pScope; q; q=q->pOuter){
+      if( q->iCursor==p->iTable ) return p->iColumn>=0 && p->iColumn<q->nCol && q->aHeight[p->iColumn]>0 ? q->aHeight[p->iColumn] : 1;
+    }
+    return 1;
+  }
+  if( !ExprHasProperty(p, EP_TokenOnly) ){
+    h = exprHeight(p->pLeft, pScope);
+    if( (j = exprHeight(p->pRight, pScope))>h ) h = j;
+    if( ExprUseXSelect(p) ){ if( (j = selectHeight(p->x.pSelect, pScope, 0))>h ) h = j; }
+    else if( p->x.pList ){
+      for(i=0; i<p->x.pList->nExpr; i++){ if( (j = exprHeight(p->x.pList->a[i].pExpr, pScope))>h ) h = j; }
+    }
+#ifndef SQLITE_OMIT_WINDOWFUNC
+    if( IsWindowFunc(p) && p->y.pWin ){
+      Window *pWin = p->y.pWin;
+      if( (j = exprListHeight(pWin->pPartition, pScope))>h ) h = j;
+      if( (j = exprListHeight(pWin->pOrderBy, pScope))>h ) h = j;
+      if( (j = exprHeight(pWin->pFilter, pScope))>h ) h = j;
+    }
+#endif
+  }
+  if( h+1>sqlite3_limit(gDb, SQLITE_LIMIT_EXPR_DEPTH, -1) ) gTooTall = 1;
+  return h+1;
+}
+static int exprListHeight(ExprList *pList, Scope *pScope){
+  int i, j, h = 0;
+  for(i=0; pList && i<pList->nExpr; i++){ if( (j = exprHeight(pList->a[i].pExpr, pScope))>h ) h = j; }
+  return h;
+}
+/* The tallest expression of a SELECT, each arm's, as SQLite measures a subquery in an expression;
+** each result column's in aCol when it is given. */
+static int selectHeight(Select *p, Scope *pOuter, int *aCol){
+  Select *pArm;
+  int i, h = 0;
+  /* A chain of SELECTs past selectJson's bound is refused there. */
+  if( gTooTall || gHeightDepth>=sqlite3_limit(gDb, SQLITE_LIMIT_EXPR_DEPTH, -1) ) return 1;
+  gHeightDepth++;
+  for(pArm=p; pArm; pArm=pArm->pPrior){
+    int nSrc = pArm->pSrc ? pArm->pSrc->nSrc : 0;
+    Scope *aScope = nSrc ? sqlite3_malloc64(sizeof(Scope)*(sqlite3_uint64)nSrc) : 0;
+    Scope *pIn = pOuter;
+    if( nSrc && aScope==0 ) break;
+    for(i=0; i<nSrc; i++){
+      SrcItem *pItem = &pArm->pSrc->a[i];
+      Select *pSub = pItem->fg.isSubquery && pItem->u4.pSubq ? pItem->u4.pSubq->pSelect : 0;
+      aScope[i].iCursor = pItem->iCursor; aScope[i].nCol = 0; aScope[i].aHeight = 0; aScope[i].pOuter = pIn;
+      if( pSub && pSub->pEList && (aScope[i].aHeight = sqlite3_malloc64(sizeof(int)*(sqlite3_uint64)pSub->pEList->nExpr))!=0 ){
+        aScope[i].nCol = pSub->pEList->nExpr;
+        memset(aScope[i].aHeight, 0, sizeof(int)*(size_t)aScope[i].nCol);
+        selectHeight(pSub, pOuter, aScope[i].aHeight);
+      }
+      pIn = &aScope[i];
+    }
+    for(i=0; pArm->pEList && i<pArm->pEList->nExpr; i++){
+      int j = exprHeight(pArm->pEList->a[i].pExpr, pIn);
+      if( aCol && j>aCol[i] ) aCol[i] = j;
+      if( j>h ) h = j;
+    }
+    for(i=0; i<nSrc; i++){
+      SrcItem *pItem = &pArm->pSrc->a[i];
+      int j = pItem->fg.isUsing ? 0 : exprHeight(pItem->u3.pOn, pIn);
+      if( j>h ) h = j;
+      if( pItem->fg.isTabFunc && (j = exprListHeight(pItem->u1.pFuncArg, pIn))>h ) h = j;
+    }
+    {
+      int j, aj[5];
+      aj[0] = exprHeight(pArm->pWhere, pIn); aj[1] = exprListHeight(pArm->pGroupBy, pIn); aj[2] = exprHeight(pArm->pHaving, pIn);
+      aj[3] = exprListHeight(pArm->pOrderBy, pIn); aj[4] = exprHeight(pArm->pLimit, pIn);   /* a TK_LIMIT over the LIMIT and the OFFSET */
+      for(j=0; j<5; j++) if( aj[j]>h ) h = aj[j];
+    }
+    for(i=0; i<nSrc; i++) sqlite3_free(aScope[i].aHeight);
+    sqlite3_free(aScope);
+  }
+  gHeightDepth--;
+  return h;
+}
+
+/* A multi-row VALUES is a chain of one-row SELECTs under UNION ALL, the last row on top. Its
+** first row stands for it here, with the rows after it in "rows", so a list of any length nests
+** nothing; an ORDER BY or a LIMIT is on the top row, as on any compound. */
+static Select *firstRow(Select *p){
+  while( (p->selFlags & SF_Values) && p->op==TK_ALL && p->pPrior && (p->pPrior->selFlags & SF_Values) ) p = p->pPrior;
+  return p;
+}
+
+/* One arm of a SELECT, as an object: its members, and "op", the set operator between it and the
+** arm before it, which it returns. */
+static Select *armJson(sqlite3_str *s, Select *pTop, int *pnFrames){
+  Select *p = firstRow(pTop), *q;
   int i, nMore = 0;
-  if( p==0 ){ sqlite3_str_appendall(s, "null"); return; }
-  /* A multi-row VALUES is a chain of one-row SELECTs under UNION ALL, the last row on top. Its
-  ** first row stands for it here, with the rows after it in "rows", so a list of any length nests
-  ** nothing; an ORDER BY or a LIMIT is on the top row, as on any compound. */
-  while( (p->selFlags & SF_Values) && p->op==TK_ALL && p->pPrior && (p->pPrior->selFlags & SF_Values) ){ p = p->pPrior; nMore++; }
+  for(q=pTop; q!=p; q=q->pPrior) nMore++;
+  /* SQLite codes the rows of a VALUES list it marks SF_MultiValue one after another, and a chain
+  ** of them written out as a compound, each row inside the next: those take frames as arms do. */
+  if( nMore && (pTop->selFlags & SF_MultiValue)==0 ){
+    gFrames += nMore; *pnFrames += nMore;
+    if( gFrames>=MAX_FRAMES ) gTooDeep = 1;
+  }
   sqlite3_str_appendchar(s, 1, '{');
   key(s, "columns"); sqlite3_str_appendchar(s, 1, '[');
   for(i=0; p->pEList && i<p->pEList->nExpr; i++){
@@ -369,7 +487,6 @@ static void selectJson(sqlite3_str *s, Select *pTop){
   closeArr(s); sqlite3_str_appendchar(s, 1, ',');
   if( nMore ){
     Select **apRow = sqlite3_malloc64(sizeof(Select*)*(sqlite3_uint64)nMore);
-    Select *q;
     key(s, "rows"); sqlite3_str_appendchar(s, 1, '[');
     for(i=nMore, q=pTop; apRow && i>0; q=q->pPrior) apRow[--i] = q;
     for(i=0; apRow && i<nMore; i++){ exprList(s, apRow[i]->pEList, apRow[i]); sqlite3_str_appendchar(s, 1, ','); }
@@ -415,16 +532,53 @@ static void selectJson(sqlite3_str *s, Select *pTop){
   kv_bool(s, "aggregate", (p->selFlags & SF_Aggregate)!=0);
   kv_bool(s, "values", (p->selFlags & SF_Values)!=0);
   kv_bool(s, "window", p->pWin!=0);
-  if( p->pPrior ){
-    kv_str(s, "op", p->op==TK_ALL ? "union all" : p->op==TK_UNION ? "union" : p->op==TK_INTERSECT ? "intersect" : "except");
-    key(s, "prior"); selectJson(s, p->pPrior); sqlite3_str_appendchar(s, 1, ',');
-  }
+  if( p->pPrior ) kv_str(s, "op", p->op==TK_ALL ? "union all" : p->op==TK_UNION ? "union" : p->op==TK_INTERSECT ? "intersect" : "except");
   closeObj(s);
+  return p->pPrior;
+}
+
+static void selectJson(sqlite3_str *s, Select *pTop){
+  Select *pArm;
+  int compound, nFrames = 1;
+  if( pTop==0 ){ sqlite3_str_appendall(s, "null"); return; }
+  /* SQLite reads each view and each WITH query a statement reads as a subquery of its own, and
+  ** holds a chain of views to SQLITE_LIMIT_EXPR_DEPTH (1,000) nested SELECTs but a chain of WITH
+  ** queries, each reading the one before, to none. The walker holds every SELECT it writes to
+  ** that bound, the statement's own counted, so the engine reads no tree of SELECTs deeper than a
+  ** chain of views makes (core/src/stack.rs), and the hook refuses the statement as SQLite refuses
+  ** the views. */
+  if( gDepth==0 ){ gHeightDepth = 0; selectHeight(pTop, 0, 0); }
+  if( gDepth>=sqlite3_limit(gDb, SQLITE_LIMIT_EXPR_DEPTH, -1) || gFrames>=MAX_FRAMES ){ gTooDeep = 1; sqlite3_str_appendall(s, "null"); return; }
+  gDepth++; gFrames++;
+  /* A compound's arms are chained through pPrior, the last on top, but stand side by side, as
+  ** SQLite's own walk takes them (sqlite3WalkSelect): a compound is the list of its arms, the last
+  ** first, each at the compound's depth, so the bound counts a subquery the same in whichever arm
+  ** reads it, and the tree nests no deeper for it. */
+  compound = firstRow(pTop)->pPrior!=0;
+  if( compound ) sqlite3_str_appendchar(s, 1, '[');
+  for(pArm=pTop; pArm; ){
+    /* Each arm before the last is coded a frame deeper in SQLite's code generator. */
+    if( pArm!=pTop ){
+      gFrames++; nFrames++;
+      if( gFrames>=MAX_FRAMES ){ gTooDeep = 1; break; }
+    }
+    pArm = armJson(s, pArm, &nFrames);
+    if( compound ) sqlite3_str_appendchar(s, 1, ',');
+  }
+  if( compound ) closeArr(s);
+  gDepth--; gFrames -= nFrames;
 }
 
 /* ---- the hooks ------------------------------------------------------------------------------- */
 
 static int skipHook(Parse *pParse){ return pParse->nErr || pParse->db->init.busy; }
+
+/* After a hook has written its part: a SELECT nested past selectJson's bounds, or an expression
+** taller than SQLite's through the subqueries it reads, refuses the statement. */
+static void refuseTooDeep(Parse *pParse){
+  if( gTooDeep ) sqlite3ErrorMsg(pParse, "VIEWs and/or subqueries nested too deep");
+  else if( gTooTall ) sqlite3ErrorMsg(pParse, "Expression tree is too large (maximum depth %d)", sqlite3_limit(gDb, SQLITE_LIMIT_EXPR_DEPTH, -1));
+}
 
 static void selectHook(Parse *pParse, Select *p, SelectDest *pDest){
   if( skipHook(pParse) ) return;
@@ -440,6 +594,7 @@ static void selectHook(Parse *pParse, Select *p, SelectDest *pDest){
     gCaptured = 1;
     selectJson(gStmt, p);
   }
+  refuseTooDeep(pParse);
 }
 /* SQLite codes the SELECT that feeds an INSERT before it reaches the INSERT hook: this names it,
 ** and the SELECT hook serializes it as resolved, before the code generator rewrites it. */
@@ -516,10 +671,18 @@ static void insertHook(Parse *pParse, Table *pTab, IdList *pColumn, ExprList *pL
     kv_int(gDml, "rows", 1);
   }
   closeObj(gDml);
+  /* An upsert's DO UPDATE is resolved later, as the UPDATE it runs: updateHook measures it there. */
+  exprListHeight(pList, 0);
+  refuseTooDeep(pParse);
 }
 static void updateHook(Parse *pParse, Table *pTab, ExprList *pChanges, Expr *pWhere, int *aXRef, SrcList *pTabList, int onError, Upsert *pUpsert){
   int i, j;
-  if( skipHook(pParse) || gCaptured ) return;
+  if( skipHook(pParse) ) return;
+  /* An upsert's DO UPDATE, resolved as the UPDATE it runs once the INSERT's hook has written it. */
+  if( gCaptured ){
+    if( pUpsert ){ exprListHeight(pChanges, 0); exprHeight(pWhere, 0); refuseTooDeep(pParse); }
+    return;
+  }
   gCaptured = 1;
   tableSeen(pTab);
   sqlite3_str_appendchar(gDml, 1, '{');
@@ -539,6 +702,8 @@ static void updateHook(Parse *pParse, Table *pTab, ExprList *pChanges, Expr *pWh
   closeArr(gDml); sqlite3_str_appendchar(gDml, 1, ',');
   key(gDml, "where"); expr(gDml, pWhere, 0); sqlite3_str_appendchar(gDml, 1, ',');
   closeObj(gDml);
+  exprListHeight(pChanges, 0); exprHeight(pWhere, 0);
+  refuseTooDeep(pParse);
 }
 static void deleteHook(Parse *pParse, Table *pTab, Expr *pWhere){
   if( skipHook(pParse) || gCaptured ) return;
@@ -549,6 +714,8 @@ static void deleteHook(Parse *pParse, Table *pTab, Expr *pWhere){
   kv_str(gDml, "table", pTab->zName);
   key(gDml, "where"); expr(gDml, pWhere, 0); sqlite3_str_appendchar(gDml, 1, ',');
   closeObj(gDml);
+  exprHeight(pWhere, 0);
+  refuseTooDeep(pParse);
 }
 static void returningHook(Parse *pParse, Table *pTab, ExprList *pNew){
   int i;
@@ -563,6 +730,8 @@ static void returningHook(Parse *pParse, Table *pTab, ExprList *pNew){
     closeObj(gReturning); sqlite3_str_appendchar(gReturning, 1, ',');
   }
   closeArr(gReturning);
+  exprListHeight(pNew, 0);
+  refuseTooDeep(pParse);
 }
 
 /* ---- tables: columns and unique keys ------------------------------------------------------- */
@@ -1150,7 +1319,7 @@ static char *missingSchema(const char *zSql, const char *zMsg, int *piOfst, int 
 /* The version of the tree's format, reylo_sqlite_analyze's first member: TREE_VERSION in
 ** src/sqlite_tree.rs, which refuses a tree of another. A change to what either side reads or writes
 ** moves both. */
-#define REYLO_TREE_VERSION 5
+#define REYLO_TREE_VERSION 6
 
 /*
 ** Analyzes one statement against the schema DDL, with the host's scalar functions (azFn[i] taking
@@ -1182,7 +1351,7 @@ char *reylo_sqlite_analyze(
     return sqlite3_str_finish(out);
   }
   gStmt = sqlite3_str_new(0); gDml = sqlite3_str_new(0); gReturning = sqlite3_str_new(0); gUpdateFrom = sqlite3_str_new(0);
-  gCaptured = 0; gInsertSelect = 0; gUpdateFromNext = 0; gnTables = 0;
+  gCaptured = 0; gInsertSelect = 0; gUpdateFromNext = 0; gnTables = 0; gTooDeep = 0; gTooTall = 0; gDepth = 0; gFrames = 0;
   gHost = azHost; gnHost = nHost; gExtra = azFn; gnExtra = nFn; gnDenied = 0; gDeniedView = 0;
   if( nHost>=0 ) sqlite3_set_authorizer(gDb, functionAuth, 0);
   installHooks(1);
