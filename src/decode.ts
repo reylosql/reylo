@@ -411,22 +411,30 @@ function hexOnToString(v: unknown): unknown {
 /**
  * How PGlite's parser for an array's oid, which it reads a value by where Reylo named no parser of
  * its own, holds a JSON element. The instance's is asked once with a JSON string, whose text comes
- * back quoted and whose value bare. A transaction shows no parsers, and there PGlite's own for an
+ * back quoted and whose value bare, once for each oid. A transaction shows no parsers, and there PGlite's own for an
  * array of a type it learned holds each element's text, a parser the app gave the element's type
  * being out of sight.
  */
 function pgliteJsonElements(db: AnyClient, oid: number): JsonElements {
   const parsers = db.parsers as Record<number, (text: string, oid: number) => unknown> | undefined;
   if (parsers === undefined) return "text";
+  let known = pgliteJsonFormats.get(parsers);
+  if (known === undefined) pgliteJsonFormats.set(parsers, (known = new Map()));
+  if (known.has(oid)) return known.get(oid);
   const parse = parsers[oid];
-  if (typeof parse !== "function") return undefined;
+  let format: JsonElements;
   try {
-    const probe = parse('{"\\"x\\""}', oid);
-    return Array.isArray(probe) && probe[0] === '"x"' ? "text" : Array.isArray(probe) && probe[0] === "x" ? "decoded" : undefined;
+    const probe = typeof parse === "function" ? parse('{"\\"x\\""}', oid) : undefined;
+    format = Array.isArray(probe) && probe[0] === '"x"' ? "text" : Array.isArray(probe) && probe[0] === "x" ? "decoded" : undefined;
   } catch {
-    return undefined;
+    format = undefined;
   }
+  known.set(oid, format);
+  return format;
 }
+
+/** What each PGlite instance's parser for an array of JSON was found to hold, by its parsers table and oid: asked once each. */
+const pgliteJsonFormats = new WeakMap<object, Map<number, JsonElements>>();
 
 async function pglite(db: AnyClient, text: string, values: unknown[], columns: Columns | undefined): Promise<unknown[]> {
   // A statement met for the first time names every built-in type Reylo decodes, and every oid the
@@ -453,7 +461,7 @@ async function pglite(db: AnyClient, text: string, values: unknown[], columns: C
       const decode = decoders[i]!;
       for (const row of rows) {
         const v = row[f.name];
-        if (v !== null && v !== undefined) row[f.name] = typeof v === "string" ? decode(v) : coerce(kinds[i]!, v, f.name, ",", true, Array.isArray(v) ? pgliteJsonElements(db, f.oid) : undefined);
+        if (v !== null && v !== undefined) row[f.name] = typeof v === "string" ? decode(v) : coerce(kinds[i]!, v, f.name, ",", true, Array.isArray(v) && holdsJsonArray(kinds[i]!) ? pgliteJsonElements(db, f.oid) : undefined);
       }
     }
   }
