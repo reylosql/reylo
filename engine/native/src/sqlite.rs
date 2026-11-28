@@ -24,6 +24,10 @@ struct Connection {
     file: File,
     /// The engine's answers, kept between statements as the loader's session keeps them.
     answers: AnswerCache<Describe>,
+    /// Functions the host lists beside the ones of the SQLite here, as rows of `FUNCTIONS_QUERY`:
+    /// those of the app's own SQLite drivers, which the loader reads where they decide a type
+    /// (`functions` on `open`, from src/sqlite-drivers.ts).
+    functions: Vec<Vec<Value>>,
 }
 
 /// A database file as a connection reads it (`File::open`).
@@ -51,7 +55,7 @@ impl Session {
     pub fn open(path: &str) -> Result<Session, crate::Failure> {
         let file = File::new(path);
         file.open().map_err(|e| crate::Failure::Unreachable(e.to_string()))?;
-        Ok(Session { connection: Connection { file, answers: AnswerCache::until_cleared() }, version: crate::engines::sqlite::sqlite_tree::version().to_string() })
+        Ok(Session { connection: Connection { file, answers: AnswerCache::until_cleared(), functions: Vec::new() }, version: crate::engines::sqlite::sqlite_tree::version().to_string() })
     }
 
     /// Drops the answers kept from earlier statements, for a caller that outlives a schema change.
@@ -125,7 +129,8 @@ impl Program for Sqlite {
                 match file.open() {
                     Ok(_) => {
                         self.next += 1;
-                        self.connections.insert(self.next, Connection { file, answers: AnswerCache::until_cleared() });
+                        let functions = request["functions"].as_array().map(|rows| rows.iter().filter_map(|row| row.as_array().cloned()).collect()).unwrap_or_default();
+                        self.connections.insert(self.next, Connection { file, answers: AnswerCache::until_cleared(), functions });
                         json!({ "status": "opened", "conn": self.next, "version": crate::engines::sqlite::sqlite_tree::version() })
                     }
                     // A file that cannot be opened is a database that cannot be reached: a build runs on `reylo/.cache/`.
@@ -136,7 +141,7 @@ impl Program for Sqlite {
                 None => closed(id),
                 Some(c) => match c.file.open() {
                     Err(e) => json!({ "status": "unreachable", "message": e.to_string() }),
-                    Ok(db) => match answers::analyze(&db, sql, &mut c.answers) {
+                    Ok(db) => match answers::analyze_with(&db, sql, &mut c.answers, &c.functions) {
                         Ok(analysis) => json!({ "status": "analysis", "analysis": analysis }),
                         Err(e) => json!({ "status": "error", "message": e.to_string() }),
                     },
@@ -161,8 +166,10 @@ impl Program for Sqlite {
                 None => closed(id),
                 Some(c) => match c.file.open() {
                     Err(e) => json!({ "status": "unreachable", "message": e.to_string() }),
+                    // The functions listed beside the file's are read by every analysis, so they name its entries too.
                     Ok(db) => match schema(&db) {
-                        Ok(schema) => schema.answer(),
+                        Ok(schema) if c.functions.is_empty() => schema.answer(),
+                        Ok(schema) => crate::Schema::of(&[vec![json!(schema.fingerprint)], vec![Value::from(c.functions.iter().map(|row| Value::from(row.clone())).collect::<Vec<_>>())]], schema.stamp).answer(),
                         Err(e) => json!({ "status": "error", "message": e.to_string() }),
                     },
                 },
@@ -217,7 +224,7 @@ impl File {
         if self.path == ":memory:" {
             return Db::open_in_memory();
         }
-        let db = Db::open_with_flags(&self.path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX | OpenFlags::SQLITE_OPEN_URI)?;
+        let db = schema_tolerant(Db::open_with_flags(&self.path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX | OpenFlags::SQLITE_OPEN_URI)?)?;
         // A database in WAL mode keeps its index in shared memory, the `-shm` file mapped, which
         // WebAssembly cannot map: in exclusive locking mode SQLite keeps the index in its own memory
         // and reads the log whole. WASI's file locks are no-ops, so the mode holds nothing against the
@@ -254,7 +261,7 @@ impl File {
     #[cfg(not(target_family = "wasm"))]
     fn open_copy(&self) -> rusqlite::Result<Db> {
         let failed = |e: std::io::Error| rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CANTOPEN), Some(format!("cannot copy the database the app holds: {e}")));
-        let open = |copy: &std::path::Path| Db::open_with_flags(copy, OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX);
+        let open = |copy: &std::path::Path| Db::open_with_flags(copy, OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX).and_then(schema_tolerant);
         let mut copies = self.copies.borrow_mut();
         if copies.is_none() {
             *copies = Some(Copies::create().map_err(failed)?);
@@ -295,6 +302,17 @@ impl File {
         }
         Err(failed(std::io::Error::other("its logs were restarted under every copy")))
     }
+}
+
+/// A connection that reads a schema holding a row this SQLite cannot parse: Turso's engine writes
+/// `CREATE INDEX … USING fts (…)` and its `USING backing_btree` index into `sqlite_schema`, which
+/// SQLite otherwise refuses the whole file over ("malformed database schema"). With the schema
+/// writable, SQLite keeps every row it can read and the engine's catalog query still lists each
+/// row's DDL, which the replay reads ([`DDL_QUERY`](crate::engines::sqlite::sqlite::DDL_QUERY)). The
+/// connection never writes: the file is opened read-only, and a held file's copy is only read.
+fn schema_tolerant(db: Db) -> rusqlite::Result<Db> {
+    db.set_db_config(rusqlite::config::DbConfig::SQLITE_DBCONFIG_WRITABLE_SCHEMA, true)?;
+    Ok(db)
 }
 
 /// A database file and its logs as they stood: each one's size and time, where it exists.

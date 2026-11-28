@@ -294,8 +294,10 @@ export class Engine extends EngineCore {
    * child of its own, so that a server slow to answer holds up no other connection; an Unreachable
    * where it cannot be opened. `variables` stand in for this process's own (one left undefined is
    * unset), for a caller that names its entries by them: the bridge and the child read those.
+   * `options` go to the engine with the request, as SQLite's `functions` (src/sqlite-drivers.ts's
+   * `appFunctions`).
    */
-  async open(url: string, variables: Record<string, string | undefined> = {}): Promise<Connection> {
+  async open(url: string, variables: Record<string, string | undefined> = {}, options: Record<string, unknown> = {}): Promise<Connection> {
     const env = withVariables(process.env, variables);
     const target: HostUrl = url.includes("://") ? await hostUrl(url, env) : { url, close: () => {} };
     const channel = new Channel(this.binary, this.dialect, variables);
@@ -303,7 +305,7 @@ export class Engine extends EngineCore {
     let conn: number;
     let version: string;
     try {
-      ({ conn, version } = await ask({ op: "open", url: target.url, ...(target.bridge && { bridge: target.bridge }) }));
+      ({ conn, version } = await ask({ op: "open", url: target.url, ...(target.bridge && { bridge: target.bridge }), ...options }));
     } catch (e) {
       channel.end();
       target.close();

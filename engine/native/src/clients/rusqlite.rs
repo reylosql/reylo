@@ -13,7 +13,39 @@ pub type Describe = <Sqlite as Database>::Describe;
 
 /// The analysis of `sql`, its catalog queries answered over `conn`.
 pub fn analyze(conn: &Connection, sql: &str, cache: &mut AnswerCache<Describe>) -> Result<Analysis, ReplayError<HostError>> {
-    crate::replay::run::<Sqlite, _>(sql, &mut Answers(conn), cache)
+    analyze_with(conn, sql, cache, &[])
+}
+
+/// [`analyze`], with `functions` (rows of `FUNCTIONS_QUERY`) listed beside the ones `conn`'s SQLite
+/// has: the functions of the app's own SQLite drivers, where they decide what a statement may call
+/// and what it answers with, as Turso's own engine does.
+pub fn analyze_with(conn: &Connection, sql: &str, cache: &mut AnswerCache<Describe>, functions: &[Vec<Value>]) -> Result<Analysis, ReplayError<HostError>> {
+    crate::replay::run::<Sqlite, _>(sql, &mut Listing { answers: Answers(conn), functions }, cache)
+}
+
+/// [`Answers`], with more functions listed.
+struct Listing<'a> {
+    answers: Answers<'a>,
+    functions: &'a [Vec<Value>],
+}
+
+impl Answerer<Describe> for Listing<'_> {
+    type Error = HostError;
+
+    fn describe(&mut self, sql: &str) -> Result<Result<Describe, DbError>, HostError> {
+        self.answers.describe(sql)
+    }
+
+    fn query(&mut self, sql: &str, params: &[Value]) -> Result<Result<Vec<Vec<Value>>, DbError>, HostError> {
+        let rows = self.answers.query(sql, params)?;
+        if sql != reylo_engine_sqlite::sqlite::FUNCTIONS_QUERY || self.functions.is_empty() {
+            return Ok(rows);
+        }
+        Ok(rows.map(|mut rows| {
+            rows.extend(self.functions.iter().cloned());
+            rows
+        }))
+    }
 }
 
 /// The engine's catalog queries, answered over a connection.
