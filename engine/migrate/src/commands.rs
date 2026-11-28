@@ -6613,15 +6613,21 @@ async fn history_push_on(db: &mut Db, server: &mut Server, opts: &Options, init:
     if !problems.is_empty() {
         return Ok(refuse(&problems, log));
     }
-    // A MySQL row a cut-off run started is the only record that its change may be in place: one no
-    // file reads as anymore isn't taken out, which would let the next deploy run it again.
-    if d == Dialect::Mysql {
-        if let Some(r) = before_rows.iter().find(|r| !r.applied && started_file(r, &files, d).is_none()) {
-            return Ok(refuse(&[cut_off_problem(r, &files, &shown(&opts.dir), false, d)], log));
-        }
-    }
     let l = read_lock(opts).unwrap_or_default();
     let order: Vec<Migration> = if lock_free(opts) { files.clone() } else { l.entries.iter().filter_map(|e| files.iter().find(|f| f.name == e.name).cloned()).collect() };
+    // A MySQL row a cut-off run started is the only record that its change may be in place: one that
+    // no migration this command records reads as isn't taken out, which would let the next deploy
+    // run it again. That is a file edited, deleted or renamed into several, or one the lock doesn't
+    // list yet.
+    if d == Dialect::Mysql {
+        if let Some(r) = before_rows.iter().find(|r| !r.applied && started_file(r, &order, d).is_none()) {
+            let problem = match started_file(r, &files, d) {
+                Some(f) => Problem::new("cut-off-unlocked", format!("The lock doesn't list {}, which a deploy cut off here started", f.name)).note("History push records only what the lock lists, so it keeps the run's row until the lock lists that file."),
+                None => cut_off_problem(r, &order, &shown(&opts.dir), false, d),
+            };
+            return Ok(refuse(&[problem], log));
+        }
+    }
     let live = crate::catalog::without_comments(&catalog(db).await?);
     // On Supabase, the settings the database began under, which the migrations it ran may have
     // changed before any was recorded: the one a replay reaches it from, where its privileges can't

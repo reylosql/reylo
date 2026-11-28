@@ -2603,6 +2603,23 @@ async fn a_mysql_cut_off_run_whose_file_was_edited_gives_its_text_back() {
     assert_eq!(p.rows("select name from __reylo_migrations where applied_at is null").await.len(), 1);
 }
 
+/// A cut-off run's file that the lock doesn't list yet: history push records only what the lock
+/// lists, so it keeps the run's row rather than take it out for a later deploy to run again.
+#[tokio::test(flavor = "current_thread")]
+async fn a_mysql_cut_off_run_the_lock_doesnt_list_is_kept() {
+    let Some(mut p) = P::new(Dialect::Mysql).await else { return };
+    p.strict = true;
+    p.file("20261027100000_t.sql", "create table t (id bigint primary key);");
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    assert_eq!(p.run(async |o, log| reylo_migrate::lock_from_history(o, log).await).await, 0, "{}", p.peek());
+    p.file("20261027110000_empty.sql", "truncate table t;");
+    p.exec("insert into __reylo_migrations (name, `sql`, applied_at) values ('20261027110000_empty.sql', 'truncate table t;', null)").await;
+    p.output();
+    assert_eq!(p.history_push().await, 1);
+    assert_has!(p.output(), r"✗ The lock doesn't list 20261027110000_empty\.sql, which a deploy cut off here started");
+    assert_eq!(p.rows("select name from __reylo_migrations where applied_at is null").await.len(), 1);
+}
+
 /// A cut-off run's file renamed into two that read the same: neither is taken for it, and history
 /// push keeps its row until its text is back under its name.
 #[tokio::test(flavor = "current_thread")]
