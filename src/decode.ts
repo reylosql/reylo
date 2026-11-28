@@ -61,6 +61,9 @@ const ARRAY_OIDS = new Map<number, number>([
   [5039, 5038], [6150, 4451], [6151, 4532], [6152, 4533], [6153, 4534], [6155, 4535], [6157, 4536], [6442, 6437], [6491, 6490],
 ]);
 const BOX_ARRAY = 1020;
+/** `record` and `record[]`, the oids of a row value of any shape. */
+const RECORD = 2249;
+const RECORD_ARRAY = 2287;
 
 /** A built-in type's kind and its array delimiter; undefined for a type the database created. */
 function builtin(oid: number): { kind: Kind; delim: string } | undefined {
@@ -237,7 +240,11 @@ function declaredColumn(fields: readonly Field[], columns: Columns | undefined, 
   // read by its type. Postgres gives an array of every rank one oid, so an array's kind is compared
   // without its rank.
   const rankless = (kind: Kind) => kind.replace(/(?:\[\])+$/, "[]");
-  const fits = (f: Field, c: Columns[number]) => !(SCALAR_OIDS[f.oid] !== undefined || ARRAY_OIDS.has(f.oid)) || rankless(builtin(f.oid)?.kind ?? "") === rankless(c[1]);
+  // `record` and its array are every row's, and say nothing of its fields.
+  const fits = (f: Field, c: Columns[number]) => {
+    const b = f.oid === RECORD || f.oid === RECORD_ARRAY ? undefined : builtin(f.oid);
+    return b === undefined || rankless(b.kind) === rankless(c[1]);
+  };
   return (f) => {
     const c = count.get(f.name) === 1 ? byName.get(f.name) : undefined;
     return c && fits(f, c) ? c : undefined;
@@ -309,7 +316,16 @@ async function pgFamily(key: object, run: (types: object) => Promise<PgResult>, 
   if (types.sawBinary()) throw refuseBinary();
   // The table goes by oid, which says nothing of a built-in row's fields, so those are still text,
   // as an array of whole arrays may be.
-  const moduleColumns = columns && lastOfEach(columns).filter(([, kind]) => byModule(kind));
+  // Where the result names its fields, each is the module's column only as `declaredColumn` matches it
+  // (a column a migration retyped is read by its type).
+  const resultFields = !Array.isArray(result) && result.fields ? result.fields.map((f) => ({ name: f.name, oid: f.dataTypeID })) : undefined;
+  const declared = resultFields && declaredColumn(resultFields, columns);
+  const moduleColumns = resultFields && declared
+    ? lastOfEach(resultFields.map((f, i) => [f.name, i] as const)).flatMap(([, i]) => {
+        const c = declared(resultFields[i]!, i);
+        return c && byModule(c[1]) ? [[resultFields[i]!.name, c[1], c[2]] as const] : [];
+      })
+    : columns && lastOfEach(columns).filter(([, kind]) => byModule(kind));
   if (moduleColumns?.length) {
     const decoders = moduleColumns.map(([name, kind, delim]) => [name, textDecoder(kind, delim)] as const);
     for (const row of rows) {

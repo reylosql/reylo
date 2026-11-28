@@ -113,6 +113,15 @@ test("postgres: after a migration adds a column under select *, a created type t
     const freshPayload = postgres(own.url, { max: 1 });
     try {
       assert.deepEqual(await payloads.run(freshPayload), [{ id: 1, payload: 42, note: null }]);
+      // Retyped again, to text, which no reader of its own names.
+      await admin.unsafe(`alter table payloads alter column payload type text`);
+      const freshText = new pg.Client({ connectionString: own.url });
+      await freshText.connect();
+      try {
+        for (const db of [freshText, freshPayload]) assert.deepEqual(await payloads.run(db), [{ id: 1, payload: "42", note: null }]);
+      } finally {
+        await freshText.end();
+      }
     } finally {
       await freshPayload.end();
     }
