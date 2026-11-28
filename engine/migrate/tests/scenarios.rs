@@ -2477,7 +2477,7 @@ async fn a_lone_statement_cut_off(mut p: P, landed: bool) {
         // the schema to say it ran: deploy and the dry run refuse, running nothing, and history push
         // settles it from the schema where it can.
         assert_eq!(p.migrate().await, 1);
-        assert_has!(p.output(), r"✗ A deploy was cut off while it ran 20261027110000_index\.sql\n[\s\S]*  Settle it from the schema, running nothing:\n    reylo migrate history push --url <url>\n[\s\S]*  If such a change didn't run, run it by hand too:\n    reylo run --url <url> --file \S*20261027110000_index\.sql");
+        assert_has!(p.output(), r"✗ A deploy was cut off while it ran 20261027110000_index\.sql\n[\s\S]*  If it's a change the schema can't show, such as a truncate, and it didn't run, run it by hand first:\n    reylo run --url <url> --file \S*20261027110000_index\.sql\n  Then settle it from the schema, running nothing:\n    reylo migrate history push --url <url>");
         assert_eq!(p.dry_run().await, 1);
         assert_has!(p.output(), r"A deploy was cut off while it ran 20261027110000_index\.sql");
         assert_eq!(p.history_push().await, 0, "{}", p.peek());
@@ -2577,7 +2577,7 @@ async fn a_mysql_truncate_cut_off_is_never_run_again_by_itself() {
     assert_eq!(p.dry_run().await, 1);
     assert_has!(p.output(), r"A deploy was cut off while it ran 20261027110000_empty\.sql");
     assert_eq!(p.status().await, 1);
-    assert_has!(p.output(), r"20261027110000_empty\.sql +cut off before it finished\n +Settle it from the schema, running nothing:\n +reylo migrate history push --url <url>");
+    assert_has!(p.output(), r"20261027110000_empty\.sql +cut off before it finished\n +See how to settle it:\n +reylo migrate deploy --dry-run");
     assert_eq!(p.history_push().await, 0, "{}", p.peek());
     assert_has!(p.output(), r"\+ 20261027110000_empty\.sql +recorded: [^\n]*may not have run here");
     assert_eq!(p.migrate().await, 0, "{}", p.peek());
@@ -2596,7 +2596,28 @@ async fn a_mysql_cut_off_run_whose_file_was_edited_gives_its_text_back() {
     p.exec("insert into __reylo_migrations (name, `sql`, applied_at) values ('20261027110000_empty.sql', 'truncate table t;', null)").await;
     p.output();
     assert_eq!(p.migrate().await, 1);
-    assert_has!(p.output(), r"Its file no longer reads as it did when it started\. Write this back to \S*20261027110000_empty\.sql first:\n    truncate table t;");
+    assert_has!(p.output(), r"No file reads as it did when it started\. Write this back to \S*20261027110000_empty\.sql first:\n    truncate table t;");
+    // History push keeps the row, the only record that the truncate may have run.
+    assert_eq!(p.history_push().await, 1);
+    assert_has!(p.output(), r"No file reads as it did when it started");
+    assert_eq!(p.rows("select name from __reylo_migrations where applied_at is null").await.len(), 1);
+}
+
+/// A cut-off run's file renamed into two that read the same: neither is taken for it, and history
+/// push keeps its row until its text is back under its name.
+#[tokio::test(flavor = "current_thread")]
+async fn a_mysql_cut_off_run_matching_two_renamed_files_is_kept() {
+    let Some(mut p) = P::new(Dialect::Mysql).await else { return };
+    p.file("20261027100000_t.sql", "create table t (id bigint primary key);");
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    p.file("20261027110001_reset.sql", "truncate table t;");
+    p.file("20261027110002_reset_again.sql", "truncate table t;");
+    p.exec("insert into __reylo_migrations (name, `sql`, applied_at) values ('20261027110000_empty.sql', 'truncate table t;', null)").await;
+    p.output();
+    assert_eq!(p.migrate().await, 1);
+    assert_has!(p.output(), r"No file reads as it did when it started\. Write this back to \S*20261027110000_empty\.sql first:");
+    assert_eq!(p.history_push().await, 1);
+    assert_eq!(p.history().await, ["20261027100000_t.sql"]);
 }
 
 /// A cut-off run's file renamed since: history push matches the started row by its text, and records
@@ -2613,7 +2634,7 @@ async fn a_mysql_cut_off_run_whose_file_was_renamed_is_recorded_under_the_new_na
     assert_eq!(p.migrate().await, 1);
     let out = p.output();
     assert_has!(&out, r"reylo run --url <url> --file \S*20261027110001_reset\.sql");
-    assert!(!out.contains("no longer reads"), "{out}");
+    assert!(!out.contains("No file reads"), "{out}");
     assert_eq!(p.history_push().await, 0, "{}", p.peek());
     assert_has!(p.output(), r"\+ 20261027110001_reset\.sql +recorded");
     assert_eq!(p.migrate().await, 0, "{}", p.peek());

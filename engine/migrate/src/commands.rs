@@ -4574,27 +4574,38 @@ fn deploy_failure(m: &Migration, e: &Error, d: Dialect, started: bool, undone: b
         .fix("If another database already ran it, write a new migration instead", &["reylo migrate new <name>"])
 }
 
+/// The file a cut-off run of `row` started from: the one of its name, where it still reads as the
+/// row does, or, where no file has that name, the one file renamed since that reads so. None where it
+/// was edited, deleted, or several files read so: its text has to go back under its name first.
+fn started_file<'a>(row: &HistoryRow, files: &'a [Migration], d: Dialect) -> Option<&'a Migration> {
+    match files.iter().find(|f| f.name == row.name) {
+        Some(f) => same_statements(&f.sql, &row.sql, d).then_some(f),
+        None => match files.iter().filter(|f| same_statements(&f.sql, &row.sql, d)).collect::<Vec<_>>().as_slice() {
+            [one] => Some(one),
+            _ => None,
+        },
+    }
+}
+
 /// The refusal for a MySQL database a run of `row` was cut off on before its row was finished, or
-/// where another run holds it. History push settles a change the schema shows: it records the
-/// migration where its change is in place, and takes it out to run again where the schema shows it
-/// never ran. A change the schema can't show, such as a truncate, it records as run, so one that
-/// didn't run is run by hand. It matches the row by its text, under its name or, where no file has
-/// that name, a file renamed since; a file edited since gets the text that started back first.
+/// where another run holds it. A change the schema can't show, such as a truncate, that didn't run
+/// is run by hand first, while the row still holds every deploy back, so nothing the migrations run
+/// after it runs before it. Then history push settles it: it records the migration where its change
+/// is in place, or the schema can't show it, and takes it out to run again where it never ran.
 fn cut_off_problem(row: &HistoryRow, files: &[Migration], dir: &str, running: bool, d: Dialect) -> Problem {
     if running {
         return Problem::new("migrate-running", "Another run of reylo migrate holds this database").note(format!("It may be a deploy running {} now: look again once it finishes.", row.name));
     }
-    let named = files.iter().find(|f| f.name == row.name);
-    let file = named.filter(|f| same_statements(&f.sql, &row.sql, d)).or_else(|| files.iter().find(|f| named.is_none() && same_statements(&f.sql, &row.sql, d)));
+    let file = started_file(row, files, d);
     let path = file.map(|f| shown(&f.path)).unwrap_or_else(|| format!("{dir}/{}", row.name));
     let mut problem = Problem::new("cut-off-unsettled", format!("A deploy was cut off while it ran {}", row.name)).note("MySQL commits a migration's change before its history row is finished, so it may have run.");
     if file.is_none() {
-        problem = problem.note(format!("Its file no longer reads as it did when it started. Write this back to {path} first:")).sql(&row.sql);
+        problem = problem.note(format!("No file reads as it did when it started. Write this back to {path} first:")).sql(&row.sql);
     }
     problem
-        .fix("Settle it from the schema, running nothing", &["reylo migrate history push --url <url>"])
-        .note("That records it where its change is in place, and takes it out to run again where it never ran. A change the schema can't show, such as a truncate, is recorded as run.")
-        .fix("If such a change didn't run, run it by hand too", &[&format!("reylo run --url <url> --file {}", shell_word(&path))])
+        .fix("If it's a change the schema can't show, such as a truncate, and it didn't run, run it by hand first", &[&format!("reylo run --url <url> --file {}", shell_word(&path))])
+        .fix("Then settle it from the schema, running nothing", &["reylo migrate history push --url <url>"])
+        .note("That records it where its change is in place, or the schema can't show it, and takes it out to run again where it never ran.")
 }
 
 /// Whether another session holds this MySQL database's migration lock: a deploy running now.
@@ -6602,6 +6613,13 @@ async fn history_push_on(db: &mut Db, server: &mut Server, opts: &Options, init:
     if !problems.is_empty() {
         return Ok(refuse(&problems, log));
     }
+    // A MySQL row a cut-off run started is the only record that its change may be in place: one no
+    // file reads as anymore isn't taken out, which would let the next deploy run it again.
+    if d == Dialect::Mysql {
+        if let Some(r) = before_rows.iter().find(|r| !r.applied && started_file(r, &files, d).is_none()) {
+            return Ok(refuse(&[cut_off_problem(r, &files, &shown(&opts.dir), false, d)], log));
+        }
+    }
     let l = read_lock(opts).unwrap_or_default();
     let order: Vec<Migration> = if lock_free(opts) { files.clone() } else { l.entries.iter().filter_map(|e| files.iter().find(|f| f.name == e.name).cloned()).collect() };
     let live = crate::catalog::without_comments(&catalog(db).await?);
@@ -6702,7 +6720,7 @@ async fn history_push_on(db: &mut Db, server: &mut Server, opts: &Options, init:
     // One the history says ran, as written, stays recorded, and so does one a cut-off run started,
     // under its name or renamed since: where its change is in place, or the schema can't say, a
     // deploy refused to run it again, and this command is how it is recorded as run.
-    let ran = |m: &Migration| before_rows.iter().any(|r| (r.name == m.name || (!r.applied && !order.iter().any(|f| f.name == r.name))) && same_statements(&r.sql, &m.sql, d));
+    let ran = |m: &Migration| before_rows.iter().any(|r| if r.applied { r.name == m.name && same_statements(&r.sql, &m.sql, d) } else { started_file(r, &order, d).is_some_and(|f| f.name == m.name) });
     let matched = matches.last().copied().map(|mut n| {
         while n > 0 && !data_statements(&order[n - 1].sql, d).is_empty() && matches.contains(&(n - 1)) && !ran(&order[n - 1]) {
             n -= 1;
@@ -7040,17 +7058,12 @@ async fn status_on(db: &mut Db, opts: &Options, log: Log<'_>) -> Result<i32, Err
                 rows.row(log, &paint("yellow", "!"), &r.name, "started, while another run holds this database");
                 "running"
             }
-            (false, file) => {
+            (false, _) => {
                 wrong(&mut rows, log, "cut off before it finished");
-                if d == Dialect::Mysql {
-                    // MySQL commits its change before the row is finished, and the schema can't always say.
-                    let named = file.filter(|f| same_statements(&f.sql, &r.sql, d));
-                    let path = named.or_else(|| files.iter().find(|f| file.is_none() && same_statements(&f.sql, &r.sql, d))).map(|f| shown(&f.path)).unwrap_or_else(|| format!("{}/{}", shown(&opts.dir), r.name));
-                    let run = format!("reylo run --url <url> --file {}", shell_word(&path));
-                    log(&steps(6, &[("Settle it from the schema, running nothing", &["reylo migrate history push --url <url>"]), ("If a change the schema can't show didn't run, run it by hand too", &[run.as_str()])]));
-                } else {
-                    log(&steps(6, &[("See whether it landed", &["reylo migrate deploy --dry-run"])]));
-                }
+                // On MySQL the dry run gives the whole refusal: the text it started with where its file
+                // changed, and the order to settle it in.
+                let lead = if d == Dialect::Mysql { "See how to settle it" } else { "See whether it landed" };
+                log(&steps(6, &[(lead, &["reylo migrate deploy --dry-run"])]));
                 "cut-off"
             }
             (true, None) => {
