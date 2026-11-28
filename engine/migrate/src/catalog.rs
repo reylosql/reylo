@@ -115,11 +115,12 @@ select v.name || '_shadow' from sqlite_schema v where v.type = 'index' and v.sql
 union all select v.name || '_shadow_idx' from sqlite_schema v where v.type = 'index' and v.sql like '%libsql_vector_idx%' \
 union all select m.name from sqlite_schema m where m.name = 'libsql_vector_meta_shadow' and m.sql = 'CREATE TABLE libsql_vector_meta_shadow ( name TEXT PRIMARY KEY, metadata BLOB ) WITHOUT ROWID')";
 
-/// The text after a stored `create table` statement's name, from its first parenthesis, with no
-/// spacing: how a table SQLite keeps as written is told by its definition alone, whatever its name and
+/// Whether the stored `create table` statement in `sql` defines its table exactly as `definition`, a
+/// parenthesized column list and what follows it, written with no spacing: how a table SQLite keeps as
+/// written is told by its definition, whatever its name (which may hold a parenthesis of its own) and
 /// however it was laid out.
-fn sqlite_definition(sql: &str) -> String {
-    format!("replace(replace(replace(replace(substr({sql}, instr({sql}, '(')), ' ', ''), char(9), ''), char(10), ''), char(13), '')")
+fn sqlite_defined_as(sql: &str, definition: &str) -> String {
+    format!("substr(replace(replace(replace(replace({sql}, ' ', ''), char(9), ''), char(10), ''), char(13), ''), -{}) = '{definition}'", definition.len())
 }
 
 /// Whether a SQLite file is one Cloudflare's runtime keeps, a D1 database's or a Durable Object's:
@@ -127,19 +128,23 @@ fn sqlite_definition(sql: &str) -> String {
 /// Cloudflare's prefix, which the runtime refuses a statement of the project's to make a name with;
 /// in any other file a table named so is the project's.
 fn cloudflare_file() -> String {
-    let definition = sqlite_definition("cf.sql");
     format!(
-        "exists (select 1 from sqlite_schema cf where cf.type = 'table' and (cf.name = '_cf_METADATA' and {definition} = '(keyINTEGERPRIMARYKEY,valueBLOB)' or cf.name = '_cf_KV' and {definition} = '(keyTEXTPRIMARYKEY,valueBLOB)WITHOUTROWID'))"
+        "exists (select 1 from sqlite_schema cf where cf.type = 'table' and (cf.name = '_cf_METADATA' and {} or cf.name = '_cf_KV' and {}))",
+        sqlite_defined_as("cf.sql", "(keyINTEGERPRIMARYKEY,valueBLOB)"),
+        sqlite_defined_as("cf.sql", "(keyTEXTPRIMARYKEY,valueBLOB)WITHOUTROWID")
     )
 }
 
-/// The names of the SQLite tables defined exactly as Wrangler defines its history of a D1 database's
-/// migrations, under whatever name a project gives it (`migrations_table`, `d1_migrations` by
-/// default): it is left out as another migration tool's history is.
+/// The names of the SQLite tables that are Wrangler's history of a D1 database's migrations, left out
+/// as another migration tool's history is: each defined exactly as Wrangler defines it, and named
+/// `d1_migrations`, Wrangler's default, or in a file of Cloudflare's runtime under any name, which a
+/// project's `migrations_table` may give it. In another file, a table so defined and named otherwise
+/// is the project's.
 fn wrangler_history() -> String {
     format!(
-        "select w.name from sqlite_schema w where w.type = 'table' and {} = '(idINTEGERPRIMARYKEYAUTOINCREMENT,nameTEXTUNIQUE,applied_atTIMESTAMPDEFAULTCURRENT_TIMESTAMPNOTNULL)'",
-        sqlite_definition("w.sql")
+        "select w.name from sqlite_schema w where w.type = 'table' and {} and (w.name = 'd1_migrations' or {})",
+        sqlite_defined_as("w.sql", "(idINTEGERPRIMARYKEYAUTOINCREMENT,nameTEXTUNIQUE,applied_atTIMESTAMPDEFAULTCURRENT_TIMESTAMPNOTNULL)"),
+        cloudflare_file()
     )
 }
 
