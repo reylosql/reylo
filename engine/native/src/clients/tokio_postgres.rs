@@ -234,19 +234,28 @@ async fn query(client: &Client, prepared: Option<&Prepared>, sql: &str, params: 
 /// schema is refused by its own describe, which says so at its place, and one that reaches it only
 /// through a view is analyzed without what the role may not read, which each reader of a refused
 /// query takes as unknown. Any other refusal is of the catalog, and the analysis cannot be made.
-/// Where the server cannot be asked which schemas the role may not use (the session ended, or a
-/// transaction of the caller's the refusal aborted), the refusal is `None` too.
+/// Asking which schemas the role may not use is a catalog query too: one the server refuses for a
+/// privilege is a refusal of the catalog, and one it cannot answer (the session ended, or a
+/// transaction of the caller's the refusal aborted) leaves the refusal `None`.
 async fn refusal(client: &Client, e: &::tokio_postgres::Error, params: &[Value]) -> Option<Result<DbError, HostError>> {
-    let d = e.as_db_error().filter(|d| *d.code() == ::tokio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE)?;
+    fn privilege(e: &::tokio_postgres::Error) -> Option<&::tokio_postgres::error::DbError> {
+        e.as_db_error().filter(|d| *d.code() == ::tokio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE)
+    }
+    let catalog = |e: &::tokio_postgres::Error| HostError(format!("The type check's role may not use part of the catalog the analysis reads: {}. Grant it, or run the type check as a role that may", pg_message(e)));
+    let d = privilege(e)?;
     let answer = DbError { message: d.message().to_string(), code: Some(d.code().code().to_string()), position: None };
     let mut schemas = Vec::new();
     params.iter().for_each(|param| qualifiers(param, &mut schemas));
-    let unusable = if schemas.is_empty() { Vec::new() } else { client.query(UNUSABLE_SCHEMAS_QUERY, &[&schemas]).await.ok()? };
-    Some(if unusable.is_empty() {
-        Err(HostError(format!("The type check's role may not use part of the catalog the analysis reads: {}. Grant it, or run the type check as a role that may", pg_message(e))))
+    let unusable = if schemas.is_empty() {
+        Vec::new()
     } else {
-        Ok(answer)
-    })
+        match client.query(UNUSABLE_SCHEMAS_QUERY, &[&schemas]).await {
+            Ok(rows) => rows,
+            Err(probe) if privilege(&probe).is_some() => return Some(Err(catalog(&probe))),
+            Err(_) => return None,
+        }
+    };
+    Some(if unusable.is_empty() { Err(catalog(e)) } else { Ok(answer) })
 }
 
 /// The schema each name among `value`'s strings is qualified by, as the server reads a name: a

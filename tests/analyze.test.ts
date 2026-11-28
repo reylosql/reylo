@@ -1054,7 +1054,7 @@ test("on Postgres, a view over a schema the role may not use is typed for the ro
 });
 
 test("on Postgres, a role refused a function of the catalog's fails the analysis, saying what it lacks, rather than going on without what the function would have said", { skip: live }, async () => {
-  const own = await postgresDatabase("reylo_catalog_grant", "create table items (id int primary key, title text not null)");
+  const own = await postgresDatabase("reylo_catalog_grant", "create table items (id int primary key, title text not null); create schema hidden; create table hidden.items (id int primary key, title text not null)");
   const role = `reylo_catalog_grant_${process.pid}`;
   const root = mkdtempSync(join(tmpdir(), "reylo-catalog-grant-"));
   writeFileSync(join(root, "package.json"), "{}");
@@ -1065,8 +1065,13 @@ test("on Postgres, a role refused a function of the catalog's fails the analysis
     const failed = await analyze(root, { DATABASE_URL: url.href }, "select title from items where id = :id");
     assert.ok(!failed.ok);
     assert.match(failed.message, /^The type check's role may not use part of the catalog the analysis reads: permission denied for function to_regclass \(42501\)\. Grant it, or run the type check as a role that may/);
+    // Asking which schemas the role may not use, after a schema's refusal, is reading the catalog too.
+    await own.sql.unsafe(`grant execute on function pg_catalog.to_regclass(text) to public; revoke execute on function pg_catalog.has_schema_privilege(oid, text) from public`);
+    const unasked = await analyze(root, { DATABASE_URL: url.href }, "select title from hidden.items where id = :id");
+    assert.ok(!unasked.ok);
+    assert.match(unasked.message, /^The type check's role may not use part of the catalog the analysis reads: permission denied for function has_schema_privilege \(42501\)\. Grant it, or run the type check as a role that may/);
   } finally {
-    await own.sql.unsafe(`grant execute on function pg_catalog.to_regclass(text) to public; drop owned by ${role}; drop role ${role}`).catch(() => {});
+    await own.sql.unsafe(`grant execute on function pg_catalog.to_regclass(text) to public; grant execute on function pg_catalog.has_schema_privilege(oid, text) to public; drop owned by ${role}; drop role ${role}`).catch(() => {});
     await own.drop();
   }
 });
