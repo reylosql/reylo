@@ -357,10 +357,12 @@ static void expr(sqlite3_str *s, Expr *p, Select *pSel){
 ** query flattener copies in its place: a chain of WITH queries or views, each wrapping the column
 ** of the one before in an expression, adds them up past that bound (999 of 50 levels each overflow
 ** sqlite3's own stack). exprHeight measures an expression with each column of a subquery standing
-** for that column's expression, and the hooks refuse one past SQLite's bound with its message. */
+** for that column's expression, and the hooks refuse one past SQLite's bound with its message: in
+** a SELECT, measured as the walker enters it, and in each expression a write's hook writes. */
 typedef struct Scope Scope;
 struct Scope { int iCursor; int nCol; int *aHeight; Scope *pOuter; };
 static int selectHeight(Select *p, Scope *pOuter, int *aCol);
+static int exprListHeight(ExprList *pList, Scope *pScope);
 static int exprHeight(Expr *p, Scope *pScope){
   int h = 0, i, j;
   Scope *q;
@@ -378,6 +380,14 @@ static int exprHeight(Expr *p, Scope *pScope){
     else if( p->x.pList ){
       for(i=0; i<p->x.pList->nExpr; i++){ if( (j = exprHeight(p->x.pList->a[i].pExpr, pScope))>h ) h = j; }
     }
+#ifndef SQLITE_OMIT_WINDOWFUNC
+    if( IsWindowFunc(p) && p->y.pWin ){
+      Window *pWin = p->y.pWin;
+      if( (j = exprListHeight(pWin->pPartition, pScope))>h ) h = j;
+      if( (j = exprListHeight(pWin->pOrderBy, pScope))>h ) h = j;
+      if( (j = exprHeight(pWin->pFilter, pScope))>h ) h = j;
+    }
+#endif
   }
   if( h+1>sqlite3_limit(gDb, SQLITE_LIMIT_EXPR_DEPTH, -1) ) gTooTall = 1;
   return h+1;
@@ -387,7 +397,8 @@ static int exprListHeight(ExprList *pList, Scope *pScope){
   for(i=0; pList && i<pList->nExpr; i++){ if( (j = exprHeight(pList->a[i].pExpr, pScope))>h ) h = j; }
   return h;
 }
-/* The tallest of a SELECT's result columns, each arm's; each column's in aCol when it is given. */
+/* The tallest expression of a SELECT, each arm's, as SQLite measures a subquery in an expression;
+** each result column's in aCol when it is given. */
 static int selectHeight(Select *p, Scope *pOuter, int *aCol){
   Select *pArm;
   int i, h = 0;
@@ -417,10 +428,17 @@ static int selectHeight(Select *p, Scope *pOuter, int *aCol){
     }
     for(i=0; i<nSrc; i++){
       SrcItem *pItem = &pArm->pSrc->a[i];
-      if( !pItem->fg.isUsing ) exprHeight(pItem->u3.pOn, pIn);
-      if( pItem->fg.isTabFunc ) exprListHeight(pItem->u1.pFuncArg, pIn);
+      int j = pItem->fg.isUsing ? 0 : exprHeight(pItem->u3.pOn, pIn);
+      if( j>h ) h = j;
+      if( pItem->fg.isTabFunc && (j = exprListHeight(pItem->u1.pFuncArg, pIn))>h ) h = j;
     }
-    exprHeight(pArm->pWhere, pIn); exprListHeight(pArm->pGroupBy, pIn); exprHeight(pArm->pHaving, pIn); exprListHeight(pArm->pOrderBy, pIn);
+    {
+      int j, aj[6];
+      aj[0] = exprHeight(pArm->pWhere, pIn); aj[1] = exprListHeight(pArm->pGroupBy, pIn); aj[2] = exprHeight(pArm->pHaving, pIn);
+      aj[3] = exprListHeight(pArm->pOrderBy, pIn);
+      aj[4] = pArm->pLimit ? exprHeight(pArm->pLimit->pLeft, pIn) : 0; aj[5] = pArm->pLimit ? exprHeight(pArm->pLimit->pRight, pIn) : 0;
+      for(j=0; j<6; j++) if( aj[j]>h ) h = aj[j];
+    }
     for(i=0; i<nSrc; i++) sqlite3_free(aScope[i].aHeight);
     sqlite3_free(aScope);
   }
@@ -640,6 +658,10 @@ static void insertHook(Parse *pParse, Table *pTab, IdList *pColumn, ExprList *pL
     kv_int(gDml, "rows", 1);
   }
   closeObj(gDml);
+  exprListHeight(pList, 0);
+  for(; pUpsert; pUpsert=pUpsert->pNextUpsert){
+    exprListHeight(pUpsert->pUpsertSet, 0); exprHeight(pUpsert->pUpsertWhere, 0); exprHeight(pUpsert->pUpsertTargetWhere, 0);
+  }
   refuseTooDeep(pParse);
 }
 static void updateHook(Parse *pParse, Table *pTab, ExprList *pChanges, Expr *pWhere, int *aXRef, SrcList *pTabList, int onError, Upsert *pUpsert){
@@ -664,6 +686,7 @@ static void updateHook(Parse *pParse, Table *pTab, ExprList *pChanges, Expr *pWh
   closeArr(gDml); sqlite3_str_appendchar(gDml, 1, ',');
   key(gDml, "where"); expr(gDml, pWhere, 0); sqlite3_str_appendchar(gDml, 1, ',');
   closeObj(gDml);
+  exprListHeight(pChanges, 0); exprHeight(pWhere, 0);
   refuseTooDeep(pParse);
 }
 static void deleteHook(Parse *pParse, Table *pTab, Expr *pWhere){
@@ -675,6 +698,7 @@ static void deleteHook(Parse *pParse, Table *pTab, Expr *pWhere){
   kv_str(gDml, "table", pTab->zName);
   key(gDml, "where"); expr(gDml, pWhere, 0); sqlite3_str_appendchar(gDml, 1, ',');
   closeObj(gDml);
+  exprHeight(pWhere, 0);
   refuseTooDeep(pParse);
 }
 static void returningHook(Parse *pParse, Table *pTab, ExprList *pNew){
@@ -690,6 +714,7 @@ static void returningHook(Parse *pParse, Table *pTab, ExprList *pNew){
     closeObj(gReturning); sqlite3_str_appendchar(gReturning, 1, ',');
   }
   closeArr(gReturning);
+  exprListHeight(pNew, 0);
   refuseTooDeep(pParse);
 }
 

@@ -4388,6 +4388,20 @@ mod tests {
         for sql in [format!("{} select (select {tall} from c332) as x", queries(333, 3)), format!("{} select 1 as x from c332 where {tall} > 0", queries(333, 3))] {
             assert_eq!(refused(&small(sql, &[])), too_tall);
         }
+        // A window's ORDER BY, and a write's expressions around a subquery, as SQLite measures them.
+        let users = |n: usize| std::iter::once("create table users (id integer primary key, name text not null, nick text)".to_string()).chain(views(n)).collect::<Vec<_>>();
+        let (fits, past) = (wrap("a".into(), 2), wrap("a".into(), 3));
+        for (at, over) in [
+            (format!("{} select row_number() over (order by {fits}) as r from c332", queries(333, 3)), format!("{} select row_number() over (order by {past}) as r from c332", queries(333, 3))),
+            (format!("update users set nick = (select {fits} from v332)"), format!("update users set nick = (select {past} from v332)")),
+            (format!("delete from users where id = (select {} from v332)", wrap("a".into(), 1)), format!("delete from users where id = (select {fits} from v332)")),
+            (format!("delete from users returning (select {fits} from v332) as x"), format!("delete from users returning (select {past} from v332) as x")),
+            (format!("insert into users (id, name) values ((select {fits} from v332), 'x')"), format!("insert into users (id, name) values ((select {past} from v332), 'x')")),
+        ] {
+            let read = small(at.clone(), &users(333));
+            assert!(read.diagnostics.is_empty(), "{at}: {:?}", read.diagnostics);
+            assert_eq!(refused(&small(over, &users(333))), too_tall, "{at}");
+        }
     }
 
     fn col(a: &Analysis, name: &str) -> (String, bool) {
