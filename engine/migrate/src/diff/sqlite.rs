@@ -1428,49 +1428,68 @@ fn whole_columns(list: &[Token], columns: &BTreeSet<String>) -> bool {
     true
 }
 
-/// The names in the parenthesized list `tokens` opens with, folded, but for each one's order: None
-/// where it holds anything but names, a collation among them, which may not be its column's.
-fn listed(tokens: &[Token]) -> Option<(BTreeSet<String>, usize)> {
+/// The names in the parenthesized list `tokens` opens with, folded and in order, each with the
+/// collation it names, uppercased, but for its order: None where it holds anything but names.
+fn listed(tokens: &[Token]) -> Option<(Vec<(String, Option<String>)>, usize)> {
     if tokens.first()?.text != "(" {
         return None;
     }
     let close = tokens.iter().position(|t| t.text == ")")?;
-    let mut out = BTreeSet::new();
-    for t in &tokens[1..close] {
-        if t.text != "," && !matches!(t.upper().as_str(), "ASC" | "DESC") {
-            out.insert(name_of(t).filter(|_| t.upper() != "COLLATE")?);
+    let mut out: Vec<(String, Option<String>)> = Vec::new();
+    let mut k = 1;
+    while k < close {
+        let t = &tokens[k];
+        if t.upper() == "COLLATE" {
+            out.last_mut()?.1 = Some(unquote(tokens.get(k + 1)?).to_uppercase());
+            k += 2;
+            continue;
         }
+        if t.text != "," && !matches!(t.upper().as_str(), "ASC" | "DESC") {
+            out.push((name_of(t)?, None));
+        }
+        k += 1;
     }
     Some((out, close))
 }
 
-/// The primary key of a table's text, as its columns, folded.
-fn primary_key(sql: &str) -> Option<BTreeSet<String>> {
+/// The primary key of a table's text, its columns folded, in their order.
+fn primary_key(sql: &str) -> Option<Vec<String>> {
     parts(sql).into_iter().find_map(|p| {
-        let words = p.words();
-        if !words.windows(2).any(|w| w[0] == "PRIMARY" && w[1] == "KEY") {
+        if !p.words().windows(2).any(|w| w[0] == "PRIMARY" && w[1] == "KEY") {
             return None;
         }
         match &p.column {
-            Some(c) => Some(BTreeSet::from([c.clone()])),
-            None => p.tokens.iter().position(|t| t.text == "(").and_then(|at| listed(&p.tokens[at..])).map(|(cols, _)| cols),
+            Some(c) => Some(vec![c.clone()]),
+            None => p.tokens.iter().position(|t| t.text == "(").and_then(|at| listed(&p.tokens[at..])).map(|(cols, _)| cols.into_iter().map(|(c, _)| c).collect()),
         }
     })
 }
 
 /// The keys a foreign key can name in table `table` of `schema`, each as its columns, folded: its
-/// primary key, each UNIQUE, and each unique index on whole columns over every row. One that names a
-/// collation is left out, which may differ from its column's and so name no key.
+/// primary key, each UNIQUE, and each unique index on whole columns over every row, where each
+/// column's collation is the one the column declares, as a parent key's must be.
 fn keys_of(schema: &Schema, table: &Object) -> Vec<BTreeSet<String>> {
+    let parts = table.create.first().map(|sql| parts(sql)).unwrap_or_default();
+    let declared: BTreeMap<String, String> = parts
+        .iter()
+        .filter_map(|p| {
+            let at = p.tokens.iter().position(|t| t.upper() == "COLLATE")?;
+            Some((p.column.clone()?, unquote(p.tokens.get(at + 1)?).to_uppercase()))
+        })
+        .collect();
+    let key = |cols: Vec<(String, Option<String>)>| -> Option<BTreeSet<String>> {
+        let own = |c: &str, named: &str| declared.get(c).map_or("BINARY", String::as_str) == named;
+        cols.iter().all(|(c, named)| named.as_deref().is_none_or(|n| own(c, n))).then(|| cols.into_iter().map(|(c, _)| c).collect())
+    };
     let mut out = Vec::new();
-    for p in table.create.first().map(|sql| parts(sql)).unwrap_or_default() {
+    for p in &parts {
         let words = p.words();
         let keyed = words.iter().any(|w| w == "UNIQUE") || words.windows(2).any(|w| w[0] == "PRIMARY" && w[1] == "KEY");
         match &p.column {
             Some(c) if keyed => out.push(BTreeSet::from([c.clone()])),
             None if keyed => {
                 let at = p.tokens.iter().position(|t| t.text == "(");
-                out.extend(at.and_then(|at| listed(&p.tokens[at..])).map(|(cols, _)| cols));
+                out.extend(at.and_then(|at| listed(&p.tokens[at..])).and_then(|(cols, _)| key(cols)));
             }
             _ => {}
         }
@@ -1479,7 +1498,7 @@ fn keys_of(schema: &Schema, table: &Object) -> Vec<BTreeSet<String>> {
         let tokens = tokenize(index.create.first().map_or("", String::as_str), Dialect::Sqlite);
         if let Some((_, on)) = unique_index(&tokens) {
             let list = &tokens[on + 1..];
-            out.extend(listed(list).filter(|(_, close)| close + 1 == list.len()).map(|(cols, _)| cols));
+            out.extend(listed(list).filter(|(_, close)| close + 1 == list.len()).and_then(|(cols, _)| key(cols)));
         }
     }
     out
@@ -1494,7 +1513,7 @@ fn new_key(text: &str, from: &Schema, parent: &Object) -> bool {
     let primary = || old.create.first().and_then(|sql| primary_key(sql)).is_none_or(|was| parent.create.first().and_then(|sql| primary_key(sql)) != Some(was));
     let tokens = tokenize(text, Dialect::Sqlite);
     (0..tokens.len()).filter(|&k| tokens[k].upper() == "REFERENCES" && tokens.get(k + 1).and_then(qualifier).as_deref() == Some(name.as_str())).any(|k| match tokens.get(k + 2).filter(|t| t.text == "(") {
-        Some(_) => listed(&tokens[k + 2..]).is_none_or(|(cols, _)| !keys.contains(&cols)),
+        Some(_) => listed(&tokens[k + 2..]).is_none_or(|(cols, _)| !keys.contains(&cols.into_iter().map(|(c, _)| c).collect())),
         None => primary(),
     })
 }
