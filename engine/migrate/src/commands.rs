@@ -5171,6 +5171,22 @@ async fn pending_findings(shadows: &mut Shadows<'_>, target: &mut Db, ran: &[Mig
         let unchecked = |check: &RowCheck, why: &str| Finding::said(format!("holds rows to {}, which can't be checked here: {why}", check.subject()));
         for (key, check) in &now {
             let reached = writes.iter().find(|w| w.reaches(check));
+            let own = standing(&check.ident, check.columns.as_deref());
+            let parent = check.parent.as_ref().map(|(p, refs)| standing(p, Some(refs)));
+            // A MySQL foreign key or unique key whose columns the pending migrations change in
+            // collation alone, on rows nothing else writes, compares the target's values under the
+            // new collation once it holds them again: read so here, its rows say what the deploy meets.
+            let recollated = (d == Dialect::Mysql && own == Standing::Held && parent.is_none_or(|p| p == Standing::Held) && reached.is_some() && writes.iter().filter(|w| w.reaches(check)).all(|w| w.retyped))
+                .then(|| recollated_rows(check, &tables_here, &tables_now))
+                .flatten();
+            if let Some((query, repeats)) = recollated {
+                match read_rows(target, query, repeats).await {
+                    RowRead::Clean => {}
+                    RowRead::Broken { n, query, repeats } => out.push((m.name.clone(), Finding { what: format!("fails on this database: {} under its columns' new collation", broke(check, n, repeats, true)), fails: true, query: Some(query) })),
+                    RowRead::Unread(why) => out.push((m.name.clone(), unchecked(check, &why))),
+                }
+                continue;
+            }
             // A check already in place is checked again where the migration converts the values it
             // reads, as a change of type or collation rebuilds what holds them.
             if checks.contains_key(key) {
@@ -5179,8 +5195,6 @@ async fn pending_findings(shadows: &mut Shadows<'_>, target: &mut Db, ran: &[Mig
                 }
                 continue;
             }
-            let own = standing(&check.ident, check.columns.as_deref());
-            let parent = check.parent.as_ref().map(|(p, refs)| standing(p, Some(refs)));
             let why: Option<String> = match own {
                 // A table the target doesn't have holds none of its rows but those a pending
                 // statement writes to it.
@@ -5901,12 +5915,68 @@ fn broke(check: &RowCheck, n: u64, repeats: bool, named: bool) -> String {
 #[cfg(feature = "cli")]
 async fn broken_rows(target: &mut Db, lane: &mut Db, check: &RowCheck) -> RowRead {
     let Some((query, repeats)) = row_query(lane, check).await else { return RowRead::Unread("no query can list the rows that break it".to_string()) };
+    read_rows(target, query, repeats).await
+}
+
+/// What `query`, which lists the rows that break a check, says of the target's rows.
+#[cfg(feature = "cli")]
+async fn read_rows(target: &mut Db, query: String, repeats: bool) -> RowRead {
     match try_count(target, &query, 1000).await {
         Ok(0) => RowRead::Clean,
         Ok(n) => RowRead::Broken { n, query, repeats },
         Err(e) if timed_out(&e) => RowRead::Unread(format!("reading the rows ran past {} s", READ_MS / 1000)),
         Err(e) if e.contains("read-only transaction") => RowRead::Unread("reading the rows would write to this database".to_string()),
         Err(_) => RowRead::Unread("the read failed on this database".to_string()),
+    }
+}
+
+/// The rows of the target a MySQL foreign key or unique key would refuse once its columns, as
+/// `before` has them, take the collation `after` gives them, their types unchanged: [`orphans_of`], or
+/// the values that repeat, with each column compared under its new collation, and whether they are
+/// values that repeat. None for any other check, for a column whose type changes too, or for a key
+/// whose columns keep their collations, whose own query reads it.
+#[cfg(feature = "cli")]
+fn recollated_rows(check: &RowCheck, before: &BTreeMap<String, TableIdentity>, after: &BTreeMap<String, TableIdentity>) -> Option<(String, bool)> {
+    let columns = check.columns.as_ref()?;
+    // A column's identity on MySQL: its type, a space, and its collation (none for a type without one).
+    let parts = |identity: &String| -> (String, String) {
+        let (ty, collation) = identity.rsplit_once(' ').unwrap_or((identity.as_str(), ""));
+        (ty.to_string(), collation.to_string())
+    };
+    let pair = |table: &str, column: &str| -> Option<(String, String)> {
+        let (was, is) = (parts(before.get(table)?.columns.get(column)?), parts(after.get(table)?.columns.get(column)?));
+        (was.0 == is.0).then_some((was.1, is.1))
+    };
+    let bt = |s: &str| format!("`{}`", s.replace('`', "``"));
+    let under = |side: &str, column: &str, collation: &str| match collation {
+        "" => format!("{side}{}", bt(column)),
+        collation => format!("convert({side}{} using {}) collate {collation}", bt(column), collation.split('_').next().unwrap_or(collation)),
+    };
+    let mut changed = false;
+    let set: Vec<String> = columns.iter().map(|c| format!("c.{} is not null", bt(c))).collect();
+    match (&check.kind, &check.parent) {
+        (RowCheckKind::Rows(_), Some((parent, refs))) => {
+            let mut on = Vec::new();
+            for (c, r) in columns.iter().zip(refs) {
+                let (own_was, own_is) = pair(&check.ident, c)?;
+                let (ref_was, ref_is) = pair(parent, r)?;
+                changed |= own_was != own_is || ref_was != ref_is;
+                // Both sides under the referencing column's collation, which the key needs the other's to match.
+                on.push(format!("{} = {}", under("p.", r, &own_is), under("c.", c, &own_is)));
+            }
+            changed.then(|| (format!("select c.* from {} as c where {} and not exists (select 1 from {} as p where {});", check.table, set.join(" and "), bt(parent), on.join(" and ")), false))
+        }
+        (RowCheckKind::Keys(_), None) => {
+            let mut keys = Vec::new();
+            for c in columns {
+                let (was, is) = pair(&check.ident, c)?;
+                changed |= was != is;
+                keys.push(under("c.", c, &is));
+            }
+            let keys = keys.join(", ");
+            changed.then(|| (format!("select {keys}, count(*) from {} as c where {} group by {keys} having count(*) > 1;", check.table, set.join(" and ")), true))
+        }
+        _ => None,
     }
 }
 

@@ -4918,6 +4918,36 @@ async fn a_dry_run_checks_composite_keys_and_waits_on_a_parent_filled_first() {
     }
 }
 
+/// On MySQL: a foreign key added back after its columns move to another collation compares the
+/// target's values under the new one, and so does a unique key whose column does, so the dry run
+/// reads them so: a row that met its parent only under the old collation fails it, as do values that
+/// repeat only under the new one, and once none does, neither key says anything.
+#[tokio::test(flavor = "current_thread")]
+async fn a_dry_run_reads_a_mysql_key_under_its_columns_new_collation() {
+    let Some(mut p) = P::new(Dialect::Mysql).await else { return };
+    // MySQL commits each DDL statement on its own, so each migration holds one.
+    p.file("20261128100000_p.sql", "create table p (code varchar(10) not null, primary key (code));");
+    p.file("20261128100001_c.sql", "create table c (id int primary key, code varchar(10), constraint c_code foreign key (code) references p (code));");
+    p.file("20261128100002_tags.sql", "create table tags (name varchar(10) collate utf8mb4_bin, unique key tags_name (name));");
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    p.exec("insert into p values ('a'), ('b'); insert into c values (10, 'A'), (11, 'b'); insert into tags values ('a'), ('A')").await;
+    p.file("20261128110000_bin.sql", "alter table c drop foreign key c_code;");
+    p.file("20261128110001_bin_2.sql", "alter table c modify column code varchar(10) collate utf8mb4_bin;");
+    p.file("20261128110002_bin_3.sql", "alter table p modify column code varchar(10) collate utf8mb4_bin not null;");
+    p.file("20261128110003_bin_4.sql", "alter table c add constraint c_code foreign key (code) references p (code);");
+    p.file("20261128110004_tags_ci.sql", "alter table tags modify column name varchar(10) collate utf8mb4_0900_ai_ci;");
+    p.schema("create table p (code varchar(10) collate utf8mb4_bin not null, primary key (code));\ncreate table c (id int primary key, code varchar(10) collate utf8mb4_bin, constraint c_code foreign key (code) references p (code));\ncreate table tags (name varchar(10) collate utf8mb4_0900_ai_ci, unique key tags_name (name));\n");
+    p.output();
+    assert_eq!(p.dry_run().await, 1, "{}", p.peek());
+    let out = p.output();
+    assert_has!(&out, r"_bin_4\.sql\n(      ! [^\n]*\n)*      ✗ It fails on this database: 1 row breaks c_code under its columns' new collation\n");
+    assert_has!(&out, r"_tags_ci\.sql\n(      ! [^\n]*\n)*      ✗ It fails on this database: 1 value repeats in tags_name under its columns' new collation\n");
+    p.exec("update c set code = 'a' where id = 10; delete from tags where name = 'A'").await;
+    assert_eq!(p.dry_run().await, 0, "{}", p.peek());
+    let out = p.output();
+    assert!(!out.contains("c_code") && !out.contains("tags_name"), "every row meets both keys under their new collation: {out}");
+}
+
 /// On Postgres: a check whose function writes is read in a read-only transaction, which refuses the
 /// write, so the target is left as it was and the check said to be unchecked; so is one after a type
 /// change of the same file converts the values it reads; and a NOT NULL added `not valid` holds no row
