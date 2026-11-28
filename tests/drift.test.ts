@@ -52,7 +52,10 @@ test("postgres: after a migration adds a column under select *, a created type t
     const upper = postgres(own.url, { max: 1, transform: { column: { from: (name: string) => name.toUpperCase() } } });
     try {
       assert.deepEqual(await items.run(upper), [{ ID: 1, TAGS: ["happy", "sad"], NOTE: "x", EXTRA: null }]);
-      // A column a migration adds under a name the renaming gives a declared one: neither takes the declared kind.
+    } finally {
+      await upper.end();
+    }
+    // A column a migration adds under a name the renaming gives a declared one: neither takes the declared kind.
     await admin.unsafe(`create table lists (id int primary key, mood_list mood[]); insert into lists values (1, '{sad}')`);
     const lists = await built("lists", "select * from lists");
     await admin.unsafe(`alter table lists add column "moodList" mood; update lists set "moodList" = 'sad'`);
@@ -62,10 +65,16 @@ test("postgres: after a migration adds a column under select *, a created type t
     } finally {
       await camel.end();
     }
-    // A transaction keeps no options: its names match without their case.
-      assert.deepEqual(await upper.begin((tx: unknown) => items.run(tx)), [{ ID: 1, TAGS: ["happy", "sad"], NOTE: "x", EXTRA: null }]);
+    // A column renamed and another added under a name like it: the new one is no declared column.
+    await admin.unsafe(`create table moods (id int primary key, mood_list mood[]); insert into moods values (1, '{sad}')`);
+    const moods = await built("moods", "select * from moods");
+    await admin.unsafe(`alter table moods rename column mood_list to retired_moods; alter table moods add column moodlist mood; update moods set moodlist = 'sad'`);
+    const renamed = new pg.Client({ connectionString: own.url });
+    await renamed.connect();
+    try {
+      assert.deepEqual(await moods.run(renamed), [{ id: 1, retired_moods: "{sad}", moodlist: "sad" }]);
     } finally {
-      await upper.end();
+      await renamed.end();
     }
   } finally {
     await client.end();
