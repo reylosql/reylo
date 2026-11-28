@@ -527,7 +527,9 @@ export class Session {
       const u = new URL(url ?? "");
       // A database `?dbname=` names, whatever the path says, the last as the engine reads it.
       const dbname = u.searchParams.getAll("dbname").at(-1);
-      return `${u.hostname || u.searchParams.getAll("host").at(-1) || "localhost"}${u.port ? `:${u.port}` : ""}${dbname ? `/${dbname}` : u.pathname}`;
+      // The query's host and port replace the URL's own, as the engine reads them.
+      const port = u.searchParams.getAll("port").at(-1) || u.port;
+      return `${u.searchParams.getAll("host").at(-1) || u.hostname || "localhost"}${port ? `:${port}` : ""}${dbname ? `/${dbname}` : u.pathname}`;
     } catch {
       return "the database";
     }

@@ -386,9 +386,9 @@ impl Project {
     pub fn type_check_url(&self) -> Result<Option<(String, String)>, String> {
         let Some((url, source)) = self.written_url()? else { return Ok(None) };
         // libpq's variables the env files set, for what DATABASE_URL leaves out ([`with_env_files`]):
-        // the URL the app connects with, with the files loaded into its environment. `direct_url` is
-        // Reylo's alone.
-        if self.config.direct_url.is_some() || dialect_of(&url) != Some("postgres") {
+        // the URL the app connects with, with the files loaded into its environment, however the type
+        // check names it (`direct_url: ${DATABASE_URL}` too). Any other `direct_url` is Reylo's alone.
+        if self.found("DATABASE_URL").is_none_or(|(app, _)| app != url) || dialect_of(&url) != Some("postgres") {
             return Ok(Some((url, source)));
         }
         // A variable the environment sets, even empty, the files leave alone, as dotenv does: in any
@@ -961,10 +961,12 @@ mod tests {
         std::fs::write(dir.join(".env"), "DATABASE_URL=postgres://app@db.internal/shop\nPGSSLROOTCERT=certs/root.pem\n").unwrap();
         std::fs::remove_file(dir.join(".env.local")).unwrap();
         assert_eq!(url(&[]).0, format!("postgres://app@db.internal/shop?sslrootcert={}", percent_encode(&dir.join("certs/root.pem").to_string_lossy())));
-        // direct_url, Reylo's own URL, takes no variable the env files set.
-        std::fs::write(dir.join(".env"), "PGDATABASE=shop\n").unwrap();
+        // A direct_url of Reylo's own takes no variable the env files set; one that names DATABASE_URL does.
+        std::fs::write(dir.join(".env"), "DATABASE_URL=postgres://app@db.internal/\nPGDATABASE=shop\n").unwrap();
         std::fs::write(dir.join(".reylo.yaml"), "direct_url: postgres://localhost/\n").unwrap();
         assert_eq!(url(&[]).0, "postgres://localhost/");
+        std::fs::write(dir.join(".reylo.yaml"), "direct_url: ${DATABASE_URL}\n").unwrap();
+        assert_eq!(url(&[]).0, "postgres://app@db.internal/?dbname=shop");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

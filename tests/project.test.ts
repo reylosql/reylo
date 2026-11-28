@@ -46,10 +46,13 @@ test("the type check's URL takes libpq's variables from the env files where the 
   assert.equal(resolveProject(e, dir, {}).url, `postgres://app@db.internal/shop?sslrootcert=${encodeURIComponent(join(dir, "certs/root.pem"))}`);
 });
 
-test("direct_url, Reylo's own URL, takes no variable the env files set", async () => {
+test("a direct_url of Reylo's own takes no variable the env files set, and one that names DATABASE_URL does", async () => {
   const e = await engine("postgres");
-  const dir = tree({ "package.json": "{}", ".env": "PGDATABASE=shop\nPGUSER=app\n", ".reylo.yaml": "direct_url: postgres://localhost/\n" });
+  const dir = tree({ "package.json": "{}", ".env": "DATABASE_URL=postgres://app@db.internal/\nPGDATABASE=shop\n", ".reylo.yaml": "direct_url: postgres://localhost/\n" });
   assert.equal(resolveProject(e, dir, {}).url, "postgres://localhost/");
+  writeFileSync(join(dir, ".reylo.yaml"), "direct_url: ${BUILD_DATABASE_URL:-${DATABASE_URL}}\n");
+  assert.equal(resolveProject(e, dir, {}).url, "postgres://app@db.internal/?dbname=shop");
+  assert.equal(resolveProject(e, dir, { BUILD_DATABASE_URL: "postgres://build/" }).url, "postgres://build/");
 });
 
 test("a variable of the environment is read in any case of its name on Windows, the first of two spellings in order", () => {

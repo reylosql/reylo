@@ -532,7 +532,16 @@ fn place(url: &str) -> String {
     // The query's host and database, decoded, the last of each, as the engine reads them: a host
     // where the URL names none, and a database whatever the path says, as `?dbname=` names one.
     let param = |name: &str| query.split('&').filter_map(|p| p.split_once('=')).filter(|(n, _)| decoded(n) == name).map(|(_, v)| decoded(v)).last();
-    let host = if host.is_empty() { param("host").unwrap_or_else(|| "localhost".to_string()) } else { host.to_string() };
+    // The query's host and port replace the URL's own, as the engine reads them.
+    let (own_host, own_port) = match host.rsplit_once(':') {
+        Some((name, port)) if !host.contains(',') && !port.contains(']') => (name, Some(port)),
+        _ => (host, None),
+    };
+    let name = param("host").unwrap_or_else(|| if own_host.is_empty() { "localhost".to_string() } else { own_host.to_string() });
+    let host = match param("port").or_else(|| own_port.map(String::from)) {
+        Some(port) => format!("{name}:{port}"),
+        None => name,
+    };
     match param("dbname") {
         Some(dbname) => format!("{host}/{dbname}"),
         None => format!("{host}{path}"),
@@ -874,6 +883,8 @@ mod tests {
         assert_eq!(place("postgres://app@db.internal/?dbname=shop"), "db.internal/shop");
         assert_eq!(place("postgres://app@db.internal/other?dbname=shop"), "db.internal/shop");
         assert_eq!(place("postgres:///shop?host=%2Fvar%2Frun%2Fpostgresql"), "/var/run/postgresql/shop");
+        assert_eq!(place("postgres://app@localhost:5432/shop?host=db.internal&port=6543"), "db.internal:6543/shop");
+        assert_eq!(place("postgres://app@localhost:5433/shop?host=db.internal"), "db.internal:5433/shop");
     }
 
     /// The same as the loader's test of it (`tests/analyze.test.ts`): the session read the fingerprint

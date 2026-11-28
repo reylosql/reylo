@@ -575,9 +575,10 @@ export function resolveProject(engine: Engine | MissingEngine, projectDir: strin
     if (hit) urlSource = hit.source;
   }
   // libpq's variables the env files set, for what DATABASE_URL leaves out (`withEnvFiles`): the URL
-  // the app connects with, with the files loaded into its environment. A variable the environment
-  // sets, even empty, the files leave alone, as dotenv does. `direct_url` is Reylo's alone.
-  if (url && written === undefined && !shadow && dialectOf(url) === "postgres") {
+  // the app connects with, with the files loaded into its environment, however the type check names
+  // it (`direct_url: ${DATABASE_URL}` too). A variable the environment sets, even empty, the files
+  // leave alone, as dotenv does. Any other `direct_url` is Reylo's alone.
+  if (url && !shadow && url === lookup("DATABASE_URL")?.value && dialectOf(url) === "postgres") {
     const files = envFiles.map((path) => ({ path, vars: readEnvFile(path) }));
     const hits = new Map<string, { value: string; path: string }>();
     for (const [name] of LIBPQ_VARIABLES) {
