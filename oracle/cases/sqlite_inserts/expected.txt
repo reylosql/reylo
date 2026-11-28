@@ -6,7 +6,7 @@ insert_select_compound.sql: many (a: int64, b: text(UTF-8, ill-formed)) -> { nam
 insert_select_returning.sql: many (meta: text(UTF-8, ill-formed)?, d: int64, n: int64) -> { name: TEXT(text(UTF-8, ill-formed) | bytes), meta: TEXT(text(UTF-8, ill-formed) | bytes)?, k: INTEGER(int64 | float(11,52) | text(UTF-8, ill-formed) | bytes) }
 insert_view.sql: at_most_one (name: unknown) -> { name: unknown? }
 numeric_column.sql: many (ready: NUMERIC(int64 | float(11,52) | text(UTF-8, ill-formed) | bytes)) -> { name: TEXT(text(UTF-8, ill-formed) | bytes) }
-values_alone.sql: many (p: float(11,52), q: int64) -> { column1: int64, column2: text(UTF-8, ill-formed, 'a' | 'c')?, column3: float(11,52) }
+values_alone.sql: many (p: float(11,52), q: int64) -> { column1: int64, column2: text(UTF-8, ill-formed, 'a' | 'c')?, column3: int64 | float(11,52) }
 values_one_row.sql: one () -> { column1: int64(1), column2: text(UTF-8, ill-formed, 'a') }
 values_positional.sql: many (name: text(UTF-8, ill-formed), meta: text(UTF-8, ill-formed)?, k: int64?, name2: text(UTF-8, ill-formed), meta2: text(UTF-8, ill-formed)?, k2: int64?) -> { name: TEXT(text(UTF-8, ill-formed) | bytes), meta: TEXT(text(UTF-8, ill-formed) | bytes)?, k: INTEGER(int64 | float(11,52) | text(UTF-8, ill-formed) | bytes)? }
 values_repeated_param.sql: many (x: unknown, y: unknown, z: unknown) -> {  } !! reylo3: The parameter :x appears more than once; use each parameter once, and select it in a with to read it twice, cast to its type, as in: with input as (select :x::<type> as x) select … from input

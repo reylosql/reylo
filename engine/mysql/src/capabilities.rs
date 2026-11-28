@@ -49,6 +49,10 @@ pub fn capabilities(analysis: &Analysis, host: &Host) -> Lazy<Option<Capabilitie
     if analysis.capabilities.as_ref().is_some_and(Capabilities::tables_unknown) {
         return Some(analysis.capabilities.clone());
     }
+    // A statement the word scans may misread, where the session ends a string elsewhere.
+    if !crate::errors::scanned_as_read(sql, analysis.sql_mode) {
+        return Some(Some(by_schema()));
+    }
     let mut capabilities = Capabilities::default();
     match analysis.kind {
         Some(StatementKind::Select | StatementKind::Insert | StatementKind::Update | StatementKind::Delete) => reached(analysis, sql, host, &mut capabilities)?,

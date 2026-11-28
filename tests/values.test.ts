@@ -4,7 +4,7 @@ import { DatabaseSync } from "node:sqlite";
 import { execute, type QueryModule } from "./run.ts";
 import { renderParamType, renderType } from "../src/render.ts";
 import { typeSchema } from "../src/schema.ts";
-import { coerce, columnKind, DecodeError, duration, hstore, hstoreText, instant, kindType, money, numbersInJson, parseRow, postgresInterval, postgresLiteral, postgresYear, rowMasks, scalarKind, textDecoder, withinDimensions } from "../src/values.ts";
+import { coerce, columnKind, DecodeError, duration, hstore, hstoreText, instant, kindType, money, numbersInJson, parseRow, postgresInterval, postgresLiteral, postgresYear, RawJson, rowMasks, scalarKind, textDecoder, withinDimensions, writeJson } from "../src/values.ts";
 import { withBases, type EngineType, type JsonSchema } from "../src/engine-type.ts";
 import { validate } from "../src/json-schema.ts";
 import { array, field, lite, my, oneOf, pg, record } from "./descriptors.ts";
@@ -675,6 +675,13 @@ test("the kinds: a BIGINT is a BigInt, and an integer a temporary table may wide
   assert.deepEqual(typeSchema({ kind: "boolean" }, "mysql"), { type: "boolean" });
   assert.deepEqual(typeSchema(lite("bool"), "sqlite"), { type: "boolean" });
   assert.deepEqual(typeSchema(lite("integer"), "sqlite"), { type: "integer", format: "int64" });
+  // Outside a STRICT table an INTEGER column may hold a REAL, which `.run()` returns as the number it is; a BIGINT one refuses it, since no BigInt holds a fraction.
+  for (const declared of ["INTEGER", "INT", "TINYINT"]) assert.deepEqual(typeSchema({ ...lite("numeric"), label: declared } as EngineType, "sqlite"), { type: "number" }, declared);
+  assert.deepEqual(typeSchema({ ...lite("numeric"), label: "BIGINT" } as EngineType, "sqlite"), { type: "integer", format: "int64" });
+  // Inside a document SQLite builds, such a column's value, or one computed from it, is a number of either kind.
+  const either: EngineType = { kind: "union", label: "INTEGER", members: [lite("integer"), lite("real")] };
+  assert.deepEqual(typeSchema(either, "sqlite", false, true), { type: "number" });
+  assert.equal(renderType(either, true, "sqlite"), "number");
   assert.deepEqual(typeSchema(lite("numeric"), "sqlite"), { type: ["number", "string"] });
   for (const kind of ["bool", "int", "float", "int8", "decimal", "text", "date", "timestamp", "timestamptz", "json", "bytes", "unknown"]) assert.notEqual(kindType(kind), "Date", kind);
 });
@@ -1000,6 +1007,43 @@ test("the text Postgres writes inside JSON for a non-finite float or decimal is 
   assert.deepEqual(numbersInJson({ xs: "NaN" }, at), { xs: "NaN" });
   // A Postgres array of JSON arrays reads each array as an element.
   assert.deepEqual(numbersInJson([["NaN"]], { items: { items: true }, deep: true }), [[NaN]]);
+});
+
+test("a value goes into a document as JSON.stringify writes it, but for NaN, the infinities and -0, which go in as each database's JSON reads them, or are refused where it holds none", () => {
+  const fail = (message: string): never => {
+    throw new TypeError(message);
+  };
+  const plain = { s: "é\u2028\"", n: [1, 2.5, -3e-7, 1e21, null, true], at: new Date(0), gone: undefined, f: () => 1, nested: { a: [{}, []] }, own: { toJSON: (key: string) => `key ${key}` } };
+  for (const dialect of ["postgres", "mysql", "sqlite"] as const) assert.equal(writeJson(plain, dialect, fail), JSON.stringify(plain));
+  // With a number JSON.stringify writes as null or 0, the rest is written as JSON.stringify writes it.
+  const special = { ...plain, z: -0, list: [undefined, -0, () => 1, new Number(-0)], [`a/b~c`]: -0 };
+  const written = JSON.stringify(special).replace(/"z":0/, `"z":-0`).replace(/"list":\[null,0,null,0\]/, `"list":[null,-0,null,-0]`).replace(/"a\/b~c":0/, `"a/b~c":-0`);
+  assert.equal(writeJson(special, "postgres", fail), written);
+  assert.equal(writeJson(special, "mysql", fail), written.replace(/-0([,\]}])/g, "-0e0$1"));
+  // Postgres's JSON holds no number for NaN or an infinity.
+  for (const n of [NaN, Infinity, -Infinity]) assert.throws(() => writeJson({ z: -0, n }, "postgres", fail), new RegExp(`^TypeError: at /n is ${n}, which JSON holds no number for: write null or a string in its place\\.$`));
+  assert.throws(() => writeJson([NaN], "postgres", fail, "[2]"), /^TypeError: at \[2\]\/0 is NaN/);
+  // SQLite writes an infinity as a number past a double's range, and holds no NaN.
+  assert.equal(writeJson({ inf: Infinity, neg: -Infinity, z: -0 }, "sqlite", fail), `{"inf":9e999,"neg":-9e999,"z":-0e0}`);
+  assert.deepEqual(JSON.parse(writeJson({ inf: Infinity, z: -0 }, "sqlite", fail)!), { inf: Infinity, z: -0 });
+  assert.throws(() => writeJson({ a: [NaN] }, "sqlite", fail), /^TypeError: at \/a\/0 is NaN, which SQLite holds no value for: write null or a string in its place\.$/);
+  // MySQL holds neither, and a key's pointer escapes `/` and `~`.
+  assert.throws(() => writeJson({ "a/b~": Infinity }, "mysql", fail), /^TypeError: at \/a~1b~0 is Infinity, which MySQL holds no value for/);
+  assert.throws(() => writeJson(NaN, "mysql", fail), /^TypeError: is NaN, which MySQL holds no value for/);
+  assert.throws(() => writeJson([NaN], "mysql", fail, "[1]"), /^TypeError: at \[1\]\/0 is NaN/);
+  // A float's text NaN, as an array's element reads, is the number.
+  assert.ok(Number.isNaN(coerce("float", "NaN", "f")));
+  // Each value's toJSON() is read once: one that gives NaN, then 0, is refused for its NaN.
+  let calls = 0;
+  const once = { toJSON: () => (calls++ ? { value: 0 } : { value: NaN }) };
+  assert.throws(() => writeJson({ doc: once }, "sqlite", fail), /^TypeError: at \/doc\/value is NaN/);
+  assert.equal(calls, 1);
+  // A boxed number is the number it holds.
+  assert.equal(writeJson({ a: new Number(-0) }, "postgres", fail), `{"a":-0}`);
+  assert.throws(() => writeJson({ a: new Number(Infinity) }, "mysql", fail), /^TypeError: at \/a is Infinity/);
+  // A value written as it is, and what JSON.stringify throws on, a BigInt.
+  assert.equal(writeJson({ big: new RawJson("12345678901234567890") }, "sqlite", fail), `{"big":12345678901234567890}`);
+  assert.throws(() => writeJson({ z: -0, big: 1n }, "postgres", fail), /BigInt/);
 });
 
 test("a row converts each name's last column by that column's own mask, by position beside the columns", () => {
