@@ -1952,8 +1952,12 @@ fn leftover_filter(statement: &str) -> Option<String> {
                 let unique = sql.get(..13).is_some_and(|w| w.eq_ignore_ascii_case("create unique"));
                 // A partial index only for a statement with a WHERE, and the other way round.
                 static WHERE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)(?:^|[ \t\n\r\x0B\x0C)])where[ \t\n\r\x0B\x0C(]").expect("a valid pattern"));
-                let partial = WHERE.is_match(rest);
-                Some(format!(r"{on} and c.relname ~ '_idx[0-9]*$' and (starts_with(c.relname, (select t.relname from pg_class t where t.oid = i.indrelid) || '_') or octet_length(c.relname) >= 56) and i.indisunique = {unique} and (i.indpred is not null) = {partial} and i.indexprs is null and string_to_array(i.indkey::text, ' ')::int2[] = array[{}]::int2[]", picked.join(", ")))
+                // A partial index's predicate can't be read off the statement as the server writes
+                // it, so an unnamed one is tied to nothing.
+                if WHERE.is_match(rest) {
+                    return None;
+                }
+                Some(format!(r"{on} and c.relname ~ '_idx[0-9]*$' and (starts_with(c.relname, (select t.relname from pg_class t where t.oid = i.indrelid) || '_') or octet_length(c.relname) >= 56) and i.indisunique = {unique} and i.indpred is null and i.indnkeyatts = {} and i.indexprs is null and string_to_array(i.indkey::text, ' ')::int2[] = array[{}]::int2[]", keys.len(), picked.join(", ")))
             }
         };
     }
@@ -1965,7 +1969,7 @@ fn leftover_filter(statement: &str) -> Option<String> {
     let option = c.get(1).is_some_and(|o| {
         o.as_str().split(',').any(|o| {
             let words: Vec<String> = o.split_ascii_whitespace().map(|w| w.to_ascii_lowercase()).collect();
-            words.first().is_some_and(|w| w == "concurrently") && !words.get(1).is_some_and(|v| matches!(v.trim_matches('\''), "false" | "off" | "0"))
+            words.first().is_some_and(|w| w == "concurrently") && !words.get(1).is_some_and(|v| matches!(v.trim_matches(|c| c == '\'' || c == '"'), "false" | "off" | "0"))
         })
     });
     if c.get(3).is_none() && !option {
@@ -1981,10 +1985,12 @@ fn leftover_filter(statement: &str) -> Option<String> {
         _ => return None,
     };
     // A concurrent reindex builds <index>_ccnew beside each index, and swaps the old one to
-    // <index>_ccold, the base cut to fit 63 bytes and a number added where the name is taken: a copy
-    // is on the same table as an index whose name starts with the copy's base.
+    // <index>_ccold, a number added where the name is taken: a copy is on the same table as an index
+    // of its definition whose name is the copy's base, or starts with it where the server cut a long
+    // name to fit 63 bytes.
+    let base = r"regexp_replace(c.relname, '_cc(new|old)[0-9]*$', '')";
     Some(format!(
-        r"c.relname ~ '_cc(new|old)[0-9]*$' and exists (select 1 from pg_index o join pg_class oc on oc.oid = o.indexrelid where o.indrelid = i.indrelid and oc.oid <> c.oid and {originals} and regexp_replace(c.relname, '_cc(new|old)[0-9]*$', '') <> '' and starts_with(oc.relname, regexp_replace(c.relname, '_cc(new|old)[0-9]*$', '')))"
+        r"c.relname ~ '_cc(new|old)[0-9]*$' and exists (select 1 from pg_index o join pg_class oc on oc.oid = o.indexrelid where o.indrelid = i.indrelid and oc.oid <> c.oid and {originals} and {base} <> '' and (oc.relname = {base} or (starts_with(oc.relname, {base}) and octet_length(c.relname) >= 60)) and o.indkey = i.indkey and o.indclass = i.indclass and o.indcollation = i.indcollation and o.indoption = i.indoption and o.indisunique = i.indisunique and o.indnkeyatts = i.indnkeyatts and coalesce(pg_get_expr(o.indexprs, o.indrelid), '') = coalesce(pg_get_expr(i.indexprs, i.indrelid), '') and coalesce(pg_get_expr(o.indpred, o.indrelid), '') = coalesce(pg_get_expr(i.indpred, i.indrelid), ''))"
     ))
 }
 
@@ -12157,8 +12163,8 @@ mod tests {
         assert_eq!(super::leftover_filter("create index concurrently on t (lower(email))"), None);
         assert_eq!(super::leftover_filter("create index concurrently on t ((a + 1))"), None);
         assert_eq!(super::leftover_filter("create index concurrently on t (U&\"col\")"), None);
-        assert!(f("create index concurrently on t (a) where a > 0").contains("(i.indpred is not null) = true"));
-        assert!(f("create index concurrently on t (a)").contains("(i.indpred is not null) = false"));
+        assert_eq!(super::leftover_filter("create index concurrently on t (a) where a > 0"), None);
+        assert!(f("create index concurrently on t (a, b) include (c)").contains("i.indnkeyatts = 2"));
         // The table as `only (t)` and `t*` write it.
         assert!(f("create index concurrently i on only (orders) (x)").starts_with("i.indrelid = to_regclass('orders') and"));
         assert!(f("create index concurrently i on orders* (x)").starts_with("i.indrelid = to_regclass('orders') and"));
@@ -12174,6 +12180,7 @@ mod tests {
         assert!(copies("reindex (tablespace \"a)b\", concurrently true) table users").contains("o.indrelid in (select to_regclass('users') union"));
         assert_eq!(f("reindex (concurrently false) index users_n"), None);
         assert_eq!(f("reindex (concurrently 'off') index users_n"), None);
+        assert_eq!(f("reindex (concurrently \"off\") index users_n"), None);
         assert_eq!(f("reindex index users_n"), None);
         assert!(copies("reindex schema concurrently app").contains("to_regnamespace('app')"));
         assert!(copies("reindex database concurrently").contains("and true and"));
