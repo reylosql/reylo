@@ -285,6 +285,11 @@ fn read_every_way(sql: &str, dialect: Dialect) -> Vec<Vec<Statement>> {
         .collect()
 }
 
+/// On MySQL these statements are what a migration runs, one at a time, while the lock's checksum
+/// covers the text as `canonical` reads it, not where it is split: a change to where a statement
+/// ends here changes what a migration a database already ran runs on a fresh one, with its lock
+/// entry still matching. So the reading here only ever moves where the server would refuse the old
+/// one, as `--` before DEL stays two minus signs.
 fn split(sql: &str, dialect: Dialect, tokens: &[Token], openings: &[(usize, usize)]) -> Vec<Statement> {
     let mut statements = Vec::new();
     let mut from = 0;
