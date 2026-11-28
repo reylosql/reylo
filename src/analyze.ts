@@ -8,7 +8,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, w
 import { createHash } from "node:crypto";
 import { join, relative } from "node:path";
 import { anyEngine, DIAGNOSTIC, engine, reason, MissingEngine, REYLO_VERSION, Unreachable, type Analysis, type Engine, type Lexed, type Schema } from "./engine.ts";
-import { packageDir, resolveProject, sqlitePath, type Dialect, type ResolvedProject } from "./project.ts";
+import { environmentValue, packageDir, resolveProject, sqlitePath, type Dialect, type ResolvedProject } from "./project.ts";
 import { NotMysql, refusedLogin } from "./connection.ts";
 import { keptError } from "./server-errors.ts";
 import { NotPrepared, openProjectDrivers, placeRefusal, projectDriverVersions, type SqliteDriver } from "./sqlite-drivers.ts";
@@ -525,7 +525,9 @@ export class Session {
     if (dialect === "sqlite") return sqlitePath(url ?? "", root);
     try {
       const u = new URL(url ?? "");
-      return `${u.hostname || u.searchParams.get("host") || "localhost"}${u.port ? `:${u.port}` : ""}${u.pathname}`;
+      // A database the path leaves out, as `?dbname=` names one, the last as the engine reads it.
+      const dbname = u.pathname === "" || u.pathname === "/" ? u.searchParams.getAll("dbname").at(-1) : undefined;
+      return `${u.hostname || u.searchParams.get("host") || "localhost"}${u.port ? `:${u.port}` : ""}${dbname ? `/${dbname}` : u.pathname}`;
     } catch {
       return "the database";
     }
@@ -717,8 +719,10 @@ const ENVIRONMENT = ["PGHOST", "PGPORT", "PGUSER", "PGDATABASE", "PGOPTIONS"] as
  * the first in order, as Node passes a child.
  */
 export function libpqEnvironment(env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform): Record<string, string> {
-  const value = (name: string) => (platform === "win32" ? env[Object.keys(env).filter((key) => key.toUpperCase() === name).sort()[0] ?? name] : env[name]);
-  return Object.fromEntries(ENVIRONMENT.flatMap((name) => (value(name) ? [[name, value(name)!]] : [])));
+  return Object.fromEntries(ENVIRONMENT.flatMap((name) => {
+    const value = environmentValue(env, name, platform);
+    return value ? [[name, value]] : [];
+  }));
 }
 
 /**

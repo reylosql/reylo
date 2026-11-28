@@ -530,7 +530,12 @@ fn place(url: &str) -> String {
     let (authority, path) = rest.find('/').map_or((rest, ""), |at| rest.split_at(at));
     let host = authority.rsplit_once('@').map_or(authority, |(_, host)| host);
     let host = if host.is_empty() { query.split('&').find_map(|p| p.strip_prefix("host=")).unwrap_or("localhost") } else { host };
-    format!("{host}{path}")
+    // A database the path leaves out, as `?dbname=` names one, the last as the engine reads it.
+    let dbname = query.split('&').filter_map(|p| p.strip_prefix("dbname=")).last().filter(|_| path.is_empty() || path == "/");
+    match dbname {
+        Some(dbname) => format!("{host}/{dbname}"),
+        None => format!("{host}{path}"),
+    }
 }
 
 /// Says that a statement was built from `entry` in the cache without the database's schema to hold

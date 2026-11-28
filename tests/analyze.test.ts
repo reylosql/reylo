@@ -559,6 +559,26 @@ test("a session's connection reads libpq's variables as the session started, so 
   }
 });
 
+test("a project whose env file names its database by PGDATABASE analyzes that database, as an app that loads the file connects to it", { skip: live }, async () => {
+  const first = await postgresDatabase("reylo_envfile_first", "create table t (v int not null)");
+  const root = mkdtempSync(join(tmpdir(), "reylo-env-file-"));
+  writeFileSync(join(root, "package.json"), "{}");
+  // The URL names the server alone; the file names the database, as libpq reads PGDATABASE.
+  const server = new URL(first.url);
+  server.pathname = "/";
+  writeFileSync(join(root, ".env"), `DATABASE_URL=${server.href}\nPGDATABASE=${new URL(first.url).pathname.slice(1)}\n`);
+  const session = await Session.open(root, {});
+  try {
+    const typed = await session.analyze("select v from t");
+    assert.ok(typed.ok, typed.ok ? "" : typed.message);
+    assert.ok(!typed.analysis.columns[0]!.nullable);
+    assert.match(session.project.urlSource, /^DATABASE_URL in \.env, PGDATABASE in \.env$/);
+  } finally {
+    await session.close();
+    await first.drop();
+  }
+});
+
 test("on a server, a URL that fails reads that server's own entry and no other's, and a build says once that it reads reylo/.cache/ unchecked", { skip: live }, async (t) => {
   const { url, sql, drop } = await postgresDatabase("reylo_offline", "create table users (id int primary key, email text not null)");
   // Another database on the same server, whose users differ.
