@@ -1,13 +1,17 @@
+derived_builtin_pins.sql: at_most_one (id: int32) -> { id: int }
 derived_random.sql: many () -> { id: int }
 derived_stable.sql: at_most_one () -> { id: int }
+derived_stored_function.sql: many () -> { id: int | bigint? }
 distinct_random.sql: many () -> { id: bigint }
 distinct_random_where.sql: many () -> { id: bigint }
 distinct_random_with.sql: many () -> { id: bigint }
 distinct_random_with_escaped.sql: many () -> { id: bigint }
 distinct_random_with_shadowed.sql: many () -> { id: bigint }
+distinct_stored_function_nested.sql: many () -> { v: bigint? }
 dual.sql: one (n: varchar) -> { n: varchar? }
 dual_where.sql: at_most_one (n: varchar, ok: int32) -> { n: varchar? }
 group_random.sql: many () -> { id: bigint, n: bigint }
+group_stored_function.sql: many () -> { id: int | bigint?, n: bigint }
 key_correlated.sql: many () -> { id: int }
 key_in.sql: at_most_one (id: int32) -> { id: int }
 key_in_many.sql: many () -> { id: int }

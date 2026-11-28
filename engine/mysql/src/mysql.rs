@@ -3838,6 +3838,41 @@ mod tests {
     }
 
     #[test]
+    fn a_derived_column_that_may_differ_from_call_to_call_is_no_one_value() {
+        let mut k = keys();
+        for (table, columns) in [("users", &[("id", "int"), ("name", "varchar")][..]), ("posts", &[("id", "bigint"), ("user_id", "bigint")][..])] {
+            k.columns.insert(table.into(), columns.iter().map(|(c, ty)| (c.to_string(), class_of(ty))).collect());
+        }
+        let rows = |sql: &str| {
+            let mut v = parse(&SessionDialect::default(), sql).unwrap();
+            let Statement::Query(q) = v.pop().unwrap() else { panic!("not a query") };
+            cardinality(&q, &k).0.as_str()
+        };
+        // The server merges the derived table and calls a function it cannot vouch for, a stored
+        // function's, or `RAND()`, again for each row: in any form, at any depth.
+        for sql in [
+            "select distinct x.id from users u, (select pick() as id from posts where posts.id = 1) x",
+            "select x.id from users u, (select pick() as id from posts where posts.id = 1) x group by x.id",
+            "select distinct x.id from users u, (select floor(rand() * 3) + 1 as id from posts where posts.id = 1) x",
+            "select distinct x.v from users u, (select floor(pick()) as v from posts where posts.id = 1) x",
+            "select distinct x.v from users u, (select convert(pick(), signed) as v from posts where posts.id = 1) x",
+            "select distinct x.id from users u, (select y.id from (select pick() as id from posts where posts.id = 1) y) x",
+            "select distinct x.id from users u, (with c as (select pick() as id from posts where posts.id = 1) select id from c) x",
+            "select distinct x.id from users u, (select pick() as id from posts where posts.id = 1) x where x.id = 1",
+        ] {
+            assert_eq!(rows(sql), "many", "{sql}");
+        }
+        // A built-in, a column and an aggregate give one value.
+        for sql in [
+            "select distinct x.id from users u, (select abs(user_id) as id from posts where posts.id = 1) x",
+            "select distinct x.id from users u, (select user_id as id from posts where posts.id = 1) x",
+            "select u.id from users u join (select id, user_id, json_object('k', id) as card from posts) p on u.id = p.user_id where p.id = ?",
+        ] {
+            assert_eq!(rows(sql), "at_most_one", "{sql}");
+        }
+    }
+
+    #[test]
     fn joins_derived_tables_and_with_queries_are_pinned_by_keys() {
         let mut k = keys();
         for (table, columns) in [("users", &[("id", "int"), ("email", "varchar"), ("name", "varchar")][..]), ("posts", &[("id", "bigint"), ("user_id", "bigint"), ("title", "text")][..])] {
