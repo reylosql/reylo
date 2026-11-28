@@ -1533,8 +1533,12 @@ pub struct MysqlAlterer {
     /// Each NOT NULL step a table's statements start with, as written there and as the start of the
     /// plan writes it, under the table's name before any rename.
     early: std::cell::RefCell<Vec<(String, String)>>,
-    /// Each NOT NULL step a key holds back, as written, and its table as a statement names it.
-    late: std::cell::RefCell<Vec<(String, String)>>,
+    /// Each NOT NULL step a key holds back, as written, its table as a statement names it, and its
+    /// columns, each `column <table>.<column>`.
+    late: std::cell::RefCell<Vec<(String, String, Vec<String>)>>,
+    /// For each column of the first schema a foreign key reads, on either side, the statements that
+    /// take such a key away: its own drop, and its table's.
+    unkeyed_by: std::cell::RefCell<BTreeMap<String, Vec<String>>>,
 }
 
 impl MysqlAlterer {
@@ -1568,7 +1572,8 @@ impl MysqlAlterer {
         }
         let held_back: Vec<&str> = held.iter().filter(|(c, _)| late.contains(c)).map(|(_, clause)| clause.as_str()).collect();
         if !held_back.is_empty() {
-            let joined = (format!("alter table {} {}", to.q, held_back.join(", ")), to.q.clone());
+            let columns = late.iter().map(|c| format!("column {table}.{c}")).collect();
+            let joined = (format!("alter table {} {}", to.q, held_back.join(", ")), to.q.clone(), columns);
             let mut kept = self.late.borrow_mut();
             if !kept.contains(&joined) {
                 kept.push(joined);
@@ -1813,6 +1818,15 @@ impl Alterer for MysqlAlterer {
         *self.swaps.borrow_mut() = swaps;
         *self.early.borrow_mut() = Vec::new();
         *self.late.borrow_mut() = Vec::new();
+        let mut unkeyed_by: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for o in from.objects.values().filter(|o| o.kind == Some(Kind::Constraint) && o.id.starts_with("foreign key ")) {
+            let table_drop = o.owner.as_ref().and_then(|t| from.objects.get(t)).and_then(|t| t.drop.first());
+            let ways: Vec<String> = o.drop.first().into_iter().chain(table_drop).cloned().collect();
+            for column in o.deps.iter().filter(|d| d.starts_with("column ")) {
+                unkeyed_by.entry(column.clone()).or_default().extend(ways.iter().cloned());
+            }
+        }
+        *self.unkeyed_by.borrow_mut() = unkeyed_by;
         *self.set_null.borrow_mut() = from.objects.values().flat_map(|o| o.extra.iter().filter_map(|l| l.strip_prefix(SETS_NULL)).flat_map(|l| serde_json::from_str::<Vec<String>>(l).unwrap_or_default())).collect();
     }
 
@@ -1824,6 +1838,29 @@ impl Alterer for MysqlAlterer {
     /// (email) on users to … with grant option`. Only those side by side: one further on may wait
     /// for what the plan makes between them (a column it grants on).
     fn finish(&self, statements: &mut Vec<String>) {
+        // A table's held step joins the last drop of its own keys before it, which MySQL runs as one
+        // statement, placed after every statement that takes a key on the column away (a key that
+        // references it, or that key's table), which the step waits for, and as early as that.
+        let unkeyed_by = self.unkeyed_by.borrow();
+        for (here, table, columns) in self.late.borrow().iter() {
+            let Some(at) = statements.iter().position(|s| s == here) else { continue };
+            let drop = format!("alter table {table} drop foreign key ");
+            let Some(key) = statements[..at].iter().rposition(|s| s.starts_with(&drop)) else { continue };
+            let ways: Vec<&String> = columns.iter().flat_map(|c| unkeyed_by.get(c).into_iter().flatten()).collect();
+            let unkeys = |s: &str| ways.iter().any(|w| s == w.as_str() || s.starts_with(&format!("{w}, ")));
+            let after = statements[key + 1..at].iter().rposition(|s| unkeys(s)).map(|k| key + 1 + k);
+            let clauses = here[format!("alter table {table} ").len()..].to_string();
+            let joined = format!("{}, {clauses}", statements[key]);
+            statements.remove(at);
+            match after {
+                Some(last) => {
+                    statements.insert(last + 1, joined);
+                    statements.remove(key);
+                }
+                None => statements[key] = joined,
+            }
+        }
+        // The NOT NULL steps no key holds back go first, before any key goes.
         let mut front = Vec::new();
         for (here, first) in self.early.borrow().iter() {
             if let Some(at) = statements.iter().position(|s| s == here) {
@@ -1832,28 +1869,6 @@ impl Alterer for MysqlAlterer {
             }
         }
         statements.splice(0..0, front);
-        // A table's held step joins its key's drop, and the two go to the start of the plan with the
-        // other keys' drops between them (a key that references the column, which must go first):
-        // each key is in place at the start and waits on nothing, and the step writes the column as
-        // it was then, so the statement fails on a NULL before anything else has run.
-        let drops_a_key = |s: &str| {
-            let t = tokenize(s, Dialect::Mysql);
-            t.len() > 5 && t[0].upper() == "ALTER" && t[1].upper() == "TABLE" && t[3].upper() == "DROP" && t[4].upper() == "FOREIGN" && t[5].upper() == "KEY"
-        };
-        for (here, table) in self.late.borrow().iter() {
-            let Some(at) = statements.iter().position(|s| s == here) else { continue };
-            let drop = format!("alter table {table} drop foreign key ");
-            let Some(key) = statements[..at].iter().rposition(|s| s.starts_with(&drop)) else { continue };
-            let clauses = here[format!("alter table {table} ").len()..].to_string();
-            let joined = format!("{}, {clauses}", statements[key]);
-            let first: Vec<String> = statements[key + 1..at].iter().filter(|s| drops_a_key(s)).cloned().chain(std::iter::once(joined)).collect();
-            let mut k = 0;
-            statements.retain(|s| {
-                k += 1;
-                !(k - 1 == key || k - 1 == at || (k - 1 > key && k - 1 < at && drops_a_key(s)))
-            });
-            statements.splice(0..0, first);
-        }
         lock_swaps(&self.swaps.borrow(), statements);
         // Each statement, or a run of grants (or of revokes) on one object to one account.
         let mut runs: Vec<(String, Option<(bool, Vec<String>, String)>)> = Vec::new();
