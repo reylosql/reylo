@@ -179,7 +179,7 @@ async function databaseBackend(session: Session): Promise<Backend> {
 async function schemaDdl(dialect: Dialect, query: (sql: string) => Promise<unknown[][]>): Promise<string | undefined> {
   try {
     if (dialect === "sqlite") {
-      const rows = await query(`select sql as ddl from sqlite_schema where sql is not null and name not like 'sqlite_%' order by case type when 'table' then 0 when 'view' then 1 when 'index' then 2 else 3 end, name`);
+      const rows = await query(`select sql as ddl from sqlite_schema where sql is not null and name not like 'sqlite\\_%' escape '\\' order by case type when 'table' then 0 when 'view' then 1 when 'index' then 2 else 3 end, name`);
       return rows.map(([ddl]) => `${String(ddl).trim()};`).join("\n\n");
     }
     if (dialect === "mysql") {

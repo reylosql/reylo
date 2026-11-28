@@ -6403,12 +6403,7 @@ async fn wipe_rows_on(db: &mut Db) -> Result<usize, Error> {
         // A virtual table's own tables (an FTS5 index's, an R*Tree's) are its to empty, and a libSQL
         // vector index's are libSQL's: deleting from them directly breaks it.
         Dialect::Sqlite => db
-            .rows(&format!(
-                "select name as n from pragma_table_list where schema = 'main' and type in ('table', 'virtual') and name not like 'sqlite_%' and {} and name {} and {}",
-                crate::catalog::not_history("name"),
-                crate::catalog::NOT_TURSO_OWN,
-                crate::catalog::NOT_LIBSQL_VECTOR_OWN
-            ))
+            .rows(&format!("select name as n from pragma_table_list where schema = 'main' and type in ('table', 'virtual') and {}", crate::catalog::sqlite_project("name")))
             .await?
             .iter()
             .map(|r| format!("\"{}\"", r.text("n").replace('"', "\"\"")))
@@ -6470,8 +6465,8 @@ async fn wipe_rows_on(db: &mut Db) -> Result<usize, Error> {
             }
             sql.push_str(&after);
             let has_sequence = db.rows("select count(*) > 0 as ok from sqlite_schema where name = 'sqlite_sequence'").await?.first().is_some_and(|r| r.flag("ok"));
-            // The counters of the tables it empties: a history table keeps its own.
-            let reset = if has_sequence { format!("delete from sqlite_sequence where {};", crate::catalog::not_history("name")) } else { String::new() };
+            // The counters of the tables it empties: a history table, and any other table not the project's, keeps its own.
+            let reset = if has_sequence { format!("delete from sqlite_sequence where {};", crate::catalog::sqlite_project("name")) } else { String::new() };
             let turso = crate::catalog::holds_turso_tables(db).await?;
             let restart = crate::catalog::turso_sequences(db, turso, true).await?;
             let result = db.script(&format!("begin; {sql} {reset} {restart} commit;")).await;
@@ -10242,12 +10237,9 @@ async fn dump_from(db: &mut Db, opts: &Options, schemas: &[String]) -> Result<St
         Dialect::Sqlite => {
             let rows = db
                 .rows(&format!(
-                    "select sql from sqlite_schema where sql is not null and name not like 'sqlite_%' and {}
-                      and name not in (select name from pragma_table_list where type = 'shadow') and name {turso} and tbl_name {turso} and {}
+                    "select sql from sqlite_schema where sql is not null and {} and name not in (select name from pragma_table_list where type = 'shadow')
                     order by case type when 'table' then 0 when 'index' then 1 when 'view' then 2 else 3 end, rowid",
-                    crate::catalog::not_history("tbl_name"),
-                    crate::catalog::NOT_LIBSQL_VECTOR_OWN,
-                    turso = crate::catalog::NOT_TURSO_OWN
+                    crate::catalog::sqlite_project("tbl_name")
                 ))
                 .await?;
             Ok(format!("{}\n", rows.iter().map(|r| format!("{};", r.text("sql"))).collect::<Vec<_>>().join("\n\n")))
