@@ -1832,8 +1832,10 @@ impl Alterer for MysqlAlterer {
             }
         }
         statements.splice(0..0, front);
-        // A key's drop moves down to its table's held step and takes it in: only past other keys'
-        // drops, which a drop may wait for (a key that references the column), and nothing waits on.
+        // A table's held step joins its key's drop, and the two go to the start of the plan with the
+        // other keys' drops between them (a key that references the column, which must go first):
+        // each key is in place at the start and waits on nothing, and the step writes the column as
+        // it was then, so the statement fails on a NULL before anything else has run.
         let drops_a_key = |s: &str| {
             let t = tokenize(s, Dialect::Mysql);
             t.len() > 5 && t[0].upper() == "ALTER" && t[1].upper() == "TABLE" && t[3].upper() == "DROP" && t[4].upper() == "FOREIGN" && t[5].upper() == "KEY"
@@ -1842,11 +1844,15 @@ impl Alterer for MysqlAlterer {
             let Some(at) = statements.iter().position(|s| s == here) else { continue };
             let drop = format!("alter table {table} drop foreign key ");
             let Some(key) = statements[..at].iter().rposition(|s| s.starts_with(&drop)) else { continue };
-            if statements[key + 1..at].iter().all(|s| drops_a_key(s)) {
-                let clauses = here[format!("alter table {table} ").len()..].to_string();
-                statements[at] = format!("{}, {clauses}", statements[key]);
-                statements.remove(key);
-            }
+            let clauses = here[format!("alter table {table} ").len()..].to_string();
+            let joined = format!("{}, {clauses}", statements[key]);
+            let first: Vec<String> = statements[key + 1..at].iter().filter(|s| drops_a_key(s)).cloned().chain(std::iter::once(joined)).collect();
+            let mut k = 0;
+            statements.retain(|s| {
+                k += 1;
+                !(k - 1 == key || k - 1 == at || (k - 1 > key && k - 1 < at && drops_a_key(s)))
+            });
+            statements.splice(0..0, first);
         }
         lock_swaps(&self.swaps.borrow(), statements);
         // Each statement, or a run of grants (or of revokes) on one object to one account.
