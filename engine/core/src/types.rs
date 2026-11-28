@@ -1901,25 +1901,13 @@ fn within(value: &str, bounds: &Bounds, order: impl Fn(&str, &str) -> Option<std
     keeps(&bounds.min, Ordering::is_lt) && keeps(&bounds.exclusive_min, Ordering::is_le) && keeps(&bounds.max, Ordering::is_gt) && keeps(&bounds.exclusive_max, Ordering::is_ge)
 }
 
-/// Whether every bound a number kind writes is a number (rule 5), which `inf` and `Infinity` are not:
-/// the `infinity` flag speaks for those.
+/// Whether every bound a number kind writes is a number (rule 5), which `inf` and `Infinity` are not
+/// (the `infinity` flag speaks for those), and one whose exponent an i64 counts, so that it orders.
 fn numbers(b: &Bounds) -> Result<(), String> {
     match [&b.min, &b.exclusive_min, &b.max, &b.exclusive_max].into_iter().flatten().find(|v| number(v).is_none()) {
         Some(v) => Err(format!("the bound {v:?} is no number")),
         None => Ok(()),
     }
-}
-
-/// An exponent's decimal text, with a sign where it has one, as an i64: one past its range at
-/// i64's quarter, which no count of digits reaches.
-fn exponent_of(text: &str) -> Option<i64> {
-    let digits = text.strip_prefix(['+', '-']).unwrap_or(text);
-    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    let far = i64::MAX / 4;
-    let magnitude = digits.parse::<i64>().map_or(far, |n| n.min(far));
-    Some(if text.starts_with('-') { -magnitude } else { magnitude })
 }
 
 fn check_bounds(b: &Bounds, order: impl Fn(&str, &str) -> Option<std::cmp::Ordering>) -> Result<(), String> {
@@ -1985,8 +1973,7 @@ fn number(text: &str) -> Option<(bool, i64, String)> {
         None => (false, text.strip_prefix('+').unwrap_or(text)),
     };
     let (mantissa, exponent) = match body.split_once(['e', 'E']) {
-        // An exponent past what an i64 counts still orders, as one far beyond any digits written.
-        Some((mantissa, exponent)) => (mantissa, exponent_of(exponent)?),
+        Some((mantissa, exponent)) => (mantissa, exponent.parse::<i64>().ok()?),
         None => (body, 0),
     };
     let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
@@ -2063,20 +2050,18 @@ fn tick_spaced(kind: &Kind, values: &[&str]) -> bool {
     };
     fn point<'a>(kind: &Kind, text: &'a str) -> Option<(i64, &'a str)> {
         match kind {
-            Kind::Time(t) => {
-                let c = clock(text)?;
-                let east = if t.offset { offset(c.rest)?.0? } else { 0 };
-                Some((c.seconds? - east, c.fraction))
-            }
+            // A time with an offset steps on its clock, which the offset sits beside.
+            Kind::Time(_) => clock(text).and_then(|c| Some((c.seconds?, c.fraction))),
             _ => moment(kind, text).and_then(|(at, fraction, _)| Some((at?, fraction))),
         }
     }
-    let points: Vec<(i64, &str)> = values.iter().filter_map(|v| point(kind, v)).collect();
+    // A fraction past what `ticks` reads is left out before any value is compared with it.
+    let points: Vec<(i64, &str)> = values.iter().filter_map(|v| point(kind, v)).filter(|(_, fraction)| fraction.len() <= 18).collect();
     let Some(&(first, first_fraction)) = points.first() else { return true };
     points.iter().all(|&(seconds, fraction)| {
         let digits = fraction.len().max(first_fraction.len());
         match (exact(seconds, fraction, digits), exact(first, first_fraction, digits)) {
-            (Some(a), Some(b)) => ticks(tick, a - b, digits, false),
+            (Some(a), Some(b)) => a.checked_sub(b).is_none_or(|apart| ticks(tick, apart, digits, false)),
             _ => true,
         }
     })
@@ -2167,15 +2152,26 @@ fn suffix(text: &str) -> Option<(&str, String)> {
         if inner.is_empty() || inner.contains(['[', '!']) {
             return None;
         }
-        match (zone, inner.contains('=')) {
-            (None, false) => zone = Some(inner),
-            (Some(_), true) => {}
+        match (zone, inner.split_once('=')) {
+            (None, None) => zone = Some(inner),
+            (Some(_), Some((key, value))) if tag_key(key) && tag_value(value) => {}
             _ => return None,
         }
         key.push_str(&format!("[{inner}]"));
         rest = &rest[end + 1..];
     }
     Some((zone?, key))
+}
+
+/// RFC 9557's suffix key: a lowercase letter or `_`, then those, digits and `-`.
+fn tag_key(key: &str) -> bool {
+    let mut chars = key.chars();
+    chars.next().is_some_and(|c| c.is_ascii_lowercase() || c == '_') && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+}
+
+/// RFC 9557's suffix value: one or more runs of letters and digits, joined by single `-`.
+fn tag_value(value: &str) -> bool {
+    value.split('-').all(|run| !run.is_empty() && run.bytes().all(|b| b.is_ascii_alphanumeric()))
 }
 
 /// The calendar date an ISO 8601 text starts with in its extended form, its year of four digits,
@@ -2524,7 +2520,8 @@ mod tests {
         refused(json!({"kind": "float", "exponent_bits": 11, "mantissa_bits": 52, "min": "inf", "max": "0"}));
         refused(json!({"kind": "integer", "bits": 32, "min": "Infinity", "max": "0"}));
         refused(json!({"kind": "decimal", "min": "1e99999999999999999999", "max": "0"}));
-        passes(json!({"kind": "decimal", "min": "-1e99999999999999999999", "max": "0"}));
+        refused(json!({"kind": "decimal", "min": "2e99999999999999999998", "max": "1e99999999999999999999"}));
+        refused(json!({"kind": "decimal", "min": "1e99999999999999999999", "max": "2e99999999999999999998"}));
         refused(json!({"kind": "time", "tick": "1", "offset": true, "min": "13:00:00+00:00", "max": "12:00:00+00:00"}));
         refused(json!({"kind": "uuid", "versions": [9]}));
         refused(json!({"kind": "uuid", "versions": []}));
@@ -2608,6 +2605,8 @@ mod tests {
             // A zoned value names its zone first, in brackets.
             (json!({"kind": "zoned_datetime", "tick": "1"}), "2026-01-01T10:00:00+07:00[u-ca=iso8601]"),
             (json!({"kind": "zoned_datetime", "tick": "1"}), "2026-01-01T10:00:00+09:00[Asia/Tokyo][u-ca"),
+            (json!({"kind": "zoned_datetime", "tick": "1", "offset_only": true}), "2026-01-01T10:00:00+09:00[+09:00][=]"),
+            (json!({"kind": "zoned_datetime", "tick": "1"}), "2026-01-01T10:00:00+09:00[Asia/Tokyo][U-CA=iso8601]"),
             (json!({"kind": "zoned_datetime", "tick": "1"}), "2026-01-01T10:00:00.5+09:00[Asia/Tokyo]"),
             // A float's value is inside its finite range.
             (json!({"kind": "float", "exponent_bits": 5, "mantissa_bits": 10}), "65536"),
@@ -2625,12 +2624,13 @@ mod tests {
         refused(json!({"kind": "enum", "type": {"kind": "zoned_datetime", "tick": "1"}, "values": [{"value": "2026-01-01T10:00:00+09:00[Asia/Tokyo]"}, {"value": "2026-01-01T10:00:00+09:00[!Asia/Tokyo]"}]}));
         // Values of one type lie a whole number of ticks apart, wherever its steps start.
         for (ty, values) in [
-            (json!({"kind": "instant", "tick": "60"}), ["2026-01-01T00:00:00Z", "2026-01-01T00:00:00.5Z"]),
-            (json!({"kind": "time", "tick": "60"}), ["00:00:00", "00:00:00.5"]),
-            (json!({"kind": "time", "tick": "60", "offset": true}), ["00:00:00+00:00", "00:00:00.5+00:00"]),
-            (json!({"kind": "instant", "tick": "2"}), ["2026-01-01T00:00:01Z", "2026-01-01T00:00:02Z"]),
+            (json!({"kind": "instant", "tick": "60"}), vec!["2026-01-01T00:00:00Z", "2026-01-01T00:00:00.5Z"]),
+            (json!({"kind": "time", "tick": "60"}), vec!["00:00:00", "00:00:00.5"]),
+            (json!({"kind": "time", "tick": "60", "offset": true}), vec!["00:00:00+00:00", "00:00:00.5+00:00"]),
+            (json!({"kind": "instant", "tick": "2"}), vec!["2026-01-01T00:00:01Z", "2026-01-01T00:00:02Z"]),
+            (json!({"kind": "time", "tick": "60"}), vec!["00:00:00.0000000000000000001", "00:00:01", "00:00:02"]),
         ] {
-            refused(json!({"kind": "enum", "type": ty, "values": values.map(|v| json!({"value": v}))}));
+            refused(json!({"kind": "enum", "type": ty, "values": values.iter().map(|v| json!({"value": v})).collect::<Vec<_>>()}));
         }
         refused(json!({"kind": "enum", "type": {"kind": "uuid"}, "values": [{"value": "01890a5d-ac96-7ed0-8f4c-c3b8d0a1b2c3"}, {"value": "01890A5D-AC96-7ED0-8F4C-C3B8D0A1B2C3"}]}));
         refused(json!({"kind": "enum", "type": {"kind": "instant", "tick": "1/1000"}, "values": [{"value": "2026-01-01T00:00:00.5Z"}, {"value": "2026-01-01T00:00:00.500Z"}]}));
@@ -2671,6 +2671,9 @@ mod tests {
             // RFC 9557's critical flag and tags after the zone.
             (json!({"kind": "zoned_datetime", "tick": "1", "offset_only": true}), json!(["2026-01-01T10:00:00+08:00[!+08:00]", "2026-01-01T10:00:00+07:00[+07:00][u-ca=iso8601]"])),
             (json!({"kind": "zoned_datetime", "tick": "1"}), json!(["2026-01-01T10:00:00+09:00[!Asia/Tokyo][!u-ca=iso8601]"])),
+            // A time with an offset steps on its clock, and a fraction too long to read is left out.
+            (json!({"kind": "time", "tick": "3600", "offset": true}), json!(["10:00:00+05:30", "11:00:00+05:45"])),
+            (json!({"kind": "time", "tick": "60"}), json!(["00:00:01", "00:00:00.0000000000000000001", "00:01:01"])),
             (json!({"kind": "float", "exponent_bits": 11, "mantissa_bits": 52}), json!(["179769313486231570000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"])),
         ] {
             let values: Vec<Value> = values.as_array().unwrap().iter().map(|v| json!({"value": v})).collect();
