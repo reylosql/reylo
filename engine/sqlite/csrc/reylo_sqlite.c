@@ -15,7 +15,8 @@
 ** there. A host that lists the functions of its own SQLite (pragma_function_list) decides which
 ** functions exist: one it has and this build lacks gets a stub too, and one this build has and it
 ** lacks is refused. libSQL's vector functions and its vector_top_k, and the functions of the sqlean
-** extensions Turso Cloud loads, are on every replay, whatever the host lists (openLibsql).
+** extensions Turso Cloud loads, are on every replay, whatever the host lists, and Turso's own
+** engine's where the host lists it among the app's (openLibsql).
 */
 #include <stdio.h>
 #include <string.h>
@@ -941,10 +942,15 @@ static const struct TursoFunction { const char *zName; int nArg; char cKind; int
   /* sqlean's regexp */
   {"regexp", 2, 's', D}, {"regexp_capture", 2, 's', D}, {"regexp_capture", 3, 's', D},
   {"regexp_like", 2, 's', D}, {"regexp_replace", 3, 's', D}, {"regexp_substr", 2, 's', D},
-  /* Turso's own engine (@tursodatabase/database, 0.8.4), its in-tree extensions as its
-  ** pragma_function_list lists them, -1 where it takes any count and checks the count itself */
+};
+/* Turso's own engine (@tursodatabase/database, 0.8.4), its in-tree extensions as its
+** pragma_function_list lists them, -1 where it takes any count and checks the count itself:
+** registered only where the host lists Turso's engine among the app's (its `uuid4_str`, which
+** engine/native's SQLite program lists from the project's package.json), since no other SQLite
+** runs them, and `uuid7(seconds)` would otherwise pass for sqlean's `uuid7()`. */
+static const struct TursoFunction aTursoEngine[] = {
   {"uuid4_str", 0, 's', I}, {"uuid7", 1, 's', I}, {"uuid7_str", -1, 's', I},
-  {"fts_match", -1, 's', DI}, {"fts_score", -1, 's', DI}, {"fts_highlight", 4, 's', DI},
+  {"fts_match", -1, 's', DI}, {"fts_score", -1, 's', DI}, {"fts_highlight", -1, 's', DI},
   {"vector32_sparse", 1, 's', DI}, {"vector_concat", 2, 's', DI}, {"vector_slice", 3, 's', DI},
   {"vector_distance_dot", 2, 's', DI}, {"vector_distance_jaccard", 2, 's', DI},
   {"time_now", -1, 's', I}, {"time_date", -1, 's', DI}, {"time_get", -1, 's', DI},
@@ -969,6 +975,7 @@ static const struct TursoFunction { const char *zName; int nArg; char cKind; int
 static int isTursoFunction(const char *zName){
   int i;
   for(i=0; i<(int)(sizeof(aTurso)/sizeof(aTurso[0])); i++) if( sqlite3StrICmp(aTurso[i].zName, zName)==0 ) return 1;
+  for(i=0; i<(int)(sizeof(aTursoEngine)/sizeof(aTursoEngine[0])); i++) if( sqlite3StrICmp(aTursoEngine[i].zName, zName)==0 ) return 1;
   return 0;
 }
 
@@ -1072,8 +1079,9 @@ static sqlite3_module seriesModule = {
 };
 
 /* libSQL's functions and sqlean's, vector_top_k, generate_series and stats_seq on the replay, but a
-** name this build has its own function of: a scalar function or an aggregate, by its kind. */
-static void openLibsql(sqlite3_str *errors){
+** name this build has its own function of: a scalar function or an aggregate, by its kind; and
+** Turso's own engine's where the app runs it (`turso`). */
+static void openLibsql(sqlite3_str *errors, int turso){
   enum { N = sizeof(aTurso)/sizeof(aTurso[0]) };
   char aHas[N];
   int i, rc;
@@ -1086,6 +1094,11 @@ static void openLibsql(sqlite3_str *errors){
     if( f->cKind=='a' ) rc = sqlite3_create_function_v2(gDb, f->zName, f->nArg, f->flags, 0, 0, hostFunctionStub, hostFinalStub, 0);
     else rc = sqlite3_create_function_v2(gDb, f->zName, f->nArg, f->flags, 0, hostFunctionStub, 0, 0, 0);
     if( rc!=SQLITE_OK ) functionError(errors, f->zName);
+  }
+  /* This build has none of Turso's own, which are all scalar. */
+  for(i=0; turso && i<(int)(sizeof(aTursoEngine)/sizeof(aTursoEngine[0])); i++){
+    const struct TursoFunction *f = &aTursoEngine[i];
+    if( sqlite3_create_function_v2(gDb, f->zName, f->nArg, f->flags, 0, hostFunctionStub, 0, 0, 0)!=SQLITE_OK ) functionError(errors, f->zName);
   }
   if( sqlite3_create_module(gDb, "vector_top_k", &vectorTopKModule, 0)!=SQLITE_OK ) functionError(errors, "vector_top_k");
   if( sqlite3_create_module(gDb, "generate_series", &seriesModule, 0)!=SQLITE_OK ) functionError(errors, "generate_series");
@@ -1233,7 +1246,8 @@ static int openSchema(
   ** reported in errors as any failed step is ("not authorized"). */
   sqlite3_limit(gDb, SQLITE_LIMIT_ATTACHED, 0);
   installHooks(0);
-  openLibsql(errors);
+  for(i=0; i<nHost && sqlite3StrICmp(azHost[i], "uuid4_str")!=0; i++){}
+  openLibsql(errors, i<nHost);
   for(i=0; i<nFn; i++){
     /* Deterministic and innocuous: whatever the host's own flags, the replay accepts every place
     ** the host's schema could already call it from. */
@@ -1483,6 +1497,10 @@ void reylo_sqlite_free(char *p){ sqlite3_free(p); }
 
 /* The version of this SQLite, as "3.53.4": the one that prepares every statement the engine types. */
 const char *reylo_sqlite_version(void){ return sqlite3_libversion(); }
+
+/* Whether `zDdl` is an index of an access method SQLite doesn't have (methodIndex), for a host that
+** reads a file whose schema holds one. */
+int reylo_sqlite_method_index(const char *zDdl){ return methodIndex(zDdl); }
 
 #ifdef REYLO_SQLITE_MAIN
 /* reylo_sqlite_check <database file> <statements file>: the DDL of the file, one JSON line per statement. */

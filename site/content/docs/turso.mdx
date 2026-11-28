@@ -252,7 +252,7 @@ About the compat driver:
 - From 0.8 on, its errors carry no code. With [`.try()`](/docs/typescript#try), `code` is `undefined` and only `message` names the failure.
 - An integer past 2^53 comes back exact.
 
-Reylo types the SQL of Turso's own engine too. Index a table with `using fts`, and search it with `fts_match`:
+Reylo types the SQL of Turso's own engine too, with `@tursodatabase/database` in your `package.json`. Index a table with `using fts`, and search it with `fts_match`:
 
 ```sql
 create index docs_fts on docs using fts (title, body);

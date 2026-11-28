@@ -2288,11 +2288,11 @@ impl Analyzer<'_> {
             "regexp_replace" => Fact { ty: if scalar_name(&first.ty) == Some("text") { first.ty.clone() } else { Ty::Unknown }, non_null: first.non_null },
             // Turso's own engine (`csrc/reylo_sqlite.c`, `aTurso`), as `@tursodatabase/database`
             // 0.8.4 answers. Full-text search: a match is 1 or 0 and a score a real, whatever the
-            // arguments, a NULL among them included; a highlight is `''` for NULL text and NULL for
-            // a NULL query or marker.
+            // arguments, a NULL among them included. A highlight, `fts_highlight(cols…, open, close,
+            // query)`, skips a NULL text column and is NULL for a NULL marker or query.
             "fts_match" => done("integer", Nulls::Never),
             "fts_score" => done("real", Nulls::Never),
-            "fts_highlight" => Fact::new("text", args.iter().skip(1).all(|a| a.non_null)),
+            "fts_highlight" => Fact::new("text", args.len() >= 3 && args[args.len() - 3..].iter().all(|a| a.non_null)),
             // Its vectors: an error on a NULL argument, as libSQL's are. A dot product of vectors
             // with infinite components is NaN, which SQLite stores as NULL, and so is the Jaccard
             // distance of two zero vectors.
@@ -5147,14 +5147,29 @@ mod tests {
             // The schema replays without the indexes SQLite can't make, and says nothing of them.
             let plain = a("select id, body from docs where id = :id");
             assert_eq!((col(&plain, "id"), col(&plain, "body")), (("integer".into(), false), ("text".into(), false)));
+        }
+        // Turso's own functions are an app's that runs Turso's engine, and no other SQLite's: sqlean's
+        // `uuid7()` takes no seconds.
+        for extras in [Extras::default(), sqlite_host()] {
+            for sql in ["select fts_match(body, 'kiwi') as m from docs", "select uuid7(1) as u", "select time_unix(1) as t"] {
+                assert!(!analyze_ddl(sql, &turso_schema(), &extras).analysis.diagnostics.is_empty(), "{sql}");
+            }
+        }
+        {
+            let extras = turso_host(false);
+            let a = |sql: &str| {
+                let a = analyze_ddl(sql, &turso_schema(), &extras).analysis;
+                assert!(a.diagnostics.is_empty(), "{sql}: {:?}", a.diagnostics);
+                a
+            };
             // A default that calls one of Turso's functions: an insert runs it.
             let added = a("insert into users default values returning id, public_id");
             assert_eq!(col(&added, "public_id"), ("text".into(), false));
-            let search = a("select id, fts_score(title, body, :q) as score, fts_match(title, body, :q2) as hit, fts_highlight(body, :q3, '<b>', '</b>') as a, fts_highlight(title, 'kiwi', '<b>', '</b>') as b, fts_highlight(body, 'kiwi', :open, '</b>') as c from docs where fts_match(title, body, :q4) order by score desc");
+            let search = a("select id, fts_score(title, body, :q) as score, fts_match(title, body, :q2) as hit, fts_highlight(title, body, '<b>', '</b>', :q3) as a, fts_highlight(title, '<b>', '</b>', 'kiwi') as b, fts_highlight(body, :open, '</b>', 'kiwi') as c from docs where fts_match(title, body, :q4) order by score desc");
             assert_eq!(["score", "hit", "a", "b", "c"].map(|c| col(&search, c)), [("real", false), ("bool", false), ("text", false), ("text", false), ("text", false)].map(|(t, n)| (t.to_string(), n)));
             assert_eq!(["q", "q2", "q3", "q4", "open"].map(|p| param(&search, p)), ["text"; 5].map(String::from));
-            // A NULL query or marker makes the highlight NULL.
-            let nullable = a("select fts_highlight(body, title, '<b>', '</b>') as a from docs");
+            // A NULL query or marker makes the highlight NULL; a NULL text column is skipped.
+            let nullable = a("select fts_highlight(body, title, '</b>', 'kiwi') as a from docs");
             assert_eq!(col(&nullable, "a"), ("text".into(), true));
             let ids = a("select uuid4_str() as a, uuid7_str() as b, uuid7_str(:at) as c, uuid7(:at2) as d, gen_random_uuid() as e");
             assert_eq!(["a", "b", "c", "d", "e"].map(|c| col(&ids, c)), [("text", false), ("text", false), ("text", false), ("blob", true), ("text", false)].map(|(t, n)| (t.to_string(), n)));

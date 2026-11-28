@@ -300,7 +300,7 @@ test("the check reads a call of a sqlean function as one of char, outside string
 test("the sqlean functions the driver check lets through are the ones the engine knows", () => {
   const walker = readFileSync(new URL("../engine/sqlite/csrc/reylo_sqlite.c", import.meta.url), "utf8");
   const table = walker.slice(walker.indexOf("aTurso[] = {"), walker.indexOf("};", walker.indexOf("aTurso[] = {")));
-  const sqleans = table.slice(table.indexOf("/* sqlean's"), table.indexOf("/* Turso's own engine"));
+  const sqleans = table.slice(table.indexOf("/* sqlean's"));
   const sqlean = [...sqleans.matchAll(/\{"([a-z0-9_]+)",/g)].map((m) => m[1]!);
   assert.ok(sqlean.length > 100, `${sqlean.length}`);
   assert.deepEqual(sqlean.filter((name) => !SQLEAN_FUNCTIONS.has(name)), []);
@@ -337,7 +337,7 @@ async function tursoConnect(path: string): Promise<TursoDb> {
 // parameters it takes. Every value Turso's engine answers must be of the type the type check infers.
 const TURSO_CALLS: [string, Record<string, unknown>?][] = [
   ["uuid4()"], ["uuid7()"], ["uuid4_str()"], ["uuid7_str()"], ["uuid7_str(:at)", { at: 1700000000 }], ["uuid7(:at)", { at: 1700000000 }], ["gen_random_uuid()"],
-  ["fts_match(title, body, :q)", { q: "kiwi" }], ["fts_score(title, body, :q)", { q: "kiwi" }], ["fts_highlight(body, :q, '<b>', '</b>')", { q: "kiwi" }], ["fts_highlight(title, 'kiwi', '<b>', '</b>')"],
+  ["fts_match(title, body, :q)", { q: "kiwi" }], ["fts_score(title, body, :q)", { q: "kiwi" }], ["fts_highlight(title, body, '<b>', '</b>', :q)", { q: "kiwi" }], ["fts_highlight(title, '<b>', '</b>', 'kiwi')"], ["fts_highlight(body, title, '</b>', 'kiwi')"],
   ["vector32_sparse(:v)", { v: "[1,0,2]" }], ["vector_concat(vector(:v), vector(:w))", { v: "[1,2]", w: "[3]" }], ["vector_slice(vector(:v), :from, 2)", { v: "[1,2,3]", from: 0 }],
   ["vector_distance_dot(vector(:v), vector(:w))", { v: "[1,2]", w: "[3,4]" }], ["vector_distance_jaccard(vector(:v), vector(:w))", { v: "[1,2]", w: "[3,4]" }],
   ["time_now()"], ["time_date(2024, 1, 2, 3, 4, 5)"], ["time_date(:year, 1, 1)", { year: 300000 }], ["body regexp :re", { re: "(" }], ["time_get(time_now(), :field)", { field: "second" }], ["time_get(time_now(), :field)", { field: "year" }], ["time_get(time_now(), 'second')"], ["time_get(time_now(), 'epoch')"], ["time_get(time_now(), 'year')"],
@@ -377,6 +377,8 @@ test("a file Turso's own engine made is read, full-text index and all, and its f
         assert.ok(allowed.includes(String(t)), `${call}: typed ${column.type.kind}${column.nullable ? " or null" : ""}, Turso answers ${t}`);
       }
     }
+    // A highlight marks the match, in each text column, the query last.
+    assert.deepEqual((await db.prepare("select fts_highlight(title, body, '[', ']', :q) as h from docs order by id").all({ q: "kiwi" })).map((r) => r.h), ["[kiwi] apple pie", "[kiwi] and banana"]);
     // `uuid4()` and `uuid7()` are bytes on Turso's own engine.
     for (const call of ["uuid4()", "uuid7()"]) assert.equal((await typed(`select ${call} as v`)).columns[0]!.type.kind, "bytes");
   } finally {
@@ -385,7 +387,7 @@ test("a file Turso's own engine made is read, full-text index and all, and its f
   }
   // Every function of Turso's the engine knows is held to Turso's answers above.
   const walker = readFileSync(new URL("../engine/sqlite/csrc/reylo_sqlite.c", import.meta.url), "utf8");
-  const table = walker.slice(walker.indexOf("/* Turso's own engine"), walker.indexOf("};", walker.indexOf("aTurso[] = {")));
+  const table = walker.slice(walker.indexOf("aTursoEngine[] = {"), walker.indexOf("};", walker.indexOf("aTursoEngine[] = {")));
   const known = new Set([...table.matchAll(/\{"([a-z0-9_]+)",/g)].map((m) => m[1]!));
   assert.ok(known.size > 40, `${known.size}`);
   assert.deepEqual([...known].filter((name) => !TURSO_CALLS.some(([call]) => call.includes(`${name}(`))), []);

@@ -65,7 +65,7 @@ impl Session {
 
     pub fn analyze(&mut self, sql: &str) -> Result<reylo_engine_core::api::Analysis, crate::Failure> {
         let db = self.connection.file.open().map_err(|e| crate::Failure::Unreachable(e.to_string()))?;
-        answers::analyze(&db, sql, &mut self.connection.answers).map_err(|e| crate::Failure::Error(e.to_string()))
+        answers::analyze_with(&db, sql, &mut self.connection.answers, &self.connection.functions).map_err(|e| crate::Failure::Error(e.to_string()))
     }
 }
 
@@ -343,13 +343,25 @@ fn turso_schema(e: &rusqlite::Error) -> bool {
     matches!(e, rusqlite::Error::SqliteFailure(_, Some(m)) if m.starts_with("malformed database schema (") && m.ends_with("near \"USING\": syntax error"))
 }
 
-/// Reads the schema past the rows SQLite can't parse: with the schema writable, it keeps every row
-/// it can read, and the engine's catalog query still lists each row's DDL
+/// The tables, views and indexes `sqlite_schema` lists that SQLite didn't read, as it skips a row it
+/// can't parse once the schema is writable: each one's name and DDL. (A trigger has no list to hold
+/// it to; one that didn't parse is reported by the replay, if a statement it fires on fails.)
+const UNREAD_QUERY: &str = "select name, sql from sqlite_schema s where sql is not null and ((type in ('table', 'view') and not exists (select 1 from pragma_table_list t where t.schema = 'main' and t.name = s.name)) or (type = 'index' and not exists (select 1 from pragma_index_list(s.tbl_name) i where i.name = s.name)))";
+
+/// Reads the schema past Turso's own rows: with the schema writable, SQLite keeps every row it can
+/// parse, and the engine's catalog query still lists each row's DDL
 /// ([`DDL_QUERY`](crate::engines::sqlite::sqlite::DDL_QUERY)), whose replay leaves such an index out.
-/// The connection never writes: the file is opened read-only, and a held file's copy is only read.
+/// Every other row it can't parse is refused as SQLite refuses it, so a schema broken some other way
+/// stays refused. The connection never writes: the file is opened read-only, and a held file's copy
+/// is only read.
 fn allow_unreadable_rows(db: &Db) -> rusqlite::Result<()> {
     db.set_db_config(rusqlite::config::DbConfig::SQLITE_DBCONFIG_WRITABLE_SCHEMA, true)?;
-    Ok(())
+    let mut stmt = db.prepare(UNREAD_QUERY)?;
+    let unread = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    match unread.into_iter().find(|(_, sql)| !crate::engines::sqlite::sqlite_tree::method_index(sql)) {
+        Some((name, _)) => Err(rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CORRUPT), Some(format!("malformed database schema ({name})")))),
+        None => Ok(()),
+    }
 }
 
 /// Reads `db`'s schema, past Turso's own rows where SQLite refuses it over them ([`turso_schema`]).
@@ -422,6 +434,31 @@ mod tests {
     /// process, so a connection of another test lends this one's cache room, and a transaction
     /// meant to spill its pages into the file spills none.
     static TURNS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn a_schema_is_read_past_turso_s_own_index_rows_and_no_other_row_sqlite_cannot_parse() {
+        let _turn = TURNS.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("reylo-sqlite-turso-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // The rows Turso's own engine writes for a full-text index, and `more` after them.
+        let file = |name: &str, more: &[&str]| {
+            let path = dir.join(format!("{name}.db"));
+            let _ = std::fs::remove_file(&path);
+            let db = Db::open(&path).unwrap();
+            db.execute_batch("create table docs (id integer primary key, body text not null)").unwrap();
+            db.set_db_config(rusqlite::config::DbConfig::SQLITE_DBCONFIG_WRITABLE_SCHEMA, true).unwrap();
+            for sql in ["CREATE INDEX docs_fts ON docs USING fts (body)"].iter().chain(more) {
+                db.execute("insert into sqlite_schema values ('index', ?1, 'docs', 0, ?2)", [sql.split_whitespace().nth(2).unwrap(), sql]).unwrap();
+            }
+            path.to_str().unwrap().to_string()
+        };
+        let analysis = Session::open(&file("fts", &[]), &dir).unwrap().analyze("select id, body from docs").unwrap();
+        assert!(analysis.diagnostics.is_empty(), "{:?}", analysis.diagnostics);
+        // A row SQLite can't parse for any other reason is still a schema it refuses.
+        let Err(e) = Session::open(&file("broken", &["CREATE INDEX docs_broken ON docs (body"]), &dir) else { panic!("a broken index read") };
+        assert!(e.to_string().contains("malformed database schema (docs_broken)"), "{e}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn an_insert_into_a_table_declaring_on_conflict_replace_reaches_what_its_delete_cascades_to() {
