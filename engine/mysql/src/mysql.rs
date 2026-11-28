@@ -1604,7 +1604,7 @@ fn bit_results(q: &Query, raw: &MysqlDescribe, views: Option<&HashSet<String>>, 
             found.extend(of.into_iter().filter(|e| !matches!(e, Expr::Value(_))).map(|e| (i, e)));
         }
     }
-    let prepared = prepare_each(q, select, &found, host)?;
+    let prepared = prepare_each(q, &[(select, found.clone())], host)?.pop().unwrap_or_default();
     bits.extend(found.iter().zip(&prepared).filter(|(_, p)| match p {
         Prepared::Column(c) => c.r#type == BIT,
         Prepared::Silent => false,
@@ -1652,43 +1652,62 @@ enum Prepared {
     Refused,
 }
 
-/// What the server prepares each of `exprs`, expressions of `select`'s list, as: each a column of
-/// a statement over the same rows, which names its type. The ones that call an aggregate are
-/// prepared in one statement, grouped as the query is or not at all, the others in another, not
-/// grouped. In the order of `exprs`.
-fn prepare_each(q: &Query, select: &Select, exprs: &[(usize, &Expr)], host: &Host) -> Lazy<Vec<Prepared>> {
-    let mut out: Vec<Option<Prepared>> = exprs.iter().map(|_| None).collect();
-    for aggregated in [false, true] {
-        let part: Vec<usize> = (0..exprs.len()).filter(|&k| calls_aggregate(exprs[k].1) == aggregated).collect();
-        if part.is_empty() {
-            continue;
-        }
-        let mut probe = select.clone();
-        probe.projection = part.iter().map(|&k| SelectItem::UnnamedExpr(exprs[k].1.clone())).collect();
-        probe.having = None;
-        probe.distinct = None;
-        let with = q.with.as_ref().map(|w| format!("{w} ")).unwrap_or_default();
-        // An expression that reads a key beside an aggregate (`sum(v) * k`) prepares only under
-        // the query's own GROUP BY, and one whose key is an alias or a position of the select list
-        // only without it: under it first, for the expressions that aggregate.
-        let grouped = format!("{with}{probe}");
-        probe.group_by = GroupByExpr::Expressions(Vec::new(), Vec::new());
-        let ungrouped = format!("{with}{probe}");
-        let mut outcome = host.describe(if aggregated { &grouped } else { &ungrouped })?;
-        if aggregated && outcome.is_err() && ungrouped != grouped {
-            outcome = host.describe(&ungrouped)?;
-        }
-        match outcome {
-            Ok(d) if d.columns.len() == part.len() => {
-                for (&k, c) in part.iter().zip(d.columns) {
-                    out[k] = Some(Prepared::Column(c));
-                }
+/// What the server prepares each expression of each group as, each group a SELECT and expressions
+/// of its list: each a column of a statement over the same rows, which names its type. A group's
+/// expressions that call an aggregate are prepared in one statement, grouped as the query is or
+/// not at all, the others in another, not grouped. Every statement is asked in one round, and the
+/// retries in one more. In the order of the groups and of their expressions.
+fn prepare_each(q: &Query, groups: &[(&Select, Vec<(usize, &Expr)>)], host: &Host) -> Lazy<Vec<Vec<Prepared>>> {
+    struct Part {
+        group: usize,
+        members: Vec<usize>,
+        aggregated: bool,
+        grouped: String,
+        ungrouped: String,
+    }
+    let with = q.with.as_ref().map(|w| format!("{w} ")).unwrap_or_default();
+    let mut parts = Vec::new();
+    for (group, (select, exprs)) in groups.iter().enumerate() {
+        for aggregated in [false, true] {
+            let members: Vec<usize> = (0..exprs.len()).filter(|&k| calls_aggregate(exprs[k].1) == aggregated).collect();
+            if members.is_empty() {
+                continue;
             }
-            Ok(_) => part.iter().for_each(|&k| out[k] = Some(Prepared::Silent)),
-            Err(_) => part.iter().for_each(|&k| out[k] = Some(Prepared::Refused)),
+            let mut probe = (*select).clone();
+            probe.projection = members.iter().map(|&k| SelectItem::UnnamedExpr(exprs[k].1.clone())).collect();
+            probe.having = None;
+            probe.distinct = None;
+            // An expression that reads a key beside an aggregate (`sum(v) * k`) prepares only under
+            // the query's own GROUP BY, and one whose key is an alias or a position of the select
+            // list only without it: under it first, for the expressions that aggregate.
+            let grouped = format!("{with}{probe}");
+            probe.group_by = GroupByExpr::Expressions(Vec::new(), Vec::new());
+            let ungrouped = format!("{with}{probe}");
+            parts.push(Part { group, members, aggregated, grouped, ungrouped });
         }
     }
-    Some(out.into_iter().map(|p| p.expect("every expression is prepared")).collect())
+    let asked: Vec<_> = parts.iter().map(|p| host.describe(if p.aggregated { &p.grouped } else { &p.ungrouped })).collect();
+    let mut outcomes = asked.into_iter().collect::<Option<Vec<_>>>()?;
+    let retried: Vec<_> = parts.iter().zip(&outcomes).map(|(p, o)| (p.aggregated && o.is_err() && p.ungrouped != p.grouped).then(|| host.describe(&p.ungrouped))).collect();
+    for (k, retry) in retried.into_iter().enumerate() {
+        if let Some(retry) = retry {
+            outcomes[k] = retry?;
+        }
+    }
+    let mut out: Vec<Vec<Option<Prepared>>> = groups.iter().map(|(_, exprs)| exprs.iter().map(|_| None).collect()).collect();
+    for (p, outcome) in parts.iter().zip(outcomes) {
+        let slots = &mut out[p.group];
+        match outcome {
+            Ok(d) if d.columns.len() == p.members.len() => {
+                for (&k, c) in p.members.iter().zip(d.columns) {
+                    slots[k] = Some(Prepared::Column(c));
+                }
+            }
+            Ok(_) => p.members.iter().for_each(|&k| slots[k] = Some(Prepared::Silent)),
+            Err(_) => p.members.iter().for_each(|&k| slots[k] = Some(Prepared::Refused)),
+        }
+    }
+    Some(out.into_iter().map(|g| g.into_iter().map(|p| p.expect("every expression is prepared")).collect()).collect())
 }
 
 /// The positions of the columns that may hold a YEAR cut to its low byte ([`merges_year`]): the
@@ -1730,6 +1749,7 @@ fn cut_years(parsed: Option<&Statement>, raw: &MysqlDescribe, views: Option<&Has
         return Some(untraced());
     }
     let mut cut = Vec::new();
+    let mut groups: Vec<(&Select, Vec<(usize, &Expr)>)> = Vec::new();
     for select in selects {
         let mut found: Vec<(usize, &Expr)> = Vec::new();
         for &i in &candidates {
@@ -1743,8 +1763,11 @@ fn cut_years(parsed: Option<&Statement>, raw: &MysqlDescribe, views: Option<&Has
                 _ => {}
             }
         }
-        let prepared = prepare_each(q, select, &found, host)?;
-        cut.extend(found.iter().zip(&prepared).filter(|(_, p)| match p {
+        groups.push((select, found));
+    }
+    let prepared = prepare_each(q, &groups, host)?;
+    for ((_, found), prepared) in groups.iter().zip(&prepared) {
+        cut.extend(found.iter().zip(prepared).filter(|(_, p)| match p {
             Prepared::Column(c) => c.r#type == YEAR || reached && c.r#type == TINY && computed(c, views),
             Prepared::Silent => false,
             Prepared::Refused => reached,
@@ -5048,6 +5071,9 @@ mod tests {
         // Each side of a UNION is followed to its values.
         assert_eq!(ty("select y as v from x union all select ti from x", &some), "unknown");
         assert_eq!(ty("select ti as v from x union all select tu from x", &some), "tinyint");
+        // Every side is prepared in one round, so a long UNION settles.
+        let long = vec!["select ti as v from x"; 40].join(" union all ");
+        assert_eq!(ty(&long, &some), "tinyint");
         // A YEAR among the values is found whatever the session holds, where a column computed
         // elsewhere is cut only where a YEAR may reach it; a server that merges them into a
         // SMALLINT cuts nothing.
