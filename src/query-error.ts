@@ -360,13 +360,17 @@ function mysqlNames(errno: number, message: string) {
     case 1364: // ER_NO_DEFAULT_FOR_FIELD
       if ((m = /^Field '([\s\S]*)' doesn't have a default value$/.exec(message))) names.column = m[1];
       break;
+    // A value no column holds, as a cast's, is named `(null)`. A column's name may hold any text,
+    // so it is read between the message's fixed words; where the value comes first, as it may hold
+    // the same words, the column is the last match (`oracle/src/errors.rs` reads them alike).
     case 1264: // ER_WARN_DATA_OUT_OF_RANGE
     case 1265: // WARN_DATA_TRUNCATED
+    case 1406: // ER_DATA_TOO_LONG
+      if ((m = /^(?:Out of range value|Data truncated|Data too long) for column '([\s\S]*)' at row \d+$/.exec(message)) && m[1] !== "(null)") names.column = m[1];
+      break;
     case 1292: // ER_TRUNCATED_WRONG_VALUE
     case 1366: // ER_TRUNCATED_WRONG_VALUE_FOR_FIELD
-    case 1406: // ER_DATA_TOO_LONG
-      // A value no column holds, as a cast's, is named `(null)`.
-      if ((m = / for column '([\s\S]*)' at row \d+$/.exec(message)) && m[1] !== "(null)") names.column = m[1];
+      if ((m = /^[\s\S]* for column '([\s\S]*)' at row \d+$/.exec(message)) && m[1] !== "(null)") names.column = m[1];
       break;
   }
   return { key: names.key, constraint: names.constraint, table: names.table, column: names.column };

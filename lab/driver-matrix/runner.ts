@@ -92,7 +92,7 @@ add({ id: "node:sqlite@24", bin: NODE24, file: "drivers/sync-sqlite.ts", args: [
 add({ id: "bun:sqlite", bin: BUN, file: "drivers/sync-sqlite.ts", args: ["--lib", "bun:sqlite"], sqlite: true, meta: { pkg: "bun:sqlite", version: "1.4.4", target: "SQLite file", runtime: "bun" } });
 add({ id: "bun-sql-sqlite", bin: BUN, file: "drivers/bunsql.ts", args: ["--adapter", "sqlite"], sqlite: true, meta: { pkg: "Bun.sql (sqlite)", version: "1.4.4", target: "SQLite file", runtime: "bun" } });
 for (const [alias, v] of [["libsql-017", "0.17.4"], ["libsql-018", "0.18.0"], ["libsql-015", "0.15.15"], ["libsql-014", "0.14.0"]]) add({ id: `libsql@${v}`, bin: NODE26, file: "drivers/libsql.ts", args: ["--pkg", alias, "--version", v], sqlite: true, meta: { pkg: "@libsql/client", version: v, target: "SQLite file (file: URL)", runtime: n26 } });
-for (const [alias, v] of [["turso-08", "0.8.3"], ["turso-07", "0.7.2"], ["turso-06", "0.6.1"], ["turso-04", "0.4.4"]]) {
+for (const [alias, v] of [["turso-08", "0.8.3"], ["turso-07", "0.7.2"], ["turso-06", "0.6.1"]]) {
   add({ id: `turso@${v}`, bin: NODE26, file: "drivers/turso.ts", args: ["--pkg", alias, "--version", v, "--api", "promise"], sqlite: true, meta: { pkg: "@tursodatabase/database", version: v, target: "SQLite file (Turso's engine)", runtime: n26 } });
   add({ id: `turso-compat@${v}`, bin: NODE26, file: "drivers/turso.ts", args: ["--pkg", alias, "--version", v, "--api", "compat"], sqlite: true, meta: { pkg: "@tursodatabase/database/compat", version: v, target: "SQLite file (Turso's engine)", runtime: n26 } });
 }

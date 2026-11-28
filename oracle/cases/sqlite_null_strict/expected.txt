@@ -1,0 +1,22 @@
+between_bound.sql: many () -> { name: TEXT(text(UTF-8, ill-formed) | bytes), score: REAL(float(11,52) | text(UTF-8, ill-formed) | bytes) }
+bitwise.sql: many () -> { name: TEXT(text(UTF-8, ill-formed) | bytes), flags: INTEGER(int64 | float(11,52) | text(UTF-8, ill-formed) | bytes) }
+comparison.sql: many () -> { name: TEXT(text(UTF-8, ill-formed) | bytes), score: REAL(float(11,52) | text(UTF-8, ill-formed) | bytes) }
+concat_ws_value.sql: many () -> { name: TEXT(text(UTF-8, ill-formed) | bytes)?, email: TEXT(text(UTF-8, ill-formed) | bytes)? }
+date.sql: many () -> { name: TEXT(text(UTF-8, ill-formed) | bytes), born: TEXT(text(UTF-8, ill-formed) | bytes) }
+date_modifier.sql: many () -> { name: TEXT(text(UTF-8, ill-formed) | bytes), born: TEXT(text(UTF-8, ill-formed) | bytes) }
+in_member.sql: many () -> { name: TEXT(text(UTF-8, ill-formed) | bytes)?, score: REAL(float(11,52) | text(UTF-8, ill-formed) | bytes)? }
+json_arrow.sql: many () -> { name: TEXT(text(UTF-8, ill-formed) | bytes), doc: TEXT(text(UTF-8, ill-formed) | bytes) }
+json_extract.sql: many () -> { name: TEXT(text(UTF-8, ill-formed) | bytes), doc: TEXT(text(UTF-8, ill-formed) | bytes) }
+json_path.sql: many () -> { name: TEXT(text(UTF-8, ill-formed) | bytes), email: TEXT(text(UTF-8, ill-formed) | bytes) }
+json_paths.sql: many () -> { name: TEXT(text(UTF-8, ill-formed) | bytes)?, email: TEXT(text(UTF-8, ill-formed) | bytes)? }
+json_set_path.sql: many () -> { name: TEXT(text(UTF-8, ill-formed) | bytes)?, email: TEXT(text(UTF-8, ill-formed) | bytes)? }
+math.sql: many () -> { name: TEXT(text(UTF-8, ill-formed) | bytes), score: REAL(float(11,52) | text(UTF-8, ill-formed) | bytes) }
+not_between_bound.sql: many () -> { name: TEXT(text(UTF-8, ill-formed) | bytes)?, score: REAL(float(11,52) | text(UTF-8, ill-formed) | bytes)? }
+not_json_valid.sql: many () -> { name: TEXT(text(UTF-8, ill-formed) | bytes)?, doc: TEXT(text(UTF-8, ill-formed) | bytes)? }
+not_like.sql: many () -> { name: TEXT(text(UTF-8, ill-formed) | bytes), email: TEXT(text(UTF-8, ill-formed) | bytes) }
+nullif_first.sql: many () -> { name: TEXT(text(UTF-8, ill-formed) | bytes), email: TEXT(text(UTF-8, ill-formed) | bytes) }
+nullif_second.sql: many () -> { name: TEXT(text(UTF-8, ill-formed) | bytes)?, email: TEXT(text(UTF-8, ill-formed) | bytes)? }
+printf_format.sql: many () -> { name: TEXT(text(UTF-8, ill-formed) | bytes), email: TEXT(text(UTF-8, ill-formed) | bytes) }
+printf_value.sql: many () -> { name: TEXT(text(UTF-8, ill-formed) | bytes)?, email: TEXT(text(UTF-8, ill-formed) | bytes)? }
+scalar_max.sql: many () -> { name: TEXT(text(UTF-8, ill-formed) | bytes), score: REAL(float(11,52) | text(UTF-8, ill-formed) | bytes) }
+unhex.sql: many () -> { name: TEXT(text(UTF-8, ill-formed) | bytes), email: TEXT(text(UTF-8, ill-formed) | bytes) }

@@ -559,6 +559,27 @@ test("a session's connection reads libpq's variables as the session started, so 
   }
 });
 
+test("a project whose env file names its database by PGDATABASE analyzes that database, as an app that loads the file connects to it", { skip: live }, async () => {
+  const first = await postgresDatabase("reylo_envfile_first", "create table t (v int not null)");
+  const root = mkdtempSync(join(tmpdir(), "reylo-env-file-"));
+  writeFileSync(join(root, "package.json"), "{}");
+  // The URL names the server alone; the file names the database, as libpq reads PGDATABASE.
+  const server = new URL(first.url);
+  server.pathname = "/";
+  writeFileSync(join(root, ".env"), `DATABASE_URL=${server.href}\nPGDATABASE=${new URL(first.url).pathname.slice(1)}\n`);
+  const session = await Session.open(root, {});
+  try {
+    const typed = await session.analyze("select v from t");
+    assert.ok(typed.ok, typed.ok ? "" : typed.message);
+    assert.ok(!typed.analysis.columns[0]!.nullable);
+    assert.match(session.project.urlSource, /^DATABASE_URL in \.env, PGDATABASE in \.env$/);
+    assert.match(session.where(), /\/reylo_envfile_first_\d+$/);
+  } finally {
+    await session.close();
+    await first.drop();
+  }
+});
+
 test("on a server, a URL that fails reads that server's own entry and no other's, and a build says once that it reads reylo/.cache/ unchecked", { skip: live }, async (t) => {
   const { url, sql, drop } = await postgresDatabase("reylo_offline", "create table users (id int primary key, email text not null)");
   // Another database on the same server, whose users differ.
@@ -1049,6 +1070,79 @@ test("the Postgres fingerprint runs on the server, holds while nothing changes, 
       assert.equal(await fingerprint(), last, change);
     }
   } finally {
+    await own.drop();
+  }
+});
+
+test("on Postgres, a statement that names a schema the role may not use is refused at the name, with the server's error, once the cached analysis no longer holds", { skip: live }, async () => {
+  const own = await postgresDatabase("reylo_usage", "create schema s; create table s.t (id int primary key, v text)");
+  const role = `reylo_usage_${process.pid}`;
+  const root = mkdtempSync(join(tmpdir(), "reylo-usage-"));
+  writeFileSync(join(root, "package.json"), "{}");
+  const url = new URL(own.url);
+  url.username = role;
+  const sql = "select v from s.t where id = :id";
+  try {
+    await own.sql.unsafe(`drop role if exists ${role}; create role ${role} login; grant usage on schema s to ${role}; grant select on s.t to ${role}`);
+    const typed = await analyze(root, { DATABASE_URL: url.href }, sql);
+    assert.ok(typed.ok);
+    assert.deepEqual(typed.analysis.diagnostics, []);
+    // The catalog's lookups of s.t are refused too, and say nothing of their own.
+    await own.sql.unsafe(`revoke usage on schema s from ${role}`);
+    const refused = await analyze(root, { DATABASE_URL: url.href }, sql);
+    assert.ok(refused.ok);
+    assert.equal(refused.source, "database");
+    assert.deepEqual(refused.analysis.diagnostics.map((d) => [d.message, sql.slice(d.start, d.start + d.length)]), [["permission denied for schema s (42501)", "s.t"]]);
+  } finally {
+    await own.sql.unsafe(`drop owned by ${role}; drop role ${role}`).catch(() => {});
+    await own.drop();
+  }
+});
+
+test("on Postgres, a view over a schema the role may not use is typed for the role, which reads it through the view", { skip: live }, async () => {
+  const own = await postgresDatabase("reylo_usage_view", "create schema private; create table private.todos (id int primary key, title text not null); create schema api; create view api.todos as select id, title from private.todos");
+  const role = `reylo_usage_view_${process.pid}`;
+  const root = mkdtempSync(join(tmpdir(), "reylo-usage-view-"));
+  writeFileSync(join(root, "package.json"), "{}");
+  const url = new URL(own.url);
+  url.username = role;
+  try {
+    await own.sql.unsafe(`drop role if exists ${role}; create role ${role} login; grant usage on schema api to ${role}; grant select on api.todos to ${role}`);
+    // The view's definition names private.todos, whose lookups by name the role is refused: what
+    // they would have said is left unknown. Named by its schema, or found on the search path, which
+    // reads the view's own definition too.
+    await own.sql.unsafe(`alter role ${role} set search_path = api, public`);
+    for (const sql of ["select id, title from api.todos where id = :id", "select id, title from todos where id = :id"]) {
+      const typed = await analyze(root, { DATABASE_URL: url.href }, sql);
+      assert.ok(typed.ok, sql);
+      assert.deepEqual(typed.analysis.diagnostics, [], sql);
+      assert.deepEqual(typed.analysis.columns.map((c) => c.name), ["id", "title"], sql);
+    }
+  } finally {
+    await own.sql.unsafe(`drop owned by ${role}; drop role ${role}`).catch(() => {});
+    await own.drop();
+  }
+});
+
+test("on Postgres, a role refused a function of the catalog's fails the analysis, saying what it lacks, rather than going on without what the function would have said", { skip: live }, async () => {
+  const own = await postgresDatabase("reylo_catalog_grant", "create table items (id int primary key, title text not null); create schema hidden; create table hidden.items (id int primary key, title text not null)");
+  const role = `reylo_catalog_grant_${process.pid}`;
+  const root = mkdtempSync(join(tmpdir(), "reylo-catalog-grant-"));
+  writeFileSync(join(root, "package.json"), "{}");
+  const url = new URL(own.url);
+  url.username = role;
+  try {
+    await own.sql.unsafe(`drop role if exists ${role}; create role ${role} login; grant select on items to ${role}; revoke execute on function pg_catalog.to_regclass(text) from public`);
+    const failed = await analyze(root, { DATABASE_URL: url.href }, "select title from items where id = :id");
+    assert.ok(!failed.ok);
+    assert.match(failed.message, /^The type check's role may not use part of the catalog the analysis reads: permission denied for function to_regclass \(42501\)\. Grant it, or run the type check as a role that may/);
+    // Asking which schemas the role may not use, after a schema's refusal, is reading the catalog too.
+    await own.sql.unsafe(`grant execute on function pg_catalog.to_regclass(text) to public; revoke execute on function pg_catalog.has_schema_privilege(oid, text) from public`);
+    const unasked = await analyze(root, { DATABASE_URL: url.href }, "select title from hidden.items where id = :id");
+    assert.ok(!unasked.ok);
+    assert.match(unasked.message, /^The type check's role may not use part of the catalog the analysis reads: permission denied for function has_schema_privilege \(42501\)\. Grant it, or run the type check as a role that may/);
+  } finally {
+    await own.sql.unsafe(`grant execute on function pg_catalog.to_regclass(text) to public; grant execute on function pg_catalog.has_schema_privilege(oid, text) to public; drop owned by ${role}; drop role ${role}`).catch(() => {});
     await own.drop();
   }
 });

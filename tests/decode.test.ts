@@ -380,7 +380,7 @@ function pglite(db: Db, instance: Record<number, Parser> | undefined) {
   return lite;
 }
 
-test("PGlite: per-query parsers that name the statement's oids, every oid the instance parses on a first run; a transaction too", async () => {
+test("PGlite: per-query parsers that name the statement's oids and json arrays, every oid the instance parses on a first run; a transaction too", async () => {
   const db = database();
   // The instance's table: the app's parsers, and PGlite's array parsers built at start.
   const instance: Record<number, Parser> = { ...appTable, 1082: (x) => new Date(x), 1184: (x) => new Date(x), [POSINT_ARR]: (x) => parseArray(x, String), [ROLE]: (x) => x.toUpperCase() };
@@ -391,7 +391,8 @@ test("PGlite: per-query parsers that name the statement's oids, every oid the in
   const first = Object.keys(lite.seen[0]!).map(Number);
   assert.ok(first.includes(20) && first.includes(1082) && first.includes(POSINT_ARR) && first.includes(ROLE), "a first run names every oid the instance parses");
   await execute(lite as never, q, { id: 1 });
-  assert.deepEqual(Object.keys(lite.seen[1]!).map(Number).sort(), COLUMNS.map(([, oid]) => oid).filter((o, i, all) => all.indexOf(o) === i).sort(), "a later run names only the statement's oids");
+  // A later one names the statement's oids, and json[] and jsonb[], whose elements the instance's parser would decode itself, even where another search_path changes a result.
+  assert.deepEqual(Object.keys(lite.seen[1]!).map(Number).sort(), [...new Set([...COLUMNS.map(([, oid]) => oid), 199, 3807])].sort(), "a later run names the statement's oids, and json[] and jsonb[]");
   // A transaction exposes no table; what it does not name went through the instance's parser, and is decoded from what it gave.
   const [inTx] = (await execute(pglite(db, undefined) as never, { ...built, sql: "select * from probe where id = :id -- tx" }, { id: 1 })) as Record<string, unknown>[];
   same(inTx, declared);
@@ -570,4 +571,22 @@ test("a Postgres array column holds one dimension, and an array the statement bu
   await assert.rejects(async () => execute(client([{ s: [[null]], m: null }]), segments, { id: 1 }), /Column "s" holds an array of 2 dimensions/);
   const docs: QueryModule<"postgres"> = { ...probe, columns: [["docs", "json[]"]] };
   assert.deepEqual(await execute(client([{ docs: [[[1], { a: [2] }]] }]), docs, { id: 1 }), [{ docs: [[[1], { a: [2] }]] }]);
+  // An array a row value's field holds is held to the field's kind, in a column of rows, an array of them and a row inside a row.
+  const pair = `(${JSON.stringify(["a", "int"])},${JSON.stringify(["b", "int[]"])})`;
+  const rows: QueryModule<"postgres"> = { ...probe, columns: [["p", pair], ["ps", `${pair}[]`], ["outer", `(${JSON.stringify(["inner", pair])})`]] };
+  const plain = { p: { a: 1, b: [1, 2] }, ps: [{ a: 1, b: [3] }, null], outer: { inner: { a: 1, b: null } } };
+  assert.deepEqual(await execute(client([plain]), rows, { id: 1 }), [plain]);
+  await assert.rejects(async () => execute(client([{ ...plain, p: { a: 1, b: [[1, 2]] } }]), rows, { id: 1 }), /^TypeError: Column "p" holds, in its row value's field "b", an array of 2 dimensions, and its type has one:/);
+  // A field of a row inside an array is read off the column only once the row is, so the error offers no field to select.
+  await assert.rejects(async () => execute(client([{ ...plain, ps: [null, { a: 1, b: [[3]] }] }]), rows, { id: 1 }), /Column "ps" holds, in its row value's field "b", an array of 2 dimensions, and its type has one: [^]* doesn't enforce\. Set allow_nested_arrays: true/);
+  await assert.rejects(async () => execute(client([{ ...plain, outer: { inner: { a: 1, b: [[[1]]] } } }]), rows, { id: 1 }), /Column "outer" holds, in its row value's field "inner\.b", an array of 3 dimensions/);
+  // The field to select is written with each name quoted, a keyword or mixed case included.
+  const quoted: QueryModule<"postgres"> = { ...probe, columns: [["row", `(${JSON.stringify(["B", "int[]"])})`]] };
+  await assert.rejects(async () => execute(client([{ row: { B: [[1]] } }]), quoted, { id: 1 }), /Select to_jsonb\(\("row"\)\."B"\) to read that field as JSON/);
+  // Of two fields or columns of one name the row holds the last one's value, which only its own kind holds to its dimensions.
+  const twice: QueryModule<"postgres"> = { ...probe, columns: [["x", "int[]"], ["x", "int[][]"], ["r", `(${JSON.stringify(["y", "int[]"])},${JSON.stringify(["y", "int[][]"])})`]] };
+  assert.deepEqual(await execute(client([{ x: [[1]], r: { y: [[2]] } }]), twice, { id: 1 }), [{ x: [[1]], r: { y: [[2]] } }]);
+  await assert.rejects(async () => execute(client([{ x: [[1]], r: { y: [[[2]]] } }]), twice, { id: 1 }), /Column "r" holds, in its row value's field "y", an array of 3 dimensions, and its type has 2: .* Select to_jsonb\(\("r"\)\."y"\) to read that field as JSON/);
+  // Under `allow_nested_arrays: true` each field is typed at any depth, and nothing is refused.
+  assert.deepEqual(await execute(client([{ ...plain, p: { a: 1, b: [[1, 2]] } }]), { ...rows, nestedArrays: true }, { id: 1 }), [{ ...plain, p: { a: 1, b: [[1, 2]] } }]);
 });

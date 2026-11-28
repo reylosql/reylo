@@ -1148,7 +1148,8 @@
       "params": [
        {
         "type": "string",
-        "wrong": true
+        "wrong": true,
+        "says": "A number is refused for $1"
        }
       ],
       "columns": [

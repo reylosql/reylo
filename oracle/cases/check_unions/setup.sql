@@ -12,3 +12,8 @@ create table pads (id int primary key, c char(3) check (c in ('a', 'b')));
 create table cut (id int primary key, code text check (code::varchar(1) in ('a', 'b')), codes text[] check (codes::varchar(1)[] <@ array['a', 'b']::varchar[]));
 insert into cut (id, code) values (1, 'ab');
 insert into cut (id, codes) values (2, '{ab}');
+-- A string longer than the column's type holds is none of its values, whatever the CHECK lists, and
+-- a string listed twice is one value.
+create domain code as varchar(2) check (value in ('abc', 'ab'));
+create table listed (id int primary key, short varchar(3) check (short in ('abcd', 'ab')), twice text check (twice in ('a', 'a')), shorts varchar(2)[] check (shorts <@ array['abc', 'a']::varchar[]), c code);
+insert into listed values (1, 'ab', 'a', '{a}', 'ab');

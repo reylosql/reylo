@@ -42,6 +42,7 @@ fn queries() -> Vec<(&'static str, String)> {
         ("IMMUTABLE_QUERY", capabilities::IMMUTABLE_QUERY.into()),
         ("EXTENSION_TABLES_QUERY", capabilities::EXTENSION_TABLES_QUERY.into()),
         ("schema_fingerprint::QUERY", schema_fingerprint::QUERY.clone()),
+        ("UNUSABLE_SCHEMAS_QUERY", schema_fingerprint::UNUSABLE_SCHEMAS_QUERY.into()),
     ]
 }
 

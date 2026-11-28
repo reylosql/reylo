@@ -5,7 +5,7 @@ import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rename
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { nativeBinary } from "../src/native.ts";
-import { embeddedModule, lockChecksum, projectMigrations, readLock } from "../src/embedded-module.ts";
+import { embeddedModule, lockChecksum, projectMigrations, readLock, schemaChecksum } from "../src/embedded-module.ts";
 
 // What Reylo's bundler plugins put in place of reylo's placeholder module: the migrations `reylo
 // migrate deploy` runs, in its order, which each Durable Object holds its history against when it
@@ -234,4 +234,9 @@ test("a project with no migrations gives the bundle none, and builds as before",
   const root = project();
   assert.equal((await embeddedModule(root)).code, "export const embedded = undefined;\n");
   rmSync(root, { recursive: true, force: true });
+});
+
+test("a schema.sql checked out with CRLF line endings keeps its stamp", () => {
+  const lf = "create function f() returns int as $$\n  select 1\n$$ language sql;\n# made by hand\n";
+  assert.equal(schemaChecksum("a", lf.replaceAll("\n", "\r\n")), schemaChecksum("a", lf));
 });

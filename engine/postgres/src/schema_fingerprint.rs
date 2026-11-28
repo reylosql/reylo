@@ -25,6 +25,11 @@ use std::sync::LazyLock;
 /// The query. Its one row is the MD5 of every line, in order.
 pub static QUERY: LazyLock<String> = LazyLock::new(query);
 
+/// The schemas among `$1` the session's role may not use, as the fingerprint's `j` rows count them:
+/// a host asks it to tell a catalog query refused for a name in such a schema from one refused for
+/// the catalog itself.
+pub const UNUSABLE_SCHEMAS_QUERY: &str = "select n.nspname::pg_catalog.text from pg_catalog.pg_namespace n where n.nspname operator(pg_catalog.=) any ($1::pg_catalog.name[]) and not pg_catalog.has_schema_privilege(n.oid, 'USAGE'::pg_catalog.text)";
+
 /// A temporary schema holds one session's objects, which another session's statement names only by
 /// that session's number, and a TOAST schema none that a statement names.
 const NOT_TEMP: &str = "n.nspname operator(pg_catalog.!~) '^pg_(toast|temp)'::pg_catalog.text";

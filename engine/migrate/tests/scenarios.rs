@@ -1211,7 +1211,8 @@ async fn line_endings_inside_a_string_are_no_edit(mut p: P) {
 
 /// A `--` comment ends at a bare carriage return on Postgres, and runs on to the next line feed on
 /// MySQL and SQLite: there, the same text with a line feed in its place runs one more statement, so
-/// it is an edit, whatever the lock makes of the two, and history pull writes back what ran.
+/// it is an edit. The lock reads every dialect alike, so it takes it for one on Postgres too, and
+/// history pull writes back what ran.
 async fn a_carriage_return_ends_a_comment_only_where_the_database_ends_it(mut p: P) {
     let (d, text) = (p.d, p.t.text);
     p.linear();
@@ -1224,16 +1225,14 @@ async fn a_carriage_return_ends_a_comment_only_where_the_database_ends_it(mut p:
     let ran = if d == Dialect::Postgres { vec!["zero", "one"] } else { vec!["zero"] };
     assert_eq!(p.rows("select a from t order by a desc").await.iter().map(|r| r.text("a").to_string()).collect::<Vec<_>>(), ran);
     p.file("20261027110000_rows.sql", &rows("\n"));
-    if d == Dialect::Postgres {
-        assert_eq!(p.status().await, 0, "{}", p.peek());
-        assert_eq!(p.migrate().await, 0, "{}", p.peek());
-        assert_has!(p.output(), "Up to date");
-        return;
-    }
     assert_eq!(p.status().await, 1, "{}", p.peek());
-    assert_has!(p.output(), r"20261027110000_rows\.sql  applied [^\n]+, and edited since");
-    assert_eq!(p.migrate().await, 1, "{}", p.peek());
-    assert_has!(p.output(), r"Migration 20261027110000_rows\.sql changed after this database applied it");
+    if d == Dialect::Postgres {
+        assert_has!(p.output(), r"Migration 20261027110000_rows\.sql changed after it was locked");
+    } else {
+        assert_has!(p.output(), r"20261027110000_rows\.sql  applied [^\n]+, and edited since");
+        assert_eq!(p.migrate().await, 1, "{}", p.peek());
+        assert_has!(p.output(), r"Migration 20261027110000_rows\.sql changed after this database applied it");
+    }
     assert_eq!(p.run(async |o, log| reylo_migrate::history_pull(o, log).await).await, 0, "{}", p.peek());
     assert_has!(p.output(), "written over");
     assert_eq!(std::fs::read_to_string(p.dir.join("migrations").join("20261027110000_rows.sql")).unwrap(), rows("\r"));
