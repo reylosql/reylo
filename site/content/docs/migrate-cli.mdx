@@ -467,7 +467,7 @@ Flags:
 
 Synchronizes your development database with `schema.sql`, writing no migration, for trying a change:
 
-```sql title="schema.sql"
+```sql title="reylo/schema.sql"
 create table users (
   id integer primary key,
   email text not null,
@@ -488,7 +488,7 @@ Pushing reylo/schema.sql to postgres://localhost:5432/app
 
 As with `reylo migrate new`, a drop or a type change that loses values is refused until you name it:
 
-```sql title="schema.sql"
+```sql title="reylo/schema.sql"
 create table users (
   id integer primary key,
   email text not null,

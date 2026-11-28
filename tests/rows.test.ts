@@ -54,9 +54,22 @@ test("a value is checked against its column list, and written as the JSON the st
     [{ id: 1, ts: "2026-10-20T10:00:00Z", amount: "1.234" }, /keeps 2 digits after the point, so 1.234 would be rounded/],
     [{ id: 1, ts: "2026-10-20T10:00:00Z", amount: "12345678901" }, /at most 10 digits before the point/],
     [{ id: 1, ts: "2026-10-20T10:00:00Z", tags: ["a", 1] }, /"tags" element 2 is text, a string; got 1/],
-    [{ id: 1, ts: "2026-10-20T10:00:00Z", meta: { n: 1n } }, /holds a JSON value/],
+    [{ id: 1, ts: "2026-10-20T10:00:00Z", meta: () => 1 }, /holds a JSON value/],
   ];
   for (const [value, message] of refused) assert.throws(() => prepareRows("events", events, [value], "postgres", true), message, JSON.stringify(value, (_, v) => (typeof v === "bigint" ? `${v}n` : v)));
+  // A BigInt inside a JSON member is written as its digits, within the 64-bit integers SQLite reads from JSON.
+  const big = { id: 1, ts: "2026-10-20T10:00:00Z", meta: { source: "x", n: 9007199254740993n } };
+  assert.match(prepareRows("events", events, [big], "sqlite", true).value as string, /\{"source":"x","n":9007199254740993\}/);
+  assert.throws(() => prepareRows("events", events, [{ ...big, meta: { source: "x", n: 2n ** 63n } }], "sqlite", true), /the BigInt 9223372036854775808, which SQLite reads from JSON as a float/);
+  // A BigInt member is JSON whatever toJSON an app gives BigInt.
+  const proto = BigInt.prototype as unknown as { toJSON?: () => unknown };
+  proto.toJSON = () => undefined;
+  try {
+    const one = { fields: [{ name: "n", type: { kind: "json" }, written: "json", nullable: false, optional: false }], one: true } as unknown as Parameters<typeof prepareRows>[1];
+    assert.equal(prepareRows("one", one, { n: 9007199254740993n }, "sqlite", false).value, '{"n":9007199254740993}');
+  } finally {
+    delete proto.toJSON;
+  }
   assert.throws(() => prepareRows("events", events, { id: 1 }, "postgres", true), /pass an array of objects, one per row; got an object/);
   assert.throws(() => prepareRows("user", { ...events, one: true }, [], "postgres", true), /each row is an object/);
 });

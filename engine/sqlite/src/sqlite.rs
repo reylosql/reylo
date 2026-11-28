@@ -5800,7 +5800,7 @@ mod tests {
         let a = analyze_ddl(profile, &json_ddl(), &Extras::default()).analysis;
         assert_eq!((a.columns[0].ty.kind.name(), a.cardinality.as_str()), ("json", "at_most_one"));
         // Each value as SQLite writes it there: an INTEGER, a BIGINT column's too, as a number
-        // (which JSON.parse rounds past 2^53), a REAL, a TEXT, a NUMERIC as either, NULL as null,
+        // (which the run time refuses past 2^53 - 1, where JSON.parse rounds it), a REAL, a TEXT, a NUMERIC as either, NULL as null,
         // a truth value as 1 or 0 and a BOOLEAN column as what it holds. A BLOB is read as JSONB
         // (`x'01'` is `true`) or is an error, and a column of no type may hold one.
         assert_eq!(
