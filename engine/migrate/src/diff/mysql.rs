@@ -1265,14 +1265,13 @@ fn alter_table(from: &Body, to: &Body, pairs: &[(String, String)], made: &BTreeS
     let keys_a_count = |def: &str| counts.iter().any(|c| reads(def, c));
     // MySQL gives each NULL in a column made AUTO_INCREMENT the next value of its sequence, even in
     // strict mode, which refuses a NULL in a column made NOT NULL: so a nullable column made
-    // AUTO_INCREMENT NOT NULL is made NOT NULL by a statement before, under its name before any
-    // rename, which fails on a NULL rather than numbering it (a row whose key had no parent would
-    // take one).
+    // AUTO_INCREMENT NOT NULL is made NOT NULL by a statement before, as it was otherwise (its
+    // name, its type, what indexes it), which fails on a NULL rather than numbering it (a row whose
+    // key had no parent would take one).
     for c in to.columns.iter().filter(|c| c.not_null() && !remade_columns.contains(&c.name)) {
         let Some(was) = from.column(old_of.get(c.name.as_str()).copied().unwrap_or(&c.name)) else { continue };
         if c.counts() && !was.counts() && !was.not_null() {
-            let held = Column { name: was.name.clone(), q: was.q.clone(), ..c.held() };
-            first.push(format!("modify column {}", held.written(collation)));
+            first.push(format!("modify column {}", was.held().written(collation)));
         }
     }
     for (name, _, def) in to.indexes.iter().filter(|(n, _, d)| swaps || !made.contains(n) || keys_a_count(d)) {
@@ -1906,9 +1905,10 @@ mod tests {
         let column = |name: &str, rest: &str| Column { name: name.into(), q: name.into(), ty: "int".into(), collation: String::new(), rest: rest.into() };
         let table = |c: Column| Body { q: "t".into(), indexes: vec![(c.name.clone(), c.q.clone(), format!("key {} ({})", c.q, c.q))], columns: vec![column("id", "not null"), c], ..Body::default() };
         let to = table(column("ticket", "not null auto_increment comment 'keep null rows'"));
-        // Renamed as it counts, under the name it had; a comment's words are no attribute.
+        // Renamed as it counts: made NOT NULL as it was, under the name it had; a comment's words
+        // are no attribute.
         let plan = alter_table(&table(column("seq", "comment 'not null until rollout'")), &to, &[("seq".into(), "ticket".into())], &BTreeSet::new());
-        assert_eq!(plan.first().map(String::as_str), Some("alter table t modify column seq int not null comment 'keep null rows'"), "{plan:?}");
+        assert_eq!(plan.first().map(String::as_str), Some("alter table t modify column seq int not null comment 'not null until rollout'"), "{plan:?}");
         // NOT NULL already: nothing before.
         let plan = alter_table(&table(column("ticket", "not null comment 'x'")), &to, &[], &BTreeSet::new());
         assert_eq!(plan.len(), 1, "{plan:?}");
