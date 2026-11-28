@@ -1360,6 +1360,11 @@ export function holdsArray(kind: Kind): boolean {
 /** A name as SQL reads it whatever it is, a keyword (`current_date`) or mixed case included: quoted. */
 const ident = (name: string) => `"${name.replace(/"/g, '""')}"`;
 
+/** Whether every element of a driver's array, at each level, is still its text or NULL. */
+export function textLeaves(v: readonly unknown[]): boolean {
+  return v.every((e) => e === null || e === undefined || typeof e === "string" || (Array.isArray(e) && textLeaves(e)));
+}
+
 /** Why a Postgres array is refused: it holds `depth` dimensions, and its type `declared`; `path` names the row value's field that holds it. */
 function tooDeep(column: string, depth: number, declared: number, path?: FieldPath, json = false): DecodeError {
   // allow_nested_arrays types no array of JSON at any depth, so for one it is no way out.

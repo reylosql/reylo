@@ -26,7 +26,7 @@
 // those oids are arrays, cached in a WeakMap keyed by the app's object. A row value the module knows
 // the fields of has the kind of its column whatever its oid: `record` is one oid for every shape of
 // row, and a built-in catalog table's row type is below 10000 too.
-import { civilFromDays, coerce, DecodeError, elementKind, holdsArray, holdsJsonArray, isRowKind, numbersInJson, scalarKind, textDecoder, utf8, wholeArrayKind, withFraction, withinDimensions, type Columns, type Decoder, type JsonNumbers, type Kind } from "./values.ts";
+import { civilFromDays, coerce, DecodeError, elementKind, holdsArray, holdsJsonArray, isRowKind, numbersInJson, scalarKind, textDecoder, utf8, wholeArrayKind, withFraction, withinDimensions, type Columns, type Decoder, type JsonNumbers, type Kind, textLeaves } from "./values.ts";
 import { lastOfEach, namesInResult, rowOf, type RowBuilder } from "./row.ts";
 import { arrayLiteral, asByteaHex, EFFECT_SQL, isJsonValue, jsonElements, jsonText, postgresText, type AnyClient as Client, type Bound, type EffectSql, type Marks, type QueryModule, type Runtime } from "./execute.ts";
 import { readPostgresError } from "./query-error.ts";
@@ -433,7 +433,8 @@ async function pglite(db: AnyClient, text: string, values: unknown[], columns: C
       const decode = decoders[i]!;
       for (const row of rows) {
         const v = row[f.name];
-        if (v !== null && v !== undefined) row[f.name] = typeof v === "string" ? decode(v) : coerce(kinds[i]!, v, f.name, ",", true);
+        // An array PGlite parsed by an oid it learned holds each element's text, unless the app gave it a parser for the element's type.
+        if (v !== null && v !== undefined) row[f.name] = typeof v === "string" ? decode(v) : coerce(kinds[i]!, v, f.name, ",", true, Array.isArray(v) && textLeaves(v));
       }
     }
   }

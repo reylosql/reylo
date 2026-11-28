@@ -1539,6 +1539,16 @@ test("postgres: a jsonb[] has one dimension on pg, postgres.js and PGlite, under
         await assert.rejects(async () => lists.run(c as never), /Column "docs" holds an array of 2 dimensions, and its type has one/, `${name}, a domain's, nestedArrays ${nestedArrays}`);
       }
     }
+    // PGlite parses an array of a type it learned by refreshArrayTypes() itself on a statement's first run in a transaction, each element its text.
+    await lite.exec(`create domain review_doc as jsonb; create table r (id int4, docs review_doc[]); insert into r values (1, '{{1,2},{3,4}}'), (2, '{"[1]","\\"2\\""}')`);
+    await lite.refreshArrayTypes();
+    for (const id of [1, 2]) {
+      const cold = defineQuery({ dialect: "postgres", sql: `select docs from r where id = ${id} and true`, params: [], cardinality: "one", columns: [["docs", "json[]"]] });
+      await lite.transaction(async (tx: never) => {
+        if (id === 1) await assert.rejects(async () => cold.run(tx), /Column "docs" holds an array of 2 dimensions, and its type has one/, "PGlite, a transaction's first run");
+        else assert.deepEqual({ ...((await cold.run(tx)) as object) }, { docs: [[1], "2"] }, "PGlite, a transaction's first run");
+      });
+    }
   } finally {
     await client.end();
     await lite.close();
