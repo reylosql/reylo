@@ -29,7 +29,7 @@
 import { civilFromDays, coerce, coercePostgres, DecodeError, describe, elementKind, holdsRareKind, instantOfDate, isLevel, isRareKind, isRowKind, ParameterError, postgresInterval, postgresTypesFor, postgresYear, scalarKind, textDecoder, utf8, wholeArrayKind, withFraction, withinDimensions, type Columns, type Decoder, type Kind } from "./values.ts";
 import { bareName, holdsWholeArrays, type EngineType } from "./engine-type.ts";
 import { lastOfEach, namesInResult, rowOf, type RowBuilder } from "./row.ts";
-import { arrayLiteral, asByteaHex, drizzleDriver, driversOf, EFFECT_SQL, knexDriver, isJsonValue, isTime, jsonElements, takesFloat, jsonText, postgresText, vectorParameter, type AnyClient as Client, type Bound, type EffectSql, type Marks, type QueryModule, type Runtime, type DriverClient } from "./execute.ts";
+import { arrayLiteral, asByteaHex, driversOf, EFFECT_SQL, knexDriver, isJsonValue, isTime, jsonElements, takesFloat, jsonText, postgresText, vectorParameter, type AnyClient as Client, type Bound, type EffectSql, type Marks, type QueryModule, type Runtime, type DriverClient } from "./execute.ts";
 import { readPostgresError } from "./query-error.ts";
 
 type AnyClient = Record<string, any>;
@@ -1068,6 +1068,9 @@ export const neonDriver: PostgresDriver = {
       const load: Load = async (sql) => (await c.query(sql, [], { arrayMode: true, fullResults: true, types: asText })).rows;
       return pgFamily(c, (types) => c.query(p.text, withJson(p), { fullResults: true, arrayMode: false, types }), p.query.columns, load);
     }
+    // A function with unsafe() and no query() is Bun.sql's (whose transaction() aliases begin()),
+    // postgres.js's, or a wrapper around one: never Neon's.
+    if (typeof c.unsafe === "function") return undefined;
     return neonCallable(c as never, p.text, withJson(p).map(asByteaHex), p.query.columns);
   },
 };
@@ -1213,6 +1216,6 @@ export const postgres: Runtime<"postgres"> = {
 };
 
 /** Every Postgres driver, in the order they are tried, which `defineQuery` passes; a module passes the ones its project installs (src/loader.ts, `moduleDrivers`). */
-export const postgresDrivers: readonly DriverClient<"postgres", any>[] = [effectDriver, slonikDriver, drizzleDriver, drizzlePostgresDriver, knexDriver, pgPromiseDriver, pgliteDriver, pgDriver, neonDriver, postgresJsDriver, bunPostgresDriver];
+export const postgresDrivers: readonly DriverClient<"postgres", any>[] = [effectDriver, slonikDriver, drizzlePostgresDriver, knexDriver, pgPromiseDriver, pgliteDriver, pgDriver, neonDriver, postgresJsDriver, bunPostgresDriver];
 
 export { DecodeError, parseArray } from "./values.ts";

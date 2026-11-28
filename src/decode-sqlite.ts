@@ -39,7 +39,7 @@
 //   libSQL's BigInt or digits, is its BigInt.
 import { lastOfEach, namesInResult, rowOf } from "./row.ts";
 import { bigInteger, DecodeError, toBytes, exactInteger, ParameterError, refuseTruth, truth, type Columns, type Kind } from "./values.ts";
-import { drizzleDriver, driversOf, EFFECT_SQL, executeSync, isDurableObjectSql, kindOf, knexDriver, literalsAtMarks, takesFloat, type AnyClient as Client, type Bound, type DriverClient, type EffectSql, type QueryModule, type Runtime } from "./execute.ts";
+import { driversOf, EFFECT_SQL, executeSync, isDurableObjectSql, kindOf, knexDriver, literalsAtMarks, takesFloat, type AnyClient as Client, type Bound, type DriverClient, type EffectSql, type QueryModule, type Runtime } from "./execute.ts";
 import { readSqliteError } from "./query-error.ts";
 
 type AnyClient = Record<string, any>;
@@ -475,7 +475,7 @@ export const tursoDriver: SqliteDriver = {
 export const sqlitePackageDriver: SqliteDriver = {
   label: "all(sql, params) as on the sqlite package",
   run(c, { query, bound: { text, values, names } }) {
-    if (typeof c.getDatabaseInstance !== "function" || isTurso(c)) return undefined;
+    if (typeof c.getDatabaseInstance !== "function" || typeof c.unsafe === "function" || typeof c.execute === "function" || isTurso(c)) return undefined;
     unplaced(query, names, values, "sqlite3");
     const type = typeAt(query, names);
     return c.all(text, values.map((v, i) => numberOrDigits(v, type(i), "sqlite3"))).then((rows: unknown[]) => normalize(rows, query.columns));
@@ -498,7 +498,8 @@ export const sqlite3Driver: SqliteDriver = {
 export const d1Driver: SqliteDriver = {
   label: "prepare(sql) as on Cloudflare D1",
   run(c, { query, bound: { text, values, names } }) {
-    if (typeof c.prepare !== "function" || typeof c.unsafe === "function" || typeof c.execute === "function" || typeof c.all === "function" || typeof c.getDatabaseInstance === "function" || isTurso(c)) return undefined;
+    // A database that answers at once is its own driver's, which this module may not have: never D1's.
+    if (typeof c.prepare !== "function" || typeof c.unsafe === "function" || typeof c.execute === "function" || (typeof c.all === "function" && typeof c.exec === "function") || typeof c.getDatabaseInstance === "function" || isTurso(c) || isSyncSqlite(c) || isDurableObjectSql(c)) return undefined;
     const prepared = c.prepare(text);
     if (typeof prepared.first !== "function") return prepared.all(...values).then((rows: unknown[]) => normalize(rows, query.columns));
     unplaced(query, names, values, "D1", true);
@@ -694,4 +695,4 @@ export const sqlite: Runtime<"sqlite"> = {
 };
 
 /** Every SQLite driver, in the order they are tried, which `defineQuery` passes; a module passes the ones its project installs (src/loader.ts, `moduleDrivers`). */
-export const sqliteDrivers: readonly DriverClient<"sqlite", any>[] = [drizzleDriver, knexDriver, effectSqliteDriver, durableObjectDriver, sqliteWasmDriver, sqlJsDriver, syncSqliteDriver, bunSqliteDriver, libsqlDriver, tursoDriver, sqlitePackageDriver, sqlite3Driver, d1Driver];
+export const sqliteDrivers: readonly DriverClient<"sqlite", any>[] = [knexDriver, effectSqliteDriver, durableObjectDriver, sqliteWasmDriver, sqlJsDriver, syncSqliteDriver, bunSqliteDriver, libsqlDriver, tursoDriver, sqlitePackageDriver, sqlite3Driver, d1Driver];

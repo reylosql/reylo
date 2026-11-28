@@ -7,7 +7,7 @@ export { checks } from "./checks.ts";
 export { codecRuntime } from "./codecs.ts";
 export { postgresTypes } from "./postgres-types.ts";
 export { numbersInJson as jsonNumbers, writeJson as jsonWriter, readBool, readNumber, readInt8, readDate, readTimestamp, readTimestamptz, readInterval, readJson, readBytes, readVector, readSet } from "./values.ts";
-export { drizzleDriver, knexDriver } from "./execute.ts";
+export { knexDriver } from "./execute.ts";
 export { effectDriver, slonikDriver, drizzlePostgresDriver, pgPromiseDriver, pgliteDriver, pgDriver, neonDriver, postgresJsDriver, bunPostgresDriver } from "./decode.ts";
 export { bunMysqlDriver, mariadbDriver, mysql2Driver, planetscaleDriver } from "./decode-mysql.ts";
 export { effectSqliteDriver, durableObjectDriver, sqliteWasmDriver, sqlJsDriver, syncSqliteDriver, bunSqliteDriver, libsqlDriver, tursoDriver, sqlitePackageDriver, sqlite3Driver, d1Driver } from "./decode-sqlite.ts";

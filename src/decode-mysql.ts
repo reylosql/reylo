@@ -27,7 +27,7 @@ import { lastOfEach, namesInResult, rowOf } from "./row.ts";
 import { bigInteger, coerce, DecodeError, describe, ParameterError, truth, utf8, withFraction, type Columns, type Kind } from "./values.ts";
 import { BUN_MYSQL, bunRows } from "./decode.ts";
 import { readMysqlError } from "./query-error.ts";
-import { drizzleDriver, driversOf, kindOf, knexDriver, literalsAtMarks, takesFloat, vectorParameter, type AnyClient as Client, type Bound, type DriverClient, type Marks, type QueryModule, type Runtime } from "./execute.ts";
+import { driversOf, kindOf, knexDriver, literalsAtMarks, takesFloat, vectorParameter, type AnyClient as Client, type Bound, type DriverClient, type Marks, type QueryModule, type Runtime } from "./execute.ts";
 import { bareName, isMysqlSet, type EngineType } from "./engine-type.ts";
 import type { SqlMode } from "./engine-core.ts";
 
@@ -980,4 +980,4 @@ export const mysql: Runtime<"mysql"> = {
 };
 
 /** Every MySQL driver, in the order they are tried, which `defineQuery` passes; a module passes the ones its project installs (src/loader.ts, `moduleDrivers`). */
-export const mysqlDrivers: readonly DriverClient<"mysql", any>[] = [drizzleDriver, knexDriver, bunMysqlDriver, mariadbDriver, mysql2Driver, planetscaleDriver];
+export const mysqlDrivers: readonly DriverClient<"mysql", any>[] = [knexDriver, bunMysqlDriver, mariadbDriver, mysql2Driver, planetscaleDriver];

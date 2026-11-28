@@ -254,8 +254,6 @@ export type DriverClient<D extends Dialect = Dialect, P = Bound> = {
   atOnce?(c: AnyClient): boolean;
   /** The rows of the statement on a client `atOnce` took: at once, or a promise where its statement answers with one. */
   runSync?(c: AnyClient, prepared: P): unknown[] | Promise<unknown[]>;
-  /** The driver's client a wrapper runs on (a Drizzle database's), or undefined where `c` is no such wrapper. */
-  unwrap?(c: AnyClient): AnyClient | undefined;
   /** The rows of `run` on a connection a wrapper lends (a Knex instance's), or undefined where `c` is no such wrapper. */
   lend?(c: AnyClient, dialect: Dialect, run: (connection: AnyClient) => unknown[] | Promise<unknown[]>): Promise<unknown[]> | undefined;
 };
@@ -266,14 +264,13 @@ export function driversOf<D extends Dialect>(query: QueryModule<D>): readonly Dr
   throw new TypeError(`${query.source ? `${query.source}: ` : ""}This query names no driver to run on, which a module a build step writes passes for the drivers its project installs: build a module an earlier reylo wrote again (reylo generate typescript writes the files it wrote). A query defined by hand runs on every driver with defineQuery({ dialect: "${query.dialect}", … }).`);
 }
 
-/** The driver's client under a wrapper, by the drivers that know one (Drizzle's database), else `c` itself. */
+/**
+ * The driver's client under a Drizzle database, transaction or savepoint, else `c` itself. Every
+ * module unwraps one, whether or not the build found drizzle-orm: one taken for its driver's client
+ * would be run by another driver's way (a Drizzle MySQL database has PlanetScale's execute()).
+ */
 function unwrapped(query: QueryModule, c: AnyClient): AnyClient {
-  if (!query.drivers) return query.runtime.wrappers?.underneath(c) ?? c;
-  for (const d of query.drivers) {
-    const u = d.unwrap?.(c);
-    if (u !== undefined) return u;
-  }
-  return c;
+  return query.drivers ? underneath(c) : (query.runtime.wrappers?.underneath(c) ?? c);
 }
 
 /** The rows of `run` on a connection a wrapper lends (a Knex instance), by the drivers that know one, or undefined where `c` is no such wrapper. */
@@ -495,15 +492,6 @@ export type Wrappers = {
 };
 export const wrappers: Wrappers = { underneath, knex: (c, dialect, run) => (isKnex(c) ? onKnexConnection(c, dialect, run) : undefined) };
 
-/** A Drizzle database, transaction or savepoint over one of the dialect's drivers: Reylo runs on the driver's client underneath. */
-export const drizzleDriver: DriverClient = {
-  label: "a Drizzle database over one of them",
-  unwrap(c) {
-    const u = underneath(c);
-    return u === c ? undefined : u;
-  },
-};
-
 /** A Knex instance, transaction or savepoint over one of the dialect's drivers: Reylo runs on a connection it lends. */
 export const knexDriver: DriverClient = {
   label: "a Knex instance over one of them",
@@ -514,7 +502,10 @@ export const knexDriver: DriverClient = {
 export function executeSync<D extends Dialect>(client: SyncClientFor<D>, query: QueryModule<D>, params: ParamsInput = {}): unknown[] {
   const c = unwrapped(query, client as unknown as AnyClient);
   if (!query.runtime.runSync) throw refuseSync(`a ${query.dialect} statement has none`);
-  if (!query.runtime.answersAtOnce?.(c, query)) throw refuseSync("this client answers through a promise");
+  if (!query.runtime.answersAtOnce?.(c, query)) {
+    const atOnce = query.drivers?.filter((d) => d.atOnce).map((d) => d.label);
+    throw refuseSync(atOnce ? `this client answers through a promise, or is none of the synchronous drivers this query's project installs (${atOnce.join("; ") || "none"})` : "this client answers through a promise");
+  }
   const rows = syncRows(c, query, params);
   if (Array.isArray(rows)) return withCodecs(query, rows) as unknown[];
   rows.catch(() => {});
@@ -986,10 +977,10 @@ function unsupported(c: unknown, { dialect, runtime, drivers }: QueryModule): Ty
         : typeof o?.$queryRawUnsafe === "function"
           ? ` Prisma decodes the values of its queries itself${typeof o.$transaction !== "function" ? inTx : ": pass a client of your database's driver, such as the pool its driver adapter was made with."}`
           : dialect === "postgres" && (typeof c === "function" || typeof (o as { query?: unknown } | null)?.query === "function" || typeof (o as { unsafe?: unknown } | null)?.unsafe === "function")
-              ? " It is none of those drivers' clients. A wrapper around one hands back the values its driver already converted, a Date for a timestamp and a string for a bigint, which reylo cannot read back: pass the driver's own pool, client or transaction, or keep the wrapper one of them, as a subclass or a proxy."
+              ? " A wrapper around a driver's client hands back the values its driver already converted, a Date for a timestamp and a string for a bigint, which reylo cannot read back: pass the driver's own pool, client or transaction, or keep the wrapper one of them, as a subclass or a proxy."
               : "";
   // The drivers' own clients first, then the wrappers over them.
-  const labels = drivers && [...drivers.filter((d) => d.run), ...drivers.filter((d) => !d.run)].map((d) => d.label);
-  const takes = labels ? `It takes ${labels.join("; ")}. A module a build step writes runs on the drivers its project installs, found beside its .sql file: install the driver there and build it again.` : `It takes a client with ${runtime.clients}.`;
+  const labels = drivers && [...drivers.filter((d) => d.run || d.atOnce), ...drivers.filter((d) => !d.run && !d.atOnce)].map((d) => d.label);
+  const takes = labels ? `It takes ${labels.join("; ")}. A module a build step writes takes the drivers its project installs: install your client's driver in the project of the .sql file, or in a package of its workspace, and build the module again.` : `It takes a client with ${runtime.clients}.`;
   return new TypeError(`reylo cannot run a ${dialect} statement on ${seen}. ${takes}${hint}`);
 }

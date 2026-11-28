@@ -109,7 +109,7 @@ export async function generate(inputs: string[], out: string, base: string): Pro
 
   const queries: Query[] = [];
   for (const [name, file] of [...named].sort(([a], [b]) => (a < b ? -1 : 1))) {
-    const query = await queryOf(name, file, base);
+    const query = await queryOf(name, file, base, dirname(out));
     if (Array.isArray(query)) errors.push(...query);
     else queries.push(query);
   }
@@ -139,7 +139,7 @@ export async function generate(inputs: string[], out: string, base: string): Pro
 type Query = { text: string; types: string[]; imports: string[]; libraries: Library[]; geojson: boolean };
 
 /** One file's export: its definition and its types, with the libraries it imports; or why it cannot be written, each line naming the file. */
-async function queryOf(name: string, file: string, base: string): Promise<Query | string[]> {
+async function queryOf(name: string, file: string, base: string, outDir: string): Promise<Query | string[]> {
   const where = shown(base, file);
   let sql: string;
   try {
@@ -150,7 +150,8 @@ async function queryOf(name: string, file: string, base: string): Promise<Query 
   let input: ModuleInput;
   let session: Session;
   try {
-    ({ input, session } = await moduleInputOf(file, sql));
+    // The drivers the project installs, read from the file's directory and the one written to.
+    ({ input, session } = await moduleInputOf(file, sql, [outDir]));
   } catch (e) {
     // The build's errors start with the file's absolute path.
     const message = (e as Error).message;

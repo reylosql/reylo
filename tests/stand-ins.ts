@@ -1,5 +1,5 @@
 // Stand-ins for the Postgres clients `.run()` takes, each with what tells its driver's apart
-// (src/decode.ts, `takesQuery`): a test's handler gets the statement and its values, and answers
+// (src/decode.ts, each driver's own check): a test's handler gets the statement and its values, and answers
 // as the driver does. A client with none of that is refused before it runs anything.
 
 /**
