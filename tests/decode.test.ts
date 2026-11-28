@@ -380,7 +380,7 @@ function pglite(db: Db, instance: Record<number, Parser> | undefined) {
   return lite;
 }
 
-test("PGlite: per-query parsers that name the statement's oids, every oid the instance parses on a first run; a transaction too", async () => {
+test("PGlite: per-query parsers that name every built-in type and the statement's oids, every oid the instance parses on a first run; a transaction too", async () => {
   const db = database();
   // The instance's table: the app's parsers, and PGlite's array parsers built at start.
   const instance: Record<number, Parser> = { ...appTable, 1082: (x) => new Date(x), 1184: (x) => new Date(x), [POSINT_ARR]: (x) => parseArray(x, String), [ROLE]: (x) => x.toUpperCase() };
@@ -391,7 +391,9 @@ test("PGlite: per-query parsers that name the statement's oids, every oid the in
   const first = Object.keys(lite.seen[0]!).map(Number);
   assert.ok(first.includes(20) && first.includes(1082) && first.includes(POSINT_ARR) && first.includes(ROLE), "a first run names every oid the instance parses");
   await execute(lite as never, q, { id: 1 });
-  assert.deepEqual(Object.keys(lite.seen[1]!).map(Number).sort(), COLUMNS.map(([, oid]) => oid).filter((o, i, all) => all.indexOf(o) === i).sort(), "a later run names only the statement's oids");
+  // A later one names the statement's oids and every built-in type, so that none goes through the instance's parser even where another search_path changes a result.
+  const later = Object.keys(lite.seen[1]!).map(Number);
+  assert.ok(COLUMNS.every(([, oid]) => later.includes(oid)) && later.includes(199) && later.includes(3807), "a later run names the statement's oids and every built-in type");
   // A transaction exposes no table; what it does not name went through the instance's parser, and is decoded from what it gave.
   const [inTx] = (await execute(pglite(db, undefined) as never, { ...built, sql: "select * from probe where id = :id -- tx" }, { id: 1 })) as Record<string, unknown>[];
   same(inTx, declared);

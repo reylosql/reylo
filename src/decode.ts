@@ -409,22 +409,21 @@ function hexOnToString(v: unknown): unknown {
 }
 
 /**
- * How PGlite's own parser for an array's oid, which it reads a value by where Reylo named no parser
- * of its own, holds a JSON element: its built-in parser for an array of json or jsonb decodes each,
- * and one it learned by refreshArrayTypes() for a created type, such as an array of a domain over
- * jsonb, keeps each element's text, as its element's type has no parser of its own. Read off the
- * oid alone, so no parser of the app's is ever called but on the values the server returned.
+ * How PGlite's own parser for an array's oid holds a JSON element, where Reylo named no parser of
+ * its own for it: an oid Reylo names none for is a created type's, and the parser PGlite learned
+ * for it by refreshArrayTypes() keeps each element's text, as the element's type has none.
  */
-function pgliteJsonElements(oid: number): JsonElements {
-  return oid < FIRST_USER_OID ? "decoded" : "text";
-}
+const PGLITE_JSON_ELEMENTS: JsonElements = "text";
 
 async function pglite(db: AnyClient, text: string, values: unknown[], columns: Columns | undefined): Promise<unknown[]> {
-  // A statement met for the first time names every built-in type Reylo decodes, and every oid the
-  // instance has a parser for (its arrays, and the app's); a transaction has no table to read.
+  // Every statement names every built-in type Reylo decodes, so that one never reaches the
+  // instance's parser, which decodes an array's elements itself and leaves its dimensions unknown,
+  // even where another search_path makes a warmed statement's result one; a statement met for the
+  // first time names every oid the instance has a parser for too (its arrays, and the app's), and a
+  // later one those its results had. A transaction has no table to read.
   let named = pgliteOids.get(text);
   builtinOids ??= [...Object.keys(SCALAR_OIDS).map(Number), ...ARRAY_OIDS.keys()];
-  const oids = named ?? new Set([...builtinOids, ...Object.keys(db.parsers ?? {}).map(Number)]);
+  const oids = new Set([...builtinOids, ...(named ?? Object.keys(db.parsers ?? {}).map(Number))]);
   const parsers: Record<number, Decoder> = {};
   for (const oid of oids) parsers[oid] = builtinDecoder(oid) ?? keepText;
   const result = await db.query(text, values.map(hexOnToString), { rowMode: "object", parsers });
@@ -444,7 +443,7 @@ async function pglite(db: AnyClient, text: string, values: unknown[], columns: C
       const decode = decoders[i]!;
       for (const row of rows) {
         const v = row[f.name];
-        if (v !== null && v !== undefined) row[f.name] = typeof v === "string" ? decode(v) : coerce(kinds[i]!, v, f.name, ",", true, Array.isArray(v) && holdsJsonArray(kinds[i]!) ? pgliteJsonElements(f.oid) : undefined);
+        if (v !== null && v !== undefined) row[f.name] = typeof v === "string" ? decode(v) : coerce(kinds[i]!, v, f.name, ",", true, Array.isArray(v) && holdsJsonArray(kinds[i]!) ? PGLITE_JSON_ELEMENTS : undefined);
       }
     }
   }
