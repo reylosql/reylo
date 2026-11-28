@@ -10172,6 +10172,7 @@ async fn dump_from(db: &mut Db, opts: &Options, schemas: &[String]) -> Result<St
             } else {
                 ("case when p.puballtables then 'ALL TABLES' end", "")
             };
+            let all = all.replace("and pr.prexcept)", &format!("and pr.prexcept and {published})"));
             for r in db
                 .rows(&format!(
                     "select 0 as k, et.evtname::text as name, format('CREATE EVENT TRIGGER %I ON %s', et.evtname, et.evtevent)

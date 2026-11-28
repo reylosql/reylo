@@ -1803,7 +1803,7 @@ async fn postgres_lines(db: &mut Db) -> Result<Vec<String>, Error> {
     let owner = format!(
         "case when k.classid = 'pg_namespace'::regclass and o.identity = 'public' and k.owner = {runner} and k.owner = (select datdba from pg_database where datname = current_database()) then coalesce(to_regrole('pg_database_owner')::oid, k.owner) else k.owner end"
     );
-    for r in db.rows(&format!("select format('owner %s is %I (%s)', o.identity, pg_get_userbyid({owner}), o.type) as line from ({}) k, lateral pg_identify_object(k.classid, k.objid, 0) o where {owner} <> {runner}", owned_objects())).await? {
+    for r in db.rows(&format!("select format('owner %s is %I (%s)', o.identity, pg_get_userbyid({owner}), o.type) as line from ({}) k, lateral pg_identify_object(k.classid, k.objid, 0) o where {owner} <> {runner}", owned_objects(version))).await? {
         lines.push(r.text("line").to_string());
     }
 
@@ -1993,8 +1993,8 @@ pub(crate) fn runner() -> String {
 /// The objects whose owner is compared, each `classid, objid, owner`: relations (but indexes, which
 /// take their table's), routines (but those made with a range type), types (but arrays and a
 /// relation's own row type), schemas, collations, publications and foreign servers; none an
-/// extension or a platform owns, and no history table's.
-pub(crate) fn owned_objects() -> String {
+/// extension or a platform owns, and no history table's or another tool's. `version` is the server's.
+pub(crate) fn owned_objects(version: i64) -> String {
     let ns = PG_USER_NS;
     let kept_x = on_no_temporary_table("x");
     [
@@ -2005,7 +2005,7 @@ pub(crate) fn owned_objects() -> String {
         format!("select 'pg_type'::regclass, t.oid, t.typowner from pg_type t join pg_namespace n on n.oid = t.typnamespace where t.typtype in ('b', 'd', 'e', 'r') and t.typcategory <> 'A' and {ns} and {} and {} and not exists (select 1 from pg_depend dep where dep.classid = 'pg_type'::regclass and dep.objid = t.oid and dep.deptype = 'i')", not_extension("pg_type", "t"), not_platform("t.typowner")),
         format!("select 'pg_namespace'::regclass, n.oid, n.nspowner from pg_namespace n where {ns} and {} and {} and {}", not_extension("pg_namespace", "n"), not_platform_schema("n"), pg_not_history_schema("n")),
         format!("select 'pg_collation'::regclass, c.oid, c.collowner from pg_collation c join pg_namespace n on n.oid = c.collnamespace where {ns} and {} and {}", not_extension("pg_collation", "c"), not_platform("c.collowner")),
-        format!("select 'pg_publication'::regclass, p.oid, p.pubowner from pg_publication p where {} and not {}", not_platform("p.pubowner"), pg_tool_publication("p", 0)),
+        format!("select 'pg_publication'::regclass, p.oid, p.pubowner from pg_publication p where {} and not {}", not_platform("p.pubowner"), pg_tool_publication("p", version)),
         format!("select 'pg_foreign_server'::regclass, s.oid, s.srvowner from pg_foreign_server s where {}", not_platform("s.srvowner")),
         format!("select 'pg_foreign_data_wrapper'::regclass, w.oid, w.fdwowner from pg_foreign_data_wrapper w where {} and {}", not_extension("pg_foreign_data_wrapper", "w"), not_platform("w.fdwowner")),
         format!("select 'pg_event_trigger'::regclass, et.oid, et.evtowner from pg_event_trigger et where {} and {}", not_extension("pg_event_trigger", "et"), not_platform("et.evtowner")),

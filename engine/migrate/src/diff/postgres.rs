@@ -2062,6 +2062,7 @@ async fn read_objects(db: &mut Db, platform: Option<&[String]>) -> Result<Schema
     } else {
         ("false", "", "'null'")
     };
+    let excepted = excepted.replace("and pr.prexcept))", &format!("and pr.prexcept and {published}))"));
     for r in db
         .rows(&format!(
             "select p.oid, format('%I', p.pubname) as name, p.puballtables as all_tables, {all_sequences} as all_sequences, {excepted} as excepted, p.pubviaroot as via_root, {generated} as generated,
@@ -2297,7 +2298,7 @@ async fn read_objects(db: &mut Db, platform: Option<&[String]>) -> Result<Schema
         .rows(&format!(
             "select format('%s', k.classid::regclass) as cls, k.objid, o.type, o.identity, format('%I', pg_get_userbyid(k.owner)) as owner
             from ({}) k, lateral pg_identify_object(k.classid, k.objid, 0) o where k.owner <> {}",
-            crate::catalog::owned_objects(),
+            crate::catalog::owned_objects(version),
             crate::catalog::runner()
         ))
         .await?
