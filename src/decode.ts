@@ -218,16 +218,23 @@ async function fieldDecoders(fields: Field[], columns: Columns | undefined, key:
  * matches is read by its type where the catalog says it, else as its text, never by a guess: a
  * name that only looks like a declared one may be a column a migration added beside it.
  */
-function declaredColumn(fields: readonly { name: string }[], columns: Columns | undefined, rename?: (name: string) => string): (f: { name: string }, i: number) => Columns[number] | undefined {
+function declaredColumn(fields: readonly Field[], columns: Columns | undefined, rename?: (name: string) => string): (f: Field, i: number) => Columns[number] | undefined {
   if (!columns?.length) return () => undefined;
   if (columns.length === fields.length) return (_f, i) => columns[i];
   const byName = new Map(lastOfEach(columns).map((c) => [rename ? rename(c[0]) : c[0], c] as const));
   // A name more than one field has (a column a migration added under a name the statement gives
-  // another, or one a renaming makes the same) says nothing of which field a declaration is: none
-  // of them takes a declared kind, and each is read by its type, or as its text.
-  const count = new Map<string, number>();
-  for (const f of fields) count.set(f.name, (count.get(f.name) ?? 0) + 1);
-  return (f) => (count.get(f.name) === 1 ? byName.get(f.name) : undefined);
+  // another, or one a renaming makes the same): a field of a built-in type whose kind is not the
+  // declared one is not the declaration's, and the one field left, if one is, is. Where more are
+  // left, as two types the database created are, none takes a declared kind, and each is read by
+  // its type, or as its text.
+  const fits = (f: Field, c: Columns[number]) => !(SCALAR_OIDS[f.oid] !== undefined || ARRAY_OIDS.has(f.oid)) || builtin(f.oid)?.kind === c[1];
+  const chosen = new Map<string, number | null>();
+  fields.forEach((f, i) => {
+    const c = byName.get(f.name);
+    if (c === undefined || !fits(f, c)) return;
+    chosen.set(f.name, chosen.has(f.name) ? null : i);
+  });
+  return (f, i) => (chosen.get(f.name) === i ? byName.get(f.name) : undefined);
 }
 
 // ---------------------------------------------------------------------------------------------

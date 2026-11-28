@@ -65,6 +65,20 @@ test("postgres: after a migration adds a column under select *, a created type t
     } finally {
       await camel.end();
     }
+    // The statement's alias still wins in the row, and the column a migration adds under its name is a
+    // built-in type, which the declared kind doesn't fit: the alias keeps its kind. On a fresh client.
+    await admin.unsafe(`create table tagged (id int primary key); insert into tagged values (1)`);
+    const aliased = await built("aliased", "select tagged.*, array['sad'::mood] as tags from tagged");
+    await admin.unsafe(`alter table tagged add column tags int`);
+    const freshAlias = postgres(own.url, { max: 1 });
+    const freshAliasPg = new pg.Client({ connectionString: own.url });
+    await freshAliasPg.connect();
+    try {
+      for (const db of [freshAlias, freshAliasPg]) assert.deepEqual(await aliased.run(db), [{ id: 1, tags: ["sad"] }]);
+    } finally {
+      await freshAlias.end();
+      await freshAliasPg.end();
+    }
     // A column renamed and another added under a name like it: the new one is no declared column.
     await admin.unsafe(`create table moods (id int primary key, mood_list mood[]); insert into moods values (1, '{sad}')`);
     const moods = await built("moods", "select * from moods");
