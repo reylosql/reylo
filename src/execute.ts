@@ -472,7 +472,8 @@ async function executeAsync(c: AnyClient | null | undefined, query: QueryModule,
   // the client with a string, Effect 3's @effect/sql with a symbol.
   if ("~effect/sql/SqlClient" in c || Symbol.for("@effect/sql/SqlClient") in c) throw new TypeError(`reylo cannot run a statement on an Effect SQL client: .run() takes a driver's own client. Inside an Effect, run the query with effect(query, params) from reylo/effect.`);
   checkParams(query, params);
-  await query.runtime.before?.(c, query);
+  // Only a database with a check to make awaits one, so that a driver is handed the statement before anything else is awaited where none is made.
+  if (query.runtime.before) await query.runtime.before(c, query);
   const rows = await query.runtime.run(c, query, statement(query, params));
   if (rows === undefined) throw unsupported(c, query);
   return rows;
