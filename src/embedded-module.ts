@@ -39,7 +39,7 @@ export function lockChecksum(prev: string, name: string, sql: string): string {
 
 /** The lock's checksum of schema.sql's text after the entry `last`, as `lock::schema_sum` writes it. */
 export function schemaChecksum(last: string, sql: string): string {
-  return digest(["schema\n", last, "\n", canonical(sql)]);
+  return digest(["schema\n", last, "\n", canonical(sql.replace(/\r\n/g, "\n"))]);
 }
 
 /** The version of the lock's format this reads, and older (`VERSION` in engine/migrate/src/lock.rs). */
