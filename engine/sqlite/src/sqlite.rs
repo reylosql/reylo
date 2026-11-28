@@ -4147,6 +4147,57 @@ mod tests {
         assert_eq!(a.cardinality, Cardinality::Many);
     }
 
+    #[test]
+    fn a_compounds_code_generation_is_held_to_twenty_compounds_of_500_arms_one_inside_another() {
+        // SQLite codes the first of a compound's arms inside all the others, so a compound of its
+        // 500 arms in each of a chain of WITH queries recurses 500 levels per link: 20 links read,
+        // and past them the statement is refused rather than overflow SQLite's own stack.
+        let small = |sql: String| std::thread::scope(|s| std::thread::Builder::new().stack_size(256 << 10).spawn_scoped(s, || analyze_ddl(&sql, &[], &Extras::default()).analysis).unwrap().join().unwrap());
+        let refused = |a: &Analysis| a.diagnostics.iter().map(|d| d.message.clone()).collect::<Vec<_>>();
+        let arms: String = (1..500).map(|_| " union all select 1").collect();
+        let chain = |n: usize| (1..n).fold("with c0 as (select 1 as a)".to_string(), |q, i| format!("{q}, c{i} as (select a from c{}{arms})", i - 1)) + &format!(" select count(*) from c{}", n - 1);
+        let at = small(chain(20));
+        assert!(at.diagnostics.is_empty(), "{:?}", at.diagnostics);
+        assert_eq!(refused(&small(chain(30))), ["VIEWs and/or subqueries nested too deep"]);
+        // SQLite's bound of 500 arms skips a compound whose last arm is a one-row VALUES, and a
+        // chain of VALUES written out, which it codes as arms too; one VALUES list of many rows it
+        // codes one row after another.
+        let n = 20_000;
+        for sql in [format!("select 1{} union all values (1)", " union all select 1".repeat(n)), format!("values (1){}", " union all values (2)".repeat(n))] {
+            assert_eq!(refused(&small(sql)), ["VIEWs and/or subqueries nested too deep"]);
+        }
+        assert!(small(format!("values (1){}", ", (2)".repeat(n))).diagnostics.is_empty());
+    }
+
+    #[test]
+    fn an_expression_is_held_to_sqlites_bound_through_the_columns_of_the_subqueries_it_reads() {
+        // A column of a WITH query or a view stands for the query's expression, which the engine
+        // reads through and SQLite's flattener copies in its place, so a chain of them each wrapping
+        // the one before adds up: held to SQLite's bound on an expression's depth, 1,000.
+        let small = |sql: String, ddl: &[String]| std::thread::scope(|s| std::thread::Builder::new().stack_size(256 << 10).spawn_scoped(s, || analyze_ddl(&sql, ddl, &Extras::default()).analysis).unwrap().join().unwrap());
+        let refused = |a: &Analysis| a.diagnostics.iter().map(|d| d.message.clone()).collect::<Vec<_>>();
+        let too_tall = ["Expression tree is too large (maximum depth 1000)"];
+        let wrap = |e: String, k: usize| (0..k).fold(e, |e, _| format!("coalesce({e}, 0)"));
+        let queries = |n: usize, k: usize| (1..n).fold("with c0 as (select 1 as a)".to_string(), |q, i| format!("{q}, c{i} as (select {} as a from c{})", wrap("a".into(), k), i - 1));
+        let with = |n: usize, k: usize| format!("{} select a from c{}", queries(n, k), n - 1);
+        // 1 + 333 × 3 levels, and one link more.
+        let at = small(with(334, 3), &[]);
+        assert!(at.diagnostics.is_empty(), "{:?}", at.diagnostics);
+        assert_eq!(col(&at, "a"), ("integer".to_string(), false));
+        for sql in [with(335, 3), with(999, 50)] {
+            assert_eq!(refused(&small(sql, &[])), too_tall);
+        }
+        let views = |n: usize| std::iter::once("create view v0 as select 1 as a".to_string()).chain((1..n).map(|i| format!("create view v{i} as select {} as a from v{}", wrap("a".into(), 3), i - 1))).collect::<Vec<_>>();
+        assert!(small("select a from v333".to_string(), &views(334)).diagnostics.is_empty());
+        assert_eq!(refused(&small("select a from v334".to_string(), &views(335))), too_tall);
+        // A scalar subquery, a level as SQLite counts it, and a WHERE count as the select list does.
+        assert!(small(format!("{} select (select a from c332) as x", queries(333, 3)), &[]).diagnostics.is_empty());
+        let tall = wrap("a".into(), 3);
+        for sql in [format!("{} select (select {tall} from c332) as x", queries(333, 3)), format!("{} select 1 as x from c332 where {tall} > 0", queries(333, 3))] {
+            assert_eq!(refused(&small(sql, &[])), too_tall);
+        }
+    }
+
     fn col(a: &Analysis, name: &str) -> (String, bool) {
         let c = a.columns.iter().find(|c| c.name == name).unwrap_or_else(|| panic!("no column {name}"));
         (affinity_of(&c.ty).unwrap_or("unknown").to_string(), c.nullable)
