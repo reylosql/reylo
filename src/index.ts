@@ -3,7 +3,7 @@
 import { compile, execute, executeSync, type ClientFor, type Dialect, type Inputs, type Marks, type QueryModule, type Runtime, type SyncClientFor } from "./execute.ts";
 import type { SqlMode } from "./engine-core.ts";
 import type { Libraries, Plan } from "./codecs.ts";
-import type { StandardJSONSchemaV1, StandardTypedV1 } from "./standard.ts";
+import type { StandardTypedV1 } from "./standard.ts";
 import { standardQuery, type StandardQueryV1 } from "./standard-query.ts";
 import type { Structured } from "./rows.ts";
 import type { RowBuilder } from "./row.ts";
@@ -74,32 +74,9 @@ export type NestedArray<T> = (T | NestedArray<T>)[];
  */
 export type JsonInput = string | number | boolean | null | { toJSON(key: string): unknown } | { readonly [key: string]: JsonInput | undefined } | readonly JsonInput[];
 
-/**
- * The shape of a row value as JSON, which `outputSchema` describes: what `JSON.stringify` writes,
- * except where it writes no JSON or loses the value. A BigInt is the integer it is (JSON.stringify
- * refuses one, so a serializer writes it, as `JSON.rawJSON(String(v))` does), bytes are their
- * base64, and a Set or a typed array of numbers is an array of its members, where JSON.stringify
- * writes `{}` or an object of its elements by index. A Temporal value and a decimal library's
- * value are the text their `toJSON()` writes.
- */
-export type AsJson<T> = T extends bigint
-  ? number
-  : T extends Date | Uint8Array | { toJSON(): string }
-  ? string
-  : T extends ReadonlySet<infer U>
-    ? AsJson<U>[]
-    : T extends ArrayLike<number> & ArrayBufferView
-      ? number[]
-      : T extends readonly (infer U)[]
-        ? AsJson<U>[]
-        : T extends object
-          ? { [K in keyof T]: AsJson<T[K]> }
-          : T;
-
 export type ReyloTypes<Params, Row, C extends Cardinality> = {
   readonly element: Row;
   readonly cardinality: C;
-  readonly json: Materialize<AsJson<Row>, C>;
   readonly input: Params;
 };
 
@@ -112,7 +89,7 @@ export type TryResult<Value, E> = { readonly value: Value; readonly error?: unde
 
 /** A query: its statement, its parameters and result types (`Params`, `Row`), and the error its database may raise (`E`). */
 export interface Query<Params, Row, C extends Cardinality, D extends Dialect, E = QueryError<D>>
-  extends StandardTypedV1<Params, Materialize<Row, C>>, StandardJSONSchemaV1<Params, Materialize<Row, C>>, StandardQueryV1<Params, Materialize<Row, C>, D> {
+  extends StandardTypedV1<Params, Materialize<Row, C>>, StandardQueryV1<Params, Materialize<Row, C>, D> {
   readonly dialect: D;
   // `sql` and `raw` carry no doc comment: each module declares them as their own text, which a
   // hover shows. `sql` is the base text: a structured parameter (`::rows`, `::row`, src/rows.ts) in a
@@ -133,12 +110,8 @@ export interface Query<Params, Row, C extends Cardinality, D extends Dialect, E 
    * connection. False for any write, and for a query that locks rows or may call a volatile function.
    */
   readonly readOnly: boolean;
-  /** The JSON Schema (2020-12) of the parameters, as the object `run` takes. */
-  readonly inputSchema: Record<string, unknown>;
-  /** The JSON Schema (2020-12) of the result as JSON (`AsJson`): what `run` returns, as `JSON.stringify` writes it, but a BigInt as the integer it is, bytes as their base64, and a Set or a typed array of numbers as an array of its members. */
-  readonly outputSchema: Record<string, unknown>;
-  /** Standard JSON Schema's `jsonSchema` and Standard Query's `query`: a driver that supports Standard Query runs the import with the same input and output as `.run()`. A ClickHouse query maps no values, and runs through `.run()` alone (src/standard-query.ts). */
-  readonly "~standard": StandardJSONSchemaV1.Props<Params, Materialize<Row, C>> & StandardQueryV1.Props<Params, Materialize<Row, C>, D> & { readonly query: { readonly cardinality: C; output(rows: readonly Record<string, unknown>[]): Materialize<Row, C> } };
+  /** Standard Query's `query`: a driver that supports Standard Query runs the import with the same input and output as `.run()`. A ClickHouse query maps no values, and runs through `.run()` alone (src/standard-query.ts). */
+  readonly "~standard": StandardQueryV1.Props<Params, Materialize<Row, C>, D> & { readonly query: { readonly cardinality: C; output(rows: readonly Record<string, unknown>[]): Materialize<Row, C> } };
   readonly "~reylo": ReyloTypes<Params, Row, C>;
   /**
    * Runs the statement on the client, or on a transaction or connection taken from it. The
@@ -214,7 +187,6 @@ export type QueryDefinition = {
   value?: boolean;
   /** Whether the engine finds nothing in the statement that could write: the query's `readOnly`. */
   readOnly?: boolean;
-  jsonSchema?: { input: Record<string, unknown>; output: Record<string, unknown> };
   /** The checks of a typed JSON, structured or cast parameter, `checks` from "reylo": a build step passes them where the statement has one, so that an app none of whose statements has one bundles none of them. */
   checks?: Checks;
 };
@@ -261,9 +233,6 @@ export function defineClickhouseQuery<Params, Row, C extends Cardinality>(def: O
 function define<Params, Row, C extends Cardinality, D extends Dialect>(runtime: Runtime<D>, def: Omit<QueryDefinition, "dialect"> & { cardinality?: C }): Query<Params, Row, C, D> {
   const dialect = runtime.dialect;
   const cardinality = (def.cardinality ?? "many") as C;
-  const missingSchema = () => {
-    throw new Error(`No JSON Schema is available for this query: a module a build step writes carries it, and a query defined by hand has none.`);
-  };
   // Reylo's own errors about the query start with its file.
   const where = def.source ? `${def.source}: ` : "";
   // What the run time reads, kept off the query object, whose `sql` is the compiled statement.
@@ -300,19 +269,9 @@ function define<Params, Row, C extends Cardinality, D extends Dialect>(runtime: 
     source: def.source,
     cardinality,
     readOnly: def.readOnly ?? false,
-    get inputSchema() {
-      return def.jsonSchema?.input ?? missingSchema();
-    },
-    get outputSchema() {
-      return def.jsonSchema?.output ?? missingSchema();
-    },
     "~standard": {
       version: 1,
       vendor: "reylo",
-      jsonSchema: {
-        input: () => def.jsonSchema?.input ?? missingSchema(),
-        output: () => def.jsonSchema?.output ?? missingSchema(),
-      },
       query: standardQuery(module, (rows) => materialize(rows as Row[])) as ReturnType<typeof standardQuery<D, Materialize<Row, C>>> & { readonly cardinality: C },
     },
     "~reylo": undefined as unknown as ReyloTypes<Params, Row, C>,

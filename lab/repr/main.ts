@@ -20,5 +20,3 @@ const c: { id: number } = null! as Params;
 const d: Params = null! as { id: number };
 declare const pool: { query(text: string, values?: unknown[]): Promise<{ rows: unknown[] }> };
 const e: ExpectedRow | null = await query.run(pool, { id: 1 });
-// As JSON a BigInt is the integer it is (src/schema.ts).
-const j: { id: number; created_at: string; big: number | null; day: string; local: string; stamps: string[]; n: number } | null = query["~reylo"].json;

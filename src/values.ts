@@ -1,9 +1,8 @@
 // How Reylo represents a SQL value in JavaScript: one table, which the type renderer
-// (src/render.ts), the JSON Schema writer (src/schema.ts) and the run time's decoders
-// (src/decode.ts, src/decode-mysql.ts, src/decode-sqlite.ts) all read, so that the type a module
-// declares and the value `run` returns cannot drift apart. Reylo sets
-// every value's type itself, on every driver, whatever the app configured its driver to return:
-// one representation per SQL type.
+// (src/render.ts) and the run time's decoders (src/decode.ts, src/decode-mysql.ts,
+// src/decode-sqlite.ts) all read, so that the type a module declares and the value `run` returns
+// cannot drift apart. Reylo sets every value's type itself, on every driver, whatever the app
+// configured its driver to return: one representation per SQL type.
 //
 // A value's representation is its kind, which the build writes into the module for each output
 // column (`columns`, as `[name, kind]`): `bool` is a boolean; `int` and `float` a number; `int8` a
@@ -285,7 +284,7 @@ function isRawJson(v: unknown): v is { rawJSON: string } {
 const POINT = "{ x: number; y: number }";
 
 /** The TypeScript type of each scalar kind: what a value of that kind is at run time. */
-export const TS_TYPE: Readonly<Record<ScalarKind, string>> = {
+const TS_TYPE: Readonly<Record<ScalarKind, string>> = {
   bool: "boolean",
   int: "number",
   float: "number",
@@ -365,13 +364,13 @@ export function scalarKind(name: string): Kind {
 }
 
 /** Whether a SQLite declared type names a 64-bit integer: `BIGINT`, `INT8` or `UNSIGNED BIG INT`, a size after it ignored (engine/sqlite `is_int8_declared`). */
-export function sqliteWide(declared: string): boolean {
+function sqliteWide(declared: string): boolean {
   const base = declared.split("(")[0]!.trim().toLowerCase().split(/\s+/).join(" ");
   return base === "bigint" || base === "int8" || base === "unsigned big int";
 }
 
 /** SQLite's affinity of a declared type, by its five rules (engine/sqlite `affinity`). */
-export function sqliteAffinity(declared: string): "integer" | "text" | "blob" | "real" | "numeric" {
+function sqliteAffinity(declared: string): "integer" | "text" | "blob" | "real" | "numeric" {
   const d = declared.toUpperCase();
   if (d.includes("INT")) return "integer";
   if (d.includes("CHAR") || d.includes("CLOB") || d.includes("TEXT")) return "text";
