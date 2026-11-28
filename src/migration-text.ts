@@ -265,16 +265,16 @@ export function transactionControl(sql: string): string | undefined {
 }
 
 /**
- * Whether a SQLite migration turns foreign keys on: `pragma foreign_keys` (its name quoted or not,
- * as itself or `main.foreign_keys`) set to a value SQLite reads as on (`getSafetyLevel`): a nonzero
- * integer, or `on`, `yes`, `true`, `full` or `extra`, quoted or not.
+ * Whether a SQLite migration may turn foreign keys on: any `pragma foreign_keys` assignment (its
+ * name quoted or not, as itself or `main.foreign_keys`) but a plain off, `0`, `off`, `no` or
+ * `false`, quoted or not. The engines read more spellings as on than any list keeps up with (`2`,
+ * `0x1`, `1.0`, `full`), so every other value counts.
  */
 export function turnsForeignKeysOn(sql: string): boolean {
   const bare = (token: string | undefined) => token?.replace(/^'/, "").toUpperCase();
   return statementTokens(sql).some((t) => {
     const at = t[0] === "PRAGMA" ? t.findIndex((token, i) => i > 0 && i < 3 && bare(token) === "FOREIGN_KEYS") : -1;
     const value = at > 0 ? bare(t[at + 1]) : undefined;
-    if (value === undefined) return false;
-    return /^[+-]?\d+$/.test(value) ? Number(value) !== 0 : ["ON", "YES", "TRUE", "FULL", "EXTRA"].includes(value);
+    return value !== undefined && !["0", "OFF", "NO", "FALSE"].includes(value);
   });
 }

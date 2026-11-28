@@ -284,12 +284,15 @@ test("the key check Turso's engine runs counts the rows SQLite's foreign_key_che
   }
 });
 
-test("migrate(db) refuses, on Turso's engine, a migration that turns foreign keys on inside its transaction", async () => {
+test("migrate(db) refuses, on Turso's engine, a migration that may turn foreign keys on inside its transaction", async () => {
   const PARENT = { name: "20261107120000_posts.sql", sql: "create table posts (id integer primary key, user_id integer references users (id) on delete cascade); insert into users (name) values ('ada'); insert into posts (user_id) values (1);" };
   const REBUILD = { name: "20261108120000_rebuild.sql", sql: "pragma foreign_keys = on; create table users_new (id integer primary key, name text not null); insert into users_new select * from users; drop table users; alter table users_new rename to users;" };
   const turso = await driver("@tursodatabase/database").connect(":memory:");
   assert.deepEqual(await runMigrationsOn(turso, [USERS, PARENT]), [USERS.name, PARENT.name]);
-  await assert.rejects(runMigrationsOn(turso, [USERS, PARENT, REBUILD]), /^Error: reylo: the migration 20261108120000_rebuild\.sql turns foreign keys on, which Turso's engine takes inside the migration's transaction/);
+  await assert.rejects(runMigrationsOn(turso, [USERS, PARENT, REBUILD]), /^Error: reylo: the migration 20261108120000_rebuild\.sql sets foreign_keys to something other than off, which Turso's engine takes inside the migration's transaction/);
+  // On, then off again before the check: refused before it runs, so nothing cascades.
+  const ON_OFF = { ...REBUILD, sql: REBUILD.sql.replace("pragma foreign_keys = on; ", "pragma foreign_keys = 0x1; ") + " pragma foreign_keys = off;" };
+  await assert.rejects(runMigrationsOn(turso, [USERS, PARENT, ON_OFF]), /^Error: reylo: the migration 20261108120000_rebuild\.sql sets foreign_keys to something other than off/);
   // A way of turning them on the preflight doesn't read, as this connection does with the migration's
   // own text, is caught once the migration ran, inside its transaction, whose rollback undoes the cascade.
   const SILENT = { ...REBUILD, sql: REBUILD.sql.replace("pragma foreign_keys = on; ", "") };

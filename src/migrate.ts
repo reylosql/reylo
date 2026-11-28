@@ -238,7 +238,7 @@ export async function runMigrationsOn(db: MigrationConnection, list: readonly Mi
     if (control) return `can't run atomically: it has its own ${control}, and Reylo runs each migration in a transaction of its own, so take it out`;
     // SQLite takes the pragma only outside a transaction, but Turso's engine takes it inside, where a
     // rebuilt table's drop would then cascade to the rows that reference it.
-    if (turso && turnsForeignKeysOn(m.sql)) return "turns foreign keys on, which Turso's engine takes inside the migration's transaction, so dropping a table others reference would cascade to their rows: take it out, since Reylo sets them back as the app had them after each migration";
+    if (turso && turnsForeignKeysOn(m.sql)) return "sets foreign_keys to something other than off, which Turso's engine takes inside the migration's transaction, so dropping a table others reference could cascade to their rows: take it out, since Reylo sets them back as the app had them after each migration";
     return undefined;
   });
   let open = false;

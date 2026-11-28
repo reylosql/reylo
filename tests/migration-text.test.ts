@@ -67,6 +67,6 @@ test("a SQLite migration's own begin, commit, end, rollback, savepoint or releas
 });
 
 test("a migration that turns foreign keys on is found however SQLite reads the pragma", () => {
-  for (const sql of ["pragma foreign_keys = on;", "PRAGMA \"foreign_keys\" = ON;", "pragma main.foreign_keys = 2;", "pragma foreign_keys = 01;", "pragma foreign_keys('yes');", "pragma foreign_keys = full;", "create table a (b); pragma [Foreign_Keys] = true;"]) assert.ok(turnsForeignKeysOn(sql), sql);
-  for (const sql of ["pragma foreign_keys = off;", "pragma foreign_keys = 0;", "pragma foreign_keys;", "pragma foreign_key_check;", "-- pragma foreign_keys = on\ncreate table a (b);", "select 'pragma foreign_keys = on';"]) assert.ok(!turnsForeignKeysOn(sql), sql);
+  for (const sql of ["pragma foreign_keys = on;", "PRAGMA \"foreign_keys\" = ON;", "pragma main.foreign_keys = 2;", "pragma foreign_keys = 01;", "pragma foreign_keys = 0x1;", "pragma foreign_keys = 1.0;", "pragma foreign_keys('yes');", "pragma foreign_keys = full;", "create table a (b); pragma [Foreign_Keys] = true;"]) assert.ok(turnsForeignKeysOn(sql), sql);
+  for (const sql of ["pragma foreign_keys = off;", "pragma foreign_keys = 0;", "PRAGMA foreign_keys = 'No';", "pragma foreign_keys;", "pragma foreign_key_check;", "-- pragma foreign_keys = on\ncreate table a (b);", "select 'pragma foreign_keys = on';"]) assert.ok(!turnsForeignKeysOn(sql), sql);
 });
