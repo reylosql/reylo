@@ -37,6 +37,19 @@ test("the type check's URL takes libpq's variables from the env files where the 
   // A URL that names its database takes no PGDATABASE, and one of another database none at all.
   assert.equal(resolveProject(e, dir, { DATABASE_URL: "postgres://app:pw@db.internal/shop" }).url, "postgres://app:pw@db.internal/shop");
   assert.equal(resolveProject(e, dir, { DATABASE_URL: "mysql://root@127.0.0.1/app" }).url, "mysql://root@127.0.0.1/app");
+  // A variable the environment sets empty, the files leave alone, as dotenv does.
+  assert.equal(resolveProject(e, dir, { PGDATABASE: "" }).url, "postgres://app@db.internal/?password=s3cret");
+  // A dry run's shadow is the URL it names alone.
+  assert.equal(resolveProject(e, dir, { REYLO_ANALYSIS_URL: "postgres://app@shadow/" }).url, "postgres://app@shadow/");
+  // A certificate file is named from the project's root, where its env files are.
+  writeFileSync(join(dir, ".env"), "DATABASE_URL=postgres://app@db.internal/shop\nPGSSLROOTCERT=certs/root.pem\n");
+  assert.equal(resolveProject(e, dir, {}).url, `postgres://app@db.internal/shop?sslrootcert=${encodeURIComponent(join(dir, "certs/root.pem"))}`);
+});
+
+test("direct_url, Reylo's own URL, takes no variable the env files set", async () => {
+  const e = await engine("postgres");
+  const dir = tree({ "package.json": "{}", ".env": "PGDATABASE=shop\nPGUSER=app\n", ".reylo.yaml": "direct_url: postgres://localhost/\n" });
+  assert.equal(resolveProject(e, dir, {}).url, "postgres://localhost/");
 });
 
 test("a variable of the environment is read in any case of its name on Windows, the first of two spellings in order", () => {

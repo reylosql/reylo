@@ -529,10 +529,11 @@ fn place(url: &str) -> String {
     let (rest, query) = rest.split_once('?').unwrap_or((rest, ""));
     let (authority, path) = rest.find('/').map_or((rest, ""), |at| rest.split_at(at));
     let host = authority.rsplit_once('@').map_or(authority, |(_, host)| host);
-    let host = if host.is_empty() { query.split('&').find_map(|p| p.strip_prefix("host=")).unwrap_or("localhost") } else { host };
-    // A database the path leaves out, as `?dbname=` names one, the last as the engine reads it.
-    let dbname = query.split('&').filter_map(|p| p.strip_prefix("dbname=")).last().filter(|_| path.is_empty() || path == "/");
-    match dbname {
+    // The query's host and database, decoded, the last of each, as the engine reads them: a host
+    // where the URL names none, and a database whatever the path says, as `?dbname=` names one.
+    let param = |name: &str| query.split('&').filter_map(|p| p.split_once('=')).filter(|(n, _)| decoded(n) == name).map(|(_, v)| decoded(v)).last();
+    let host = if host.is_empty() { param("host").unwrap_or_else(|| "localhost".to_string()) } else { host.to_string() };
+    match param("dbname") {
         Some(dbname) => format!("{host}/{dbname}"),
         None => format!("{host}{path}"),
     }
@@ -654,7 +655,7 @@ fn server(url: &str) -> String {
 /// the system's user name, which a URL with no user takes on every machine it is copied to, so that
 /// a cache built in CI is still read on a laptop (`ENVIRONMENT` in `src/analyze.ts`).
 #[cfg(any(feature = "postgres", feature = "mysql"))]
-const ENVIRONMENT: [&str; 5] = ["PGHOST", "PGPORT", "PGUSER", "PGDATABASE", "PGOPTIONS"];
+const ENVIRONMENT: [(&str, &str); 5] = [("PGHOST", "host"), ("PGPORT", "port"), ("PGUSER", "user"), ("PGDATABASE", "dbname"), ("PGOPTIONS", "options")];
 
 /// [`server`], with the variables `env` gives.
 #[cfg(any(feature = "postgres", feature = "mysql"))]
@@ -686,7 +687,8 @@ fn server_in(url: &str, env: &dyn Fn(&str) -> Option<String>) -> String {
             (path.is_empty() || path == "/") && !named("dbname"),
             !named("options"),
         ];
-        let found: Vec<String> = ENVIRONMENT.iter().zip(left_out).filter(|(_, out)| *out).filter_map(|(name, _)| env(name).filter(|v| !v.is_empty()).map(|value| format!("{name}={}", encoded(&value)))).collect();
+        // Each as the parameter that would name the part, so that a database has one name whether a variable or the URL names it.
+        let found: Vec<String> = ENVIRONMENT.iter().zip(left_out).filter(|(_, out)| *out).filter_map(|((name, parameter), _)| env(name).filter(|v| !v.is_empty()).map(|value| format!("{parameter}={}", encoded(&value)))).collect();
         chosen.extend(found);
     }
     let query = if chosen.is_empty() { String::new() } else { format!("?{}", chosen.join("&")) };
@@ -701,7 +703,6 @@ fn encoded(value: &str) -> String {
 
 /// A URL parameter's name decoded as `decodeURIComponent` decodes it, or as written where that
 /// throws: a `%` that starts no escape, or escapes that are no UTF-8.
-#[cfg(any(feature = "postgres", feature = "mysql"))]
 fn decoded(value: &str) -> String {
     let hex = |at: usize| value.as_bytes().get(at).and_then(|b| char::from(*b).to_digit(16));
     let mut bytes = Vec::with_capacity(value.len());
@@ -869,6 +870,10 @@ mod tests {
         assert_eq!(place("mysql://root@127.0.0.1:3306"), "127.0.0.1:3306");
         assert_eq!(place("postgres:///shop?host=/var/run/postgresql"), "/var/run/postgresql/shop");
         assert_eq!(place("postgres:///shop"), "localhost/shop");
+        // A database `?dbname=` names, as a project's env files write PGDATABASE, over the path's, and a host decoded.
+        assert_eq!(place("postgres://app@db.internal/?dbname=shop"), "db.internal/shop");
+        assert_eq!(place("postgres://app@db.internal/other?dbname=shop"), "db.internal/shop");
+        assert_eq!(place("postgres:///shop?host=%2Fvar%2Frun%2Fpostgresql"), "/var/run/postgresql/shop");
     }
 
     /// The same as the loader's test of it (`tests/analyze.test.ts`): the session read the fingerprint

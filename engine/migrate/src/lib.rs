@@ -116,6 +116,7 @@ impl Dialect {
 /// there, the first one after it is taken for the login's, as a password that holds a `?` or a `#`
 /// would leave it: hiding too much shows no secret.
 pub fn redact(url: &str) -> String {
+    let url = &without_query_password(url).0;
     let Some(s) = url.find("://") else { return url.to_string() };
     let host = s + 3;
     let end = url[host..].find(['?', '#']).map_or(url.len(), |i| host + i);
@@ -123,6 +124,33 @@ pub fn redact(url: &str) -> String {
         Some(at) => format!("{}//…{}", &url[..s + 1], &url[host + at..]),
         None => url.to_string(),
     }
+}
+
+/// The URL without a `password` its query names (a name read decoded, as libpq reads one), and the
+/// last of them, decoded, as libpq takes it: a project's env files write their `PGPASSWORD` there.
+/// A credential in the query is as secret as one in the login, so whatever leaves out the login's
+/// for a command line, a message or a cache's key leaves out this one too.
+pub fn without_query_password(url: &str) -> (String, Option<String>) {
+    let Some((base, query)) = url.split_once('?') else { return (url.to_string(), None) };
+    let (query, fragment) = query.split_once('#').map_or((query, None), |(q, f)| (q, Some(f)));
+    let mut password = None;
+    let kept: Vec<&str> = query
+        .split('&')
+        .filter(|pair| {
+            let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
+            let is_password = percent_decode(name) == "password";
+            if is_password {
+                password = Some(percent_decode(value));
+            }
+            !is_password
+        })
+        .collect();
+    if password.is_none() {
+        return (url.to_string(), None);
+    }
+    let query = kept.join("&");
+    let fragment = fragment.map(|f| format!("#{f}")).unwrap_or_default();
+    (if query.is_empty() { format!("{base}{fragment}") } else { format!("{base}?{query}{fragment}") }, password)
 }
 
 /// `%XX` escapes decoded, as in a URL's path.
@@ -166,6 +194,10 @@ mod tests {
         assert_eq!(redact("mysql://u:pa/ss@h:3306/db?charset=utf8mb4"), "mysql://…@h:3306/db?charset=utf8mb4");
         assert_eq!(redact("mysql://u:pa?ss@h:3306/db"), "mysql://…@h:3306/db");
         assert_eq!(redact("sqlite://app.db"), "sqlite://app.db");
+        // A password the query names, as a project's env files write PGPASSWORD, is left out too.
+        assert_eq!(redact("postgres://u@h/db?sslmode=require&password=s3cret"), "postgres://…@h/db?sslmode=require");
+        assert_eq!(redact("postgres://h/db?%70assword=s3cret#x"), "postgres://h/db#x");
+        assert_eq!(without_query_password("postgres://h/db?password=a&password=b%40c&dbname=x"), ("postgres://h/db?dbname=x".to_string(), Some("b@c".to_string())));
         // ClickHouse's URL keeps secrets in its query, which the refusal leaves out.
         let refusal = Dialect::of_url("clickhouse+https://app:p@ss@db.example:8443/shop?access_token=SECRET&http_header_X-Key=SECRET").unwrap_err().0;
         assert!(refusal.ends_with("clickhouse+https://…@db.example:8443/shop") && !refusal.contains("SECRET") && !refusal.contains("ss@"), "{refusal}");

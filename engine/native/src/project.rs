@@ -385,15 +385,28 @@ impl Project {
     /// where it came from, for a message: `"direct_url" in .reylo.yaml, DB_PASSWORD in .env`.
     pub fn type_check_url(&self) -> Result<Option<(String, String)>, String> {
         let Some((url, source)) = self.written_url()? else { return Ok(None) };
-        if dialect_of(&url) != Some("postgres") {
+        // libpq's variables the env files set, for what DATABASE_URL leaves out ([`with_env_files`]):
+        // the URL the app connects with, with the files loaded into its environment. `direct_url` is
+        // Reylo's alone.
+        if self.config.direct_url.is_some() || dialect_of(&url) != Some("postgres") {
             return Ok(Some((url, source)));
         }
-        // libpq's variables the env files set, for what the URL leaves out ([`with_env_files`]).
-        // A variable the environment sets is the engine's to read there, in any case of its name on Windows, as Windows reads one.
-        let set = |name: &str| self.env.iter().any(|(key, value)| (key == name || (cfg!(windows) && key.eq_ignore_ascii_case(name))) && !value.is_empty());
-        let from_files = |name: &str| if set(name) { None } else { self.env_files.iter().find_map(|p| read_env_file(p).remove(name).map(|v| (v, p.clone()))) };
-        let (url, names) = with_env_files(&url, &|name| from_files(name).map(|(value, _)| value));
-        let source = names.iter().fold(source, |source, name| format!("{source}, {name} in {}", shown(&self.cwd, &from_files(name).expect("it set the variable").1)));
+        // A variable the environment sets, even empty, the files leave alone, as dotenv does: in any
+        // case of its name on Windows, as Windows reads one.
+        let set = |name: &str| self.env.keys().any(|key| key == name || (cfg!(windows) && key.eq_ignore_ascii_case(name)));
+        let files: Vec<(&PathBuf, HashMap<String, String>)> = self.env_files.iter().map(|p| (p, read_env_file(p))).collect();
+        let mut hits: HashMap<&str, (String, &PathBuf)> = HashMap::new();
+        for (name, _) in LIBPQ_VARIABLES {
+            if set(name) {
+                continue;
+            }
+            let Some((path, value)) = files.iter().find_map(|(path, vars)| vars.get(name).map(|v| (*path, v.clone()))) else { continue };
+            // A certificate file is the app's, named from the project's root, where its env files are.
+            let value = if matches!(name, "PGSSLROOTCERT" | "PGSSLCERT" | "PGSSLKEY") && !value.is_empty() && value != "system" { self.root.join(&value).to_string_lossy().into_owned() } else { value };
+            hits.insert(name, (value, path));
+        }
+        let (url, names) = with_env_files(&url, &|name| hits.get(name).map(|(value, _)| value.clone()));
+        let source = names.iter().fold(source, |source, name| format!("{source}, {name} in {}", shown(&self.cwd, hits[*name].1)));
         Ok(Some((url, source)))
     }
 
@@ -942,6 +955,16 @@ mod tests {
         // A URL that names its database takes no PGDATABASE, and one of another database none at all.
         assert_eq!(url(&[("DATABASE_URL", "postgres://app:pw@db.internal/shop")]).0, "postgres://app:pw@db.internal/shop");
         assert_eq!(url(&[("DATABASE_URL", "mysql://root@127.0.0.1/app")]).0, "mysql://root@127.0.0.1/app");
+        // A variable the environment sets empty, the files leave alone, as dotenv does.
+        assert_eq!(url(&[("PGDATABASE", "")]).0, "postgres://app@db.internal/?password=s3cret");
+        // A certificate file is named from the project's root, where its env files are.
+        std::fs::write(dir.join(".env"), "DATABASE_URL=postgres://app@db.internal/shop\nPGSSLROOTCERT=certs/root.pem\n").unwrap();
+        std::fs::remove_file(dir.join(".env.local")).unwrap();
+        assert_eq!(url(&[]).0, format!("postgres://app@db.internal/shop?sslrootcert={}", percent_encode(&dir.join("certs/root.pem").to_string_lossy())));
+        // direct_url, Reylo's own URL, takes no variable the env files set.
+        std::fs::write(dir.join(".env"), "PGDATABASE=shop\n").unwrap();
+        std::fs::write(dir.join(".reylo.yaml"), "direct_url: postgres://localhost/\n").unwrap();
+        assert_eq!(url(&[]).0, "postgres://localhost/");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

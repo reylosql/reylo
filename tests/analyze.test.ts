@@ -573,6 +573,7 @@ test("a project whose env file names its database by PGDATABASE analyzes that da
     assert.ok(typed.ok, typed.ok ? "" : typed.message);
     assert.ok(!typed.analysis.columns[0]!.nullable);
     assert.match(session.project.urlSource, /^DATABASE_URL in \.env, PGDATABASE in \.env$/);
+    assert.match(session.where(), /\/reylo_envfile_first_\d+$/);
   } finally {
     await session.close();
     await first.drop();

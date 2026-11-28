@@ -525,9 +525,9 @@ export class Session {
     if (dialect === "sqlite") return sqlitePath(url ?? "", root);
     try {
       const u = new URL(url ?? "");
-      // A database the path leaves out, as `?dbname=` names one, the last as the engine reads it.
-      const dbname = u.pathname === "" || u.pathname === "/" ? u.searchParams.getAll("dbname").at(-1) : undefined;
-      return `${u.hostname || u.searchParams.get("host") || "localhost"}${u.port ? `:${u.port}` : ""}${dbname ? `/${dbname}` : u.pathname}`;
+      // A database `?dbname=` names, whatever the path says, the last as the engine reads it.
+      const dbname = u.searchParams.getAll("dbname").at(-1);
+      return `${u.hostname || u.searchParams.getAll("host").at(-1) || "localhost"}${u.port ? `:${u.port}` : ""}${dbname ? `/${dbname}` : u.pathname}`;
     } catch {
       return "the database";
     }
@@ -700,7 +700,8 @@ function serverName(url: string, dialect: Dialect, env: Record<string, string | 
       PGDATABASE: (path === "" || path === "/") && !named.has("dbname"),
       PGOPTIONS: !named.has("options"),
     };
-    for (const name of ENVIRONMENT) if (leftOut[name] && env[name]) chosen.push(`${name}=${encodeURIComponent(env[name])}`);
+    // Each as the parameter that would name the part, so that a database has one name whether a variable or the URL names it.
+    for (const name of ENVIRONMENT) if (leftOut[name] && env[name]) chosen.push(`${PARAMETER[name]}=${encodeURIComponent(env[name])}`);
   }
   return `${scheme}://${user}@${host}${path}${chosen.length ? `?${chosen.join("&")}` : ""}`;
 }
@@ -711,6 +712,9 @@ function serverName(url: string, dialect: Dialect, env: Record<string, string | 
  * on every machine it is copied to, so that a cache built in CI is still read on a laptop.
  */
 const ENVIRONMENT = ["PGHOST", "PGPORT", "PGUSER", "PGDATABASE", "PGOPTIONS"] as const;
+
+/** The URL parameter that names the part each of `ENVIRONMENT` gives. */
+const PARAMETER: Record<(typeof ENVIRONMENT)[number], string> = { PGHOST: "host", PGPORT: "port", PGUSER: "user", PGDATABASE: "dbname", PGOPTIONS: "options" };
 
 /**
  * The variables of `ENVIRONMENT` this process has, as the engine's connection reads them when it

@@ -804,6 +804,13 @@ pub fn transaction_pooler(url: &str, key: &str) -> Option<String> {
         Some((host, port)) if !port.contains(']') => (host, port.parse::<u16>().ok()),
         _ => (authority.as_str(), None),
     };
+    // The query's host and port replace the URL's own, as libpq reads them: a project's env files
+    // write their PGHOST and PGPORT there.
+    let query = url.split_once('?').map_or("", |(_, q)| q.split('#').next().unwrap_or_default());
+    let param = |name: &str| query.split('&').filter_map(|pair| pair.split_once('=')).filter(|(n, _)| crate::percent_decode(n) == name).map(|(_, v)| crate::percent_decode(v).to_ascii_lowercase()).last();
+    let (given_host, given_port) = (param("host"), param("port"));
+    let host = given_host.as_deref().map_or(host, |h| h.split(',').next().unwrap_or_default());
+    let port = given_port.map_or(port, |p| p.split(',').next().and_then(|p| p.parse().ok()));
     transaction_pooler_at(host, port, &shown_url(url), key)
 }
 
@@ -1018,17 +1025,19 @@ pub(crate) fn pg_dump(url: &str, major: i64, args: &[String]) -> Result<String, 
 }
 
 /// The URL without its password, and the password, decoded.
+/// A `password` the query names is taken too, and wins over the login's, as libpq reads the URL.
 fn without_password(url: &str) -> (String, Option<String>) {
-    let Some(scheme_end) = url.find("://") else { return (url.to_string(), None) };
+    let (url, in_query) = crate::without_query_password(url);
+    let Some(scheme_end) = url.find("://") else { return (url, in_query) };
     let rest = &url[scheme_end + 3..];
     let at = host_start(rest);
     if at == 0 {
-        return (url.to_string(), None);
+        return (url.clone(), in_query);
     }
     let userinfo = &rest[..at - 1];
     match userinfo.split_once(':') {
-        Some((user, password)) => (format!("{}://{user}@{}", &url[..scheme_end], &rest[at..]), Some(crate::percent_decode(password))),
-        None => (url.to_string(), None),
+        Some((user, password)) => (format!("{}://{user}@{}", &url[..scheme_end], &rest[at..]), in_query.or_else(|| Some(crate::percent_decode(password)))),
+        None => (url.clone(), in_query),
     }
 }
 
@@ -2371,6 +2380,10 @@ mod url_tests {
         assert!(!neon.contains("secret"), "{neon}");
         let supabase = transaction_pooler("postgres://postgres.abc:secret@aws-1-us-east-1.pooler.supabase.com:6543/postgres", "shadow_url").expect("Supabase's transaction pooler");
         assert!(supabase.contains("port 5432") && supabase.ends_with("in shadow_url in .reylo.yaml") && !supabase.contains("secret"), "{supabase}");
+        // The query's port and host replace the URL's own, as a project's env files write PGPORT and PGHOST.
+        assert!(transaction_pooler("postgres://postgres.abc@aws-1-us-east-1.pooler.supabase.com/postgres?port=6543", "").is_some());
+        assert!(transaction_pooler("postgres://u@/neondb?host=ep-late-darkness-bb241gty-pooler.c-15.us-east-1.aws.neon.tech", "").is_some());
+        assert_eq!(transaction_pooler("postgres://postgres.abc@aws-1-us-east-1.pooler.supabase.com:6543/postgres?port=5432", ""), None);
         // An app's own pool has no project file's key to name.
         let pool = transaction_pooler("postgres://neondb_owner@ep-late-darkness-bb241gty-pooler.c-15.us-east-1.aws.neon.tech:5432/neondb", "").expect("Neon's pooled host");
         assert!(pool.ends_with("host ep-late-darkness-bb241gty.c-15.us-east-1.aws.neon.tech"), "{pool}");
@@ -2405,5 +2418,14 @@ mod tests {
         assert_eq!(with_database("postgres://u:p@h/app?dbname=app", "postgres"), "postgres://u:p@h/postgres");
         assert_eq!(with_database("postgres://u:p@h/app?%64bname=app", "postgres"), "postgres://u:p@h/postgres");
         assert_eq!(with_database("mysql://root@h:3306", "reylo_shadow_1"), "mysql://root@h:3306/reylo_shadow_1");
+    }
+
+    #[test]
+    fn pg_dump_takes_a_password_from_the_query_or_the_login_in_its_environment() {
+        use super::without_password;
+        assert_eq!(without_password("postgres://u:p%40ss@h/db"), ("postgres://u@h/db".to_string(), Some("p@ss".to_string())));
+        // A project's env files write PGPASSWORD into the query, which wins over the login's, as libpq reads it.
+        assert_eq!(without_password("postgres://u:old@h/db?sslmode=require&password=s3cret"), ("postgres://u@h/db?sslmode=require".to_string(), Some("s3cret".to_string())));
+        assert_eq!(without_password("postgres://u@h/db"), ("postgres://u@h/db".to_string(), None));
     }
 }

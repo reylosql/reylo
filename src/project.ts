@@ -387,6 +387,9 @@ const LIBPQ_VARIABLES = [
   ["PGSSLKEY", "sslkey"],
 ] as const;
 
+/** libpq's variables that name a file. */
+const CERTIFICATE_VARIABLES = new Set(["PGSSLROOTCERT", "PGSSLCERT", "PGSSLKEY"]);
+
 /**
  * A Postgres URL with libpq's variables that `set` gives (the env files', where the environment
  * sets none) for the parts it leaves out, each as the URL's own parameter, and the names of those
@@ -571,19 +574,23 @@ export function resolveProject(engine: Engine | MissingEngine, projectDir: strin
     url = hit?.value;
     if (hit) urlSource = hit.source;
   }
-  // libpq's variables the env files set, for what the type check's URL leaves out (`withEnvFiles`).
-  if (url && !shadow && dialectOf(url) === "postgres") {
-    const fromFiles = (name: string) => (environmentValue(env, name) ? undefined : envFiles.map((path) => ({ value: readEnvFile(path)[name], path })).find((hit) => hit.value !== undefined));
-    const folded = withEnvFiles(url, (name) => fromFiles(name)?.value);
-    url = folded.url;
-    if (folded.names.length) urlSource += `, ${folded.names.map((name) => `${name} in ${shown(fromFiles(name)!.path)}`).join(", ")}`;
-    if (refreshUrl) {
-      const refresh = refreshUrl;
-      refreshUrl = () => {
-        const again = refresh();
-        return again === undefined ? undefined : withEnvFiles(again, (name) => fromFiles(name)?.value).url;
-      };
+  // libpq's variables the env files set, for what DATABASE_URL leaves out (`withEnvFiles`): the URL
+  // the app connects with, with the files loaded into its environment. A variable the environment
+  // sets, even empty, the files leave alone, as dotenv does. `direct_url` is Reylo's alone.
+  if (url && written === undefined && !shadow && dialectOf(url) === "postgres") {
+    const files = envFiles.map((path) => ({ path, vars: readEnvFile(path) }));
+    const hits = new Map<string, { value: string; path: string }>();
+    for (const [name] of LIBPQ_VARIABLES) {
+      if (environmentValue(env, name) !== undefined) continue;
+      const file = files.find((f) => f.vars[name] !== undefined);
+      if (!file) continue;
+      // A certificate file is the app's, named from the project's root, where its env files are.
+      const value = CERTIFICATE_VARIABLES.has(name) && file.vars[name] && file.vars[name] !== "system" ? resolve(root, file.vars[name]!) : file.vars[name]!;
+      hits.set(name, { value, path: file.path });
     }
+    const folded = withEnvFiles(url, (name) => hits.get(name)?.value);
+    url = folded.url;
+    if (folded.names.length) urlSource += `, ${folded.names.map((name) => `${name} in ${shown(hits.get(name)!.path)}`).join(", ")}`;
   }
   let dialect = url ? dialectOf(url) : "postgres";
   if (url && !dialect) error ??= `Cannot tell the database from the URL (${urlSource}): reylo reads postgres://, postgresql://, mysql://, file: and sqlite: URLs, and for ClickHouse clickhouse+http:// or clickhouse+https://, the URL of its HTTP interface.`;
