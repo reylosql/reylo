@@ -17,7 +17,6 @@
 //! its table's triggers is part of it, is replaced with every trigger after it.
 
 use super::{Alterer, Change, Kind, Object, Schema};
-use crate::catalog::not_history;
 use crate::db::{Db, Row};
 use crate::sql::{tokenize, Token, TokenKind};
 use crate::{Dialect, Error};
@@ -388,8 +387,9 @@ pub async fn read(db: &mut Db) -> Result<Schema, Error> {
 }
 
 async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
-    let kept = not_history("table_name");
-    let kept_trigger = not_history("event_object_table");
+    let tools = crate::catalog::mysql_tool_tables(db).await?;
+    let kept = crate::catalog::mysql_project("table_name", &tools);
+    let kept_trigger = crate::catalog::mysql_project_trigger(&tools);
     let first = |rows: Vec<Row>, name: &str| rows.first().map(|r| r.text(name).to_string()).unwrap_or_default();
     let ctx = Ctx {
         db: first(db.rows("select database() as n").await?, "n"),

@@ -97,7 +97,19 @@ It leaves out the history tables of other migration tools, as it leaves out its 
 | Atlas | `atlas_schema_revisions`, in its schema of that name on Postgres |
 | Wrangler, on D1 | `d1_migrations`, or the name its `migrations_table` gives it |
 
-It also leaves out Litestream's tables, and on D1 and Durable Objects, Cloudflare's own `_cf_` tables.
+It also leaves out what other tools keep in your database:
+
+| Tool | What it keeps |
+| --- | --- |
+| PlanetScale and Vitess | The `_vt_hld_…` and `_vt_vrp_…` tables kept after a schema change |
+| gh-ost | `_<table>_ghc`, `_<table>_ghk` and its cut-over sentry |
+| pt-online-schema-change, LHM | The triggers an interrupted run leaves on your table |
+| AWS DMS, Qlik Replicate | The `awsdms_` and `attrep_` tables, functions and event triggers |
+| Hasura | `hdb_catalog`, and its triggers on your tables |
+| Bucardo, Slony, Zero | Their schemas, and Bucardo's and Slony's triggers on your tables |
+| Neon | `neon_migration` and `public.health_check` |
+| Litestream | `_litestream_seq` and `_litestream_lock` |
+| D1 and Durable Objects | Cloudflare's `_cf_` tables |
 
 On Supabase, it leaves out what every new Supabase database has, such as the `supabase_realtime` publication. It writes your changes to it, and each table's own grants:
 

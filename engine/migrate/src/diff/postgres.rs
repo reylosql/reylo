@@ -8,7 +8,7 @@
 //! the two, since the server's rendering of an expression is not always one it reads back to itself.
 
 use super::{Alterer, Change, Kind, Object, Schema, TypeClass};
-use crate::catalog::{not_extension, not_history, not_platform, not_platform_schema, pg_not_history, pg_not_history_schema, project_extension, project_relation, PG_USER_NS};
+use crate::catalog::{not_extension, not_platform, not_platform_schema, pg_not_history, pg_not_history_schema, project_extension, project_relation, PG_USER_NS};
 use crate::db::{Db, Row};
 use crate::{Dialect, Error};
 use regex::Regex;
@@ -299,7 +299,7 @@ async fn read_objects(db: &mut Db, platform: Option<&[String]>) -> Result<Schema
     // The history tables, and what comes with them, are left out: `c` or `t` the `pg_class` row. A
     // table of the platform's is read whatever its name, a history table's (`auth.schema_migrations`).
     let kept = |condition: String| if platform.is_some() { "true".to_string() } else { condition };
-    let (kept_c, kept_t, kept_rel) = (kept(pg_not_history("c")), kept(pg_not_history("t")), kept(not_history("c.relname")));
+    let (kept_c, kept_t, kept_rel) = (kept(pg_not_history("c")), kept(pg_not_history("t")), kept(pg_not_history("c")));
     let pg_not_history_schema = |n: &str| kept(pg_not_history_schema(n));
     // A trigger's function, `f`: in the platform's schemas, where they are read.
     let trigger_function = match &named {
@@ -1615,9 +1615,10 @@ async fn read_objects(db: &mut Db, platform: Option<&[String]>) -> Result<Schema
         .rows(&format!(
             "select tg.oid, format('%I', tg.tgname) as name, format('%I.%I', n.nspname, c.relname) as rel, c.oid as reloid, pg_get_triggerdef(tg.oid, false) as def, tg.tgenabled as enabled
             from pg_trigger tg join pg_class c on c.oid = tg.tgrelid join pg_namespace n on n.oid = c.relnamespace join pg_proc f on f.oid = tg.tgfoid
-            where not tg.tgisinternal and tg.tgparentid = 0 and {ns} and {} and {} and {trigger_function} and {kept_rel}",
+            where not tg.tgisinternal and tg.tgparentid = 0 and {ns} and {} and {} and {trigger_function} and {kept_rel} and not {}",
             not_extension("pg_class", "c"),
-            not_platform("f.proowner")
+            not_platform("f.proowner"),
+            crate::catalog::pg_tool_trigger("tg")
         ))
         .await?
     {
@@ -1650,8 +1651,9 @@ async fn read_objects(db: &mut Db, platform: Option<&[String]>) -> Result<Schema
             "select format('%I', tg.tgname) as name, format('%I.%I', n.nspname, c.relname) as rel, c.oid as reloid, tg.tgenabled as enabled, tg.tgparentid as parent,
               (select p.tgenabled from pg_trigger p where p.oid = tg.tgparentid) as parent_enabled
             from pg_trigger tg join pg_class c on c.oid = tg.tgrelid join pg_namespace n on n.oid = c.relnamespace
-            where tg.tgparentid <> 0 and tg.tgenabled <> (select p.tgenabled from pg_trigger p where p.oid = tg.tgparentid) and {ns} and {} and {kept_rel}",
-            not_extension("pg_class", "c")
+            where tg.tgparentid <> 0 and tg.tgenabled <> (select p.tgenabled from pg_trigger p where p.oid = tg.tgparentid) and {ns} and {} and {kept_rel} and not {}",
+            not_extension("pg_class", "c"),
+            crate::catalog::pg_tool_trigger("tg")
         ))
         .await?
     {
@@ -2049,6 +2051,9 @@ async fn read_objects(db: &mut Db, platform: Option<&[String]>) -> Result<Schema
     } else {
         ("''", "null::json", "'[]'::json")
     };
+    // Another tool's schemas and tables are in no publication's list, and another tool's publication is read as none.
+    let schemas = schemas.replace("where pn.pnpubid = p.oid)", &format!("where pn.pnpubid = p.oid and {PG_USER_NS})"));
+    let (published, tool_publication) = (crate::catalog::pg_published("c", "n"), crate::catalog::pg_tool_publication("p", version));
     // Postgres 18 publishes a table's stored generated columns where a publication says so.
     let generated = if version >= 180000 { "p.pubgencols = 's'" } else { "false" };
     // Postgres 19 publishes all sequences, and all tables but those an EXCEPT names, which it keeps among the publication's tables, marked.
@@ -2057,13 +2062,22 @@ async fn read_objects(db: &mut Db, platform: Option<&[String]>) -> Result<Schema
     } else {
         ("false", "", "'null'")
     };
+    // The tables of another tool's an EXCEPT of the live publication names, which a change to what it
+    // covers names again.
+    let unlisted_except = if version >= 190000 {
+        format!("format('%s', (select json_agg(format('%I.%I', n.nspname, c.relname)) from pg_publication_rel pr join pg_class c on c.oid = pr.prrelid join pg_namespace n on n.oid = c.relnamespace where pr.prpubid = p.oid and pr.prexcept and not {published}))")
+    } else {
+        "'null'".to_string()
+    };
+    let excepted = excepted.replace("and pr.prexcept))", &format!("and pr.prexcept and {published}))"));
     for r in db
         .rows(&format!(
             "select p.oid, format('%I', p.pubname) as name, p.puballtables as all_tables, {all_sequences} as all_sequences, {excepted} as excepted, p.pubviaroot as via_root, {generated} as generated,
               concat_ws(', ', case when p.pubinsert then 'insert' end, case when p.pubupdate then 'update' end, case when p.pubdelete then 'delete' end, case when p.pubtruncate then 'truncate' end) as publish,
-              format('%s', (select json_agg(json_build_array(format('%I.%I', n.nspname, c.relname), format('%I.%I', n.nspname, c.relname) || {columns}, {listed}) order by format('%I.%I', n.nspname, c.relname)) from pg_publication_rel pr join pg_class c on c.oid = pr.prrelid join pg_namespace n on n.oid = c.relnamespace where pr.prpubid = p.oid {listed_only})) as tables,
-              format('%s', {schemas}) as schemas
-            from pg_publication p where {}",
+              format('%s', (select json_agg(json_build_array(format('%I.%I', n.nspname, c.relname), format('%I.%I', n.nspname, c.relname) || {columns}, {listed}) order by format('%I.%I', n.nspname, c.relname)) from pg_publication_rel pr join pg_class c on c.oid = pr.prrelid join pg_namespace n on n.oid = c.relnamespace where pr.prpubid = p.oid {listed_only} and {published})) as tables,
+              format('%s', {schemas}) as schemas,
+              {unlisted_except} as unlisted_except
+            from pg_publication p where {} and not {tool_publication}",
             database_wide("p.pubowner")
         ))
         .await?
@@ -2112,7 +2126,11 @@ async fn read_objects(db: &mut Db, platform: Option<&[String]>) -> Result<Schema
             .collect();
         let mut objects: Vec<String> = tables.iter().map(|(_, t, _)| format!("table only {t}")).collect();
         objects.extend(in_schemas.iter().map(|n| format!("tables in schema {n}")));
-        let extra = vec![format!("all {all}"), format!("objects {}", objects.join(", ")), format!("with {}", with.join(", ")), format!("publish {}", r.text("publish"))];
+        let mut extra = vec![format!("all {all}"), format!("objects {}", objects.join(", ")), format!("with {}", with.join(", ")), format!("publish {}", r.text("publish"))];
+        let unlisted_except: Vec<String> = serde_json::from_str(r.text("unlisted_except")).unwrap_or_default();
+        if !unlisted_except.is_empty() {
+            extra.push(format!("unlisted except {}", unlisted_except.iter().map(|t| format!("only {t}")).collect::<Vec<_>>().join(", ")));
+        }
         ids.publications.insert(oid(&r, "oid"), format!("publication {name}"));
         // After the tables it names, among the last objects made.
         s.add(Object {
@@ -2292,7 +2310,7 @@ async fn read_objects(db: &mut Db, platform: Option<&[String]>) -> Result<Schema
         .rows(&format!(
             "select format('%s', k.classid::regclass) as cls, k.objid, o.type, o.identity, format('%I', pg_get_userbyid(k.owner)) as owner
             from ({}) k, lateral pg_identify_object(k.classid, k.objid, 0) o where k.owner <> {}",
-            crate::catalog::owned_objects(),
+            crate::catalog::owned_objects(version),
             crate::catalog::runner()
         ))
         .await?
@@ -5436,10 +5454,17 @@ impl Alterer for PostgresAlterer {
                 let name = to.id.strip_prefix("publication ")?;
                 let part = |o: &Object, what: &str| o.extra.iter().find_map(|l| l.strip_prefix(what)).map(String::from).unwrap_or_default();
                 let mut out = Vec::new();
+                // An EXCEPT the live publication names for another tool's table, which no file lists,
+                // stays named.
+                let unlisted_except = part(from, "unlisted except ");
                 match (part(from, "all "), part(to, "all ")) {
                     (a, b) if a == b => {}
                     (a, b) if a.is_empty() || b.is_empty() => return None,
-                    (_, b) => out.push(format!("alter publication {name} set {b}")),
+                    (_, b) if unlisted_except.is_empty() => out.push(format!("alter publication {name} set {b}")),
+                    (_, b) => {
+                        let b = if b.contains("all tables except (table ") { b.replacen("all tables except (table ", &format!("all tables except (table {unlisted_except}, "), 1) } else { b.replacen("all tables", &format!("all tables except (table {unlisted_except})"), 1) };
+                        out.push(format!("alter publication {name} set {b}"));
+                    }
                 }
                 match (part(from, "objects "), part(to, "objects ")) {
                     (a, b) if a == b => {}

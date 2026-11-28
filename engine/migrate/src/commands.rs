@@ -6687,12 +6687,14 @@ async fn wipe_rows_on(db: &mut Db) -> Result<usize, Error> {
             let schema = crate::diff::read(db).await?;
             schema.objects.values().filter(|o| o.kind == Some(crate::diff::Kind::Table) && !o.extra.iter().any(|l| l.starts_with("shape foreign"))).filter_map(|o| o.id.strip_prefix("table ").map(String::from)).collect()
         }
-        Dialect::Mysql => db
-            .rows(&format!("select table_name as n from information_schema.tables where table_schema = database() and table_type = 'BASE TABLE' and {}", crate::catalog::not_history("table_name")))
+        Dialect::Mysql => {
+            let tools = crate::catalog::mysql_tool_tables(db).await?;
+            db.rows(&format!("select table_name as n from information_schema.tables where table_schema = database() and table_type = 'BASE TABLE' and {}", crate::catalog::mysql_project("table_name", &tools)))
             .await?
             .iter()
             .map(|r| format!("`{}`", r.text("n").replace('`', "``")))
-            .collect(),
+            .collect()
+        },
         // A virtual table's own tables (an FTS5 index's, an R*Tree's) are its to empty, and a libSQL
         // vector index's are libSQL's: deleting from them directly breaks it.
         Dialect::Sqlite => db
@@ -9774,13 +9776,16 @@ async fn published_schemas(db: &mut Db) -> Result<Vec<String>, Error> {
     let rows = db
         .rows(&format!(
             "select distinct n.nspname as name from pg_publication p
-               cross join lateral (select c.relnamespace as ns from pg_publication_rel pr join pg_class c on c.oid = pr.prrelid where pr.prpubid = p.oid {in_schema}) o
+               cross join lateral (select c.relnamespace as ns from pg_publication_rel pr join pg_class c on c.oid = pr.prrelid join pg_namespace cn on cn.oid = c.relnamespace where pr.prpubid = p.oid and {} {in_schema}) o
                join pg_namespace n on n.oid = o.ns
-             where {} and not ({} and p.pubname = {})
+             where {} and not ({} and p.pubname = {}) and not {} and {}
              order by 1",
+            crate::catalog::pg_published("c", "cn"),
             crate::catalog::not_platform("p.pubowner"),
             crate::catalog::platform_names(),
-            crate::db::literal(crate::catalog::PLATFORM_PUBLICATION)
+            crate::db::literal(crate::catalog::PLATFORM_PUBLICATION),
+            crate::catalog::pg_tool_publication("p", version),
+            crate::catalog::PG_USER_NS
         ))
         .await?;
     Ok(rows.iter().map(|r| r.text("name").to_string()).collect())
@@ -9797,12 +9802,12 @@ async fn schemas_to_name(db: &mut Db) -> Result<Vec<String>, Error> {
             "select n.nspname as name from pg_namespace n where {} and {} and (exists (
                select 1 from pg_depend d where d.refclassid = 'pg_namespace'::regclass and d.refobjid = n.oid and d.deptype = 'n'
                  and not exists (select 1 from pg_depend o where o.classid = d.classid and o.objid = d.objid and o.deptype in ('e', 'a', 'i'))
-                 and not (d.classid = 'pg_class'::regclass and d.objid in (select oid from pg_class where not {})))
+                 and not (d.classid = 'pg_class'::regclass and d.objid in (select pc.oid from pg_class pc where not {})))
                or (n.nspname <> 'public' and not exists (select 1 from pg_depend d where d.refclassid = 'pg_namespace'::regclass and d.refobjid = n.oid)))
              order by 1",
             crate::catalog::PG_USER_NS,
             crate::catalog::not_platform_schema("n"),
-            crate::catalog::not_history("relname")
+            crate::catalog::pg_not_history("pc")
         ))
         .await?;
     Ok(rows.iter().map(|r| r.text("name").to_string()).collect())
@@ -10045,8 +10050,10 @@ fn without_platform_column_options(statement: &str) -> Option<String> {
 /// heads it with, `-- Name: …; Type: …; Schema: …; Owner: <role>`, up to the next one, so an object
 /// goes with its owner, privileges and comment, and a default privilege with the role it is for. A
 /// relation's entries in one of the `project` schemas stay, whoever owns it: the relation is the
-/// project's ([`crate::catalog::project_relation`]).
-fn without_entries_of(text: &str, owners: &[String], project: &[String]) -> String {
+/// project's ([`crate::catalog::project_relation`]). Each of `tools`, another tool's object as
+/// `(name, kind, schema, labelled)` in pg_dump's words (`labelled` the name its privileges, comment
+/// and label are given), goes too, with them.
+fn without_entries_of(text: &str, owners: &[String], project: &[String], tools: &[(String, String, String, String)]) -> String {
     static HEADER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?m)^--\n-- (?:Data for )?Name: ([^\n]*); Type: ([^\n]*); Schema: ([^\n]*); Owner: ([^;\n]*)(?:; Tablespace: [^\n]*)?\n--\n").expect("a valid pattern"));
     // pg_dump's types for a relation and for what it holds, and the names it gives the privileges,
     // comments and labels on them.
@@ -10055,7 +10062,10 @@ fn without_entries_of(text: &str, owners: &[String], project: &[String]) -> Stri
     let relation = |name: &str, kind: &str| RELATION.contains(&kind) || (matches!(kind, "ACL" | "COMMENT" | "SECURITY LABEL") && ON_RELATION.iter().any(|p| name.starts_with(p)));
     let heads: Vec<(usize, bool)> = HEADER
         .captures_iter(text)
-        .map(|c| (c.get(0).map_or(0, |m| m.start()), owners.iter().any(|o| o == &c[4]) && !(project.iter().any(|s| s == &c[3]) && relation(&c[1], &c[2]))))
+        .map(|c| {
+            let tool = tools.iter().any(|(name, kind, schema, labelled)| schema == &c[3] && ((kind == &c[2] && name == &c[1]) || (matches!(&c[2], "ACL" | "COMMENT" | "SECURITY LABEL") && labelled == &c[1])));
+            (c.get(0).map_or(0, |m| m.start()), tool || (owners.iter().any(|o| o == &c[4]) && !(project.iter().any(|s| s == &c[3]) && relation(&c[1], &c[2]))))
+        })
         .collect();
     let Some(&(first, _)) = heads.first() else { return text.to_string() };
     let mut out = text[..first].to_string();
@@ -10284,7 +10294,25 @@ async fn dump_from(db: &mut Db, opts: &Options, schemas: &[String]) -> Result<St
             // which is the project's whoever owns it.
             let owners = crate::catalog::platform_owners(db).await?;
             let project = crate::catalog::user_schemas(db).await?;
-            let text = without_entries_of(&crate::db::pg_dump(&opts.url, version / 10000, &args)?, &owners, &project);
+            // Another tool's triggers, routines and event triggers in a dumped schema, which every
+            // comparison leaves out, each as pg_dump heads its entry: a trigger runs a function in a
+            // schema no file makes.
+            let tools: Vec<(String, String, String, String)> = db
+                .rows(&format!(
+                    "select format('%s %s', c.relname, tg.tgname) as name, 'TRIGGER' as kind, n.nspname as schema, format('TRIGGER %s ON %s', quote_ident(tg.tgname), quote_ident(c.relname)) as labelled
+                       from pg_trigger tg join pg_class c on c.oid = tg.tgrelid join pg_namespace n on n.oid = c.relnamespace where not tg.tgisinternal and {}
+                     union all select format('%s(%s)', p.proname, pg_get_function_identity_arguments(p.oid)), 'FUNCTION', n.nspname, format('FUNCTION %s(%s)', quote_ident(p.proname), pg_get_function_identity_arguments(p.oid))
+                       from pg_proc p join pg_namespace n on n.oid = p.pronamespace where {}
+                     union all select et.evtname, 'EVENT TRIGGER', '-', format('EVENT TRIGGER %s', quote_ident(et.evtname)) from pg_event_trigger et where {}",
+                    crate::catalog::pg_tool_trigger("tg"),
+                    crate::catalog::pg_tool_function("p"),
+                    crate::catalog::pg_tool_event_trigger("et")
+                ))
+                .await?
+                .iter()
+                .map(|r| (r.text("name").to_string(), r.text("kind").to_string(), r.text("schema").to_string(), r.text("labelled").to_string()))
+                .collect();
+            let text = without_entries_of(&crate::db::pg_dump(&opts.url, version / 10000, &args)?, &owners, &project, &tools);
             // psql's meta-commands, which pg_dump writes on lines of their own around the file.
             static META: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?m)^\\(un)?restrict\b.*$").expect("a valid pattern"));
             let text = META.replace_all(&text, "");
@@ -10422,6 +10450,8 @@ async fn dump_from(db: &mut Db, opts: &Options, schemas: &[String]) -> Result<St
             } else {
                 ("''", "null")
             };
+            let schemas = schemas.replace("where pn.pnpubid = p.oid)", &format!("where pn.pnpubid = p.oid and {})", crate::catalog::PG_USER_NS));
+            let (published, tool_publication) = (crate::catalog::pg_published("c", "n"), crate::catalog::pg_tool_publication("p", version));
             // Whether a publication publishes its tables' stored generated columns is Postgres 18's.
             let generated = if version >= 180000 { "case when p.pubgencols = 's' then ', publish_generated_columns = stored' else '' end" } else { "''" };
             // All sequences, and the tables all tables leave out, are Postgres 19's, written as pg_dump 19 writes them.
@@ -10435,6 +10465,7 @@ async fn dump_from(db: &mut Db, opts: &Options, schemas: &[String]) -> Result<St
             } else {
                 ("case when p.puballtables then 'ALL TABLES' end", "")
             };
+            let all = all.replace("and pr.prexcept)", &format!("and pr.prexcept and {published})"));
             for r in db
                 .rows(&format!(
                     "select 0 as k, et.evtname::text as name, format('CREATE EVENT TRIGGER %I ON %s', et.evtname, et.evtevent)
@@ -10449,14 +10480,14 @@ async fn dump_from(db: &mut Db, opts: &Options, schemas: &[String]) -> Result<St
                     select 1, p.pubname::text, format('CREATE PUBLICATION %I', p.pubname)
                         || coalesce(' FOR ' || coalesce({all}, nullif(concat_ws(', ',
                           (select string_agg(format('TABLE %I.%I', n.nspname, c.relname) || {columns}, ', ' order by n.nspname, c.relname)
-                            from pg_publication_rel pr join pg_class c on c.oid = pr.prrelid join pg_namespace n on n.oid = c.relnamespace where pr.prpubid = p.oid{listed_only}),
+                            from pg_publication_rel pr join pg_class c on c.oid = pr.prrelid join pg_namespace n on n.oid = c.relnamespace where pr.prpubid = p.oid{listed_only} and {published}),
                           {schemas}), '')), '')
                         || format(' WITH (publish = %L%s%s)', concat_ws(', ', case when p.pubinsert then 'insert' end, case when p.pubupdate then 'update' end,
                           case when p.pubdelete then 'delete' end, case when p.pubtruncate then 'truncate' end), case when p.pubviaroot then ', publish_via_partition_root = true' else '' end, {generated}),
                       null,
                       case when p.pubowner <> {me} then format('ALTER PUBLICATION %I OWNER TO %I', p.pubname, pg_get_userbyid(p.pubowner)) end,
                       case when obj_description(p.oid, 'pg_publication') is not null then format('COMMENT ON PUBLICATION %I IS %L', p.pubname, obj_description(p.oid, 'pg_publication')) end
-                    from pg_publication p where {} and not ({} and p.pubname = {})
+                    from pg_publication p where {} and not ({} and p.pubname = {}) and not {tool_publication}
                     order by k, name",
                     crate::catalog::not_extension("pg_event_trigger", "et"),
                     crate::catalog::not_platform("et.evtowner"),
@@ -10500,10 +10531,11 @@ async fn dump_from(db: &mut Db, opts: &Options, schemas: &[String]) -> Result<St
             // which no schema dumped holds: its triggers, whose function is no platform's, and its
             // policies, which pg_dump writes only with their table.
             let list = named_schemas.iter().map(|s| crate::db::literal(s)).collect::<Vec<_>>().join(", ");
+            let tool_trigger = crate::catalog::pg_tool_trigger("t");
             let extra = db
                 .rows(&format!(
                     "select pg_get_triggerdef(t.oid) || ';' as s from pg_trigger t join pg_class c on c.oid = t.tgrelid join pg_namespace n on n.oid = c.relnamespace join pg_proc f on f.oid = t.tgfoid
-                    where not t.tgisinternal and t.tgparentid = 0 and n.nspname not in ({list}) and not {} and {}
+                    where not t.tgisinternal and t.tgparentid = 0 and n.nspname not in ({list}) and not {} and {} and not {tool_trigger}
                     union all
                     select format('CREATE POLICY %I ON %I.%I AS %s FOR %s TO %s%s%s;', p.polname, n.nspname, c.relname, case when p.polpermissive then 'PERMISSIVE' else 'RESTRICTIVE' end,
                       case p.polcmd when 'r' then 'SELECT' when 'a' then 'INSERT' when 'w' then 'UPDATE' when 'd' then 'DELETE' else 'ALL' end,
@@ -10541,7 +10573,8 @@ async fn dump_from(db: &mut Db, opts: &Options, schemas: &[String]) -> Result<St
             static AUTO: LazyLock<Regex> = LazyLock::new(|| Regex::new(r" AUTO_INCREMENT=\d+").expect("a valid pattern"));
             static DEFINER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r" DEFINER=\S+").expect("a valid pattern"));
             let mut out = vec!["set foreign_key_checks = 0;".to_string()];
-            let tables = db.rows(&format!("select table_name as n, table_type as t from information_schema.tables where table_schema = database() and {} order by table_type, table_name", crate::catalog::not_history("table_name"))).await?;
+            let tools = crate::catalog::mysql_tool_tables(db).await?;
+            let tables = db.rows(&format!("select table_name as n, table_type as t from information_schema.tables where table_schema = database() and {} order by table_type, table_name", crate::catalog::mysql_project("table_name", &tools))).await?;
             for t in tables.iter().filter(|t| t.text("t") == "BASE TABLE") {
                 let row = db.rows(&format!("show create table `{}`", t.text("n"))).await?;
                 out.push(format!("{};", AUTO.replace(row.first().map(|r| r.text("Create Table")).unwrap_or_default(), "")));
@@ -10570,7 +10603,7 @@ async fn dump_from(db: &mut Db, opts: &Options, schemas: &[String]) -> Result<St
                 let row = db.rows(&format!("show create view `{name}`")).await?;
                 out.push(format!("{};", DEFINER.replace(row.first().map(|r| r.text("Create View")).unwrap_or_default(), "")));
             }
-            for r in db.rows(&format!("select trigger_name as n from information_schema.triggers where trigger_schema = database() and {}", crate::catalog::not_history("event_object_table"))).await? {
+            for r in db.rows(&format!("select trigger_name as n from information_schema.triggers where trigger_schema = database() and {}", crate::catalog::mysql_project_trigger(&tools))).await? {
                 let row = db.rows(&format!("show create trigger `{}`", r.text("n"))).await?;
                 out.push(format!("{};", DEFINER.replace(row.first().map(|x| x.text("SQL Original Statement")).unwrap_or_default(), "")));
             }
@@ -13053,10 +13086,26 @@ mod tests {
         // superuser, with its privileges, and its default privileges, among the project's.
         let dump = "SET check_function_bodies = false;\n\n--\n-- Name: create_playground(regclass, boolean); Type: FUNCTION; Schema: public; Owner: postgres\n--\n\nCREATE FUNCTION public.create_playground(src regclass, b boolean) RETURNS integer\n    LANGUAGE sql\n    AS $$select 1$$;\n\n\nALTER FUNCTION public.create_playground(src regclass, b boolean) OWNER TO postgres;\n\n--\n-- Name: users; Type: TABLE; Schema: public; Owner: tsdbadmin\n--\n\nCREATE TABLE public.users (\n    id integer NOT NULL\n);\n\n\nALTER TABLE public.users OWNER TO tsdbadmin;\n\n--\n-- Name: FUNCTION create_playground(src regclass, b boolean); Type: ACL; Schema: public; Owner: postgres\n--\n\nGRANT ALL ON FUNCTION public.create_playground(src regclass, b boolean) TO tsdbadmin;\n\n--\n-- Name: DEFAULT PRIVILEGES FOR SCHEMAS; Type: DEFAULT ACL; Schema: -; Owner: postgres\n--\n\nALTER DEFAULT PRIVILEGES FOR ROLE postgres GRANT USAGE ON SCHEMAS TO tsdbadmin;\n\n\n--\n-- PostgreSQL database dump complete\n--\n";
         let public = ["public".to_string()];
-        let kept = without_entries_of(dump, &["postgres".to_string()], &public);
+        let kept = without_entries_of(dump, &["postgres".to_string()], &public, &[]);
         assert_eq!(kept, "SET check_function_bodies = false;\n\n--\n-- Name: users; Type: TABLE; Schema: public; Owner: tsdbadmin\n--\n\nCREATE TABLE public.users (\n    id integer NOT NULL\n);\n\n\nALTER TABLE public.users OWNER TO tsdbadmin;\n\n");
         // With no platform's role among the owners, the dump is as written.
-        assert_eq!(without_entries_of(dump, &["supabase_admin".to_string()], &public), dump);
+        assert_eq!(without_entries_of(dump, &["supabase_admin".to_string()], &public, &[]), dump);
+    }
+
+    #[test]
+    fn a_dump_leaves_out_another_tools_entries() {
+        // As pg_dump writes public on a database AWS DMS captured DDL from and Hasura serves: DMS's
+        // function with its privileges, and Hasura's trigger on the project's table, beside the table.
+        let table = "--\n-- Name: orders; Type: TABLE; Schema: public; Owner: app\n--\n\nCREATE TABLE public.orders (\n    id integer NOT NULL\n);\n\n\nALTER TABLE public.orders OWNER TO app;\n\n";
+        let dump = format!("--\n-- Name: awsdms_intercept_ddl(); Type: FUNCTION; Schema: public; Owner: app\n--\n\nCREATE FUNCTION public.awsdms_intercept_ddl() RETURNS event_trigger\n    LANGUAGE plpgsql\n    AS $$begin end$$;\n\n--\n-- Name: FUNCTION awsdms_intercept_ddl(); Type: ACL; Schema: public; Owner: app\n--\n\nGRANT ALL ON FUNCTION public.awsdms_intercept_ddl() TO PUBLIC;\n\n{table}--\n-- Name: orders notify_hasura_new_order_INSERT; Type: TRIGGER; Schema: public; Owner: app\n--\n\nCREATE TRIGGER \"notify_hasura_new_order_INSERT\" AFTER INSERT ON public.orders FOR EACH ROW EXECUTE FUNCTION hdb_catalog.notify_hasura_new_order_insert();\n\n--\n-- Name: TRIGGER \"notify_hasura_new_order_INSERT\" ON orders; Type: COMMENT; Schema: public; Owner: app\n--\n\nCOMMENT ON TRIGGER \"notify_hasura_new_order_INSERT\" ON public.orders IS 'Hasura';\n\n");
+        let tools = [
+            ("awsdms_intercept_ddl()".to_string(), "FUNCTION".to_string(), "public".to_string(), "FUNCTION awsdms_intercept_ddl()".to_string()),
+            ("orders notify_hasura_new_order_INSERT".to_string(), "TRIGGER".to_string(), "public".to_string(), "TRIGGER \"notify_hasura_new_order_INSERT\" ON orders".to_string()),
+        ];
+        assert_eq!(without_entries_of(&dump, &[], &["public".to_string()], &tools), table);
+        // Of a schema not dumped, the same names are another object's.
+        let elsewhere = tools.map(|(name, kind, _, labelled)| (name, kind, "sales".to_string(), labelled));
+        assert_eq!(without_entries_of(&dump, &[], &["public".to_string()], &elsewhere), dump);
     }
 
     #[test]
@@ -13075,9 +13124,9 @@ mod tests {
         let function = "--\n-- Name: helper(); Type: FUNCTION; Schema: public; Owner: postgres\n--\n\nCREATE FUNCTION public.helper() RETURNS integer\n    LANGUAGE sql\n    AS $$select 1$$;\n\n--\n-- Name: FUNCTION helper(); Type: ACL; Schema: public; Owner: postgres\n--\n\nGRANT ALL ON FUNCTION public.helper() TO app;\n\n";
         let dump = format!("SET check_function_bodies = false;\n\n{function}{table}");
         let owners = ["postgres".to_string()];
-        assert_eq!(without_entries_of(&dump, &owners, &["public".to_string()]), format!("SET check_function_bodies = false;\n\n{table}"));
+        assert_eq!(without_entries_of(&dump, &owners, &["public".to_string()], &[]), format!("SET check_function_bodies = false;\n\n{table}"));
         // In a schema of the platform's, the table is the platform's too.
-        assert_eq!(without_entries_of(&dump, &owners, &[]), "SET check_function_bodies = false;\n\n");
+        assert_eq!(without_entries_of(&dump, &owners, &[], &[]), "SET check_function_bodies = false;\n\n");
     }
 
     #[test]
