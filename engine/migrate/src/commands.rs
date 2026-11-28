@@ -1950,7 +1950,7 @@ fn leftover_filter(statement: &str) -> Option<String> {
                 };
                 let picked = keys.iter().chain(&included).map(|item| Some(format!("(select a.attnum from pg_attribute a where a.attrelid = i.indrelid and a.attname = ((parse_ident({}, false))[1])::name)", literal(index_column(item)?)))).collect::<Option<Vec<_>>>()?;
                 let unique = sql.get(..13).is_some_and(|w| w.eq_ignore_ascii_case("create unique"));
-                Some(format!(r"{on} and c.relname ~ '_idx[0-9]*$' and (starts_with(c.relname, (select t.relname from pg_class t where t.oid = i.indrelid) || '_') or octet_length(c.relname) >= 56) and i.indisunique = {unique} and i.indexprs is null and i.indkey::int2[] = array[{}]::int2[]", picked.join(", ")))
+                Some(format!(r"{on} and c.relname ~ '_idx[0-9]*$' and (starts_with(c.relname, (select t.relname from pg_class t where t.oid = i.indrelid) || '_') or octet_length(c.relname) >= 56) and i.indisunique = {unique} and i.indexprs is null and string_to_array(i.indkey::text, ' ')::int2[] = array[{}]::int2[]", picked.join(", ")))
             }
         };
     }
