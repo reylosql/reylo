@@ -206,6 +206,8 @@ test("a jsonb[] member's element is any JSON but an array, which Postgres would 
   assert.deepEqual(keys, ["1"]);
   // What toJSON() returns is written as it is, its own toJSON() never called, as JSON.stringify writes it.
   assert.deepEqual(prepareRows("docs", docsOf.rows, [{ docs: [{ toJSON: () => ({ ok: true, toJSON: () => [1, 2] }) }] }], "postgres", true).value, [{ docs: [{ ok: true }] }]);
+  // Nothing else goes through JSON, so a number JSON can't hold, or one past 2^53, still reaches Reylo's own writer as it is.
+  assert.deepEqual(prepareRows("docs", docsOf.rows, [{ docs: [{ big: 9007199254740993n, nan: NaN }] }], "postgres", true).value, [{ docs: [{ big: 9007199254740993n, nan: NaN }] }]);
   // An element a schema types is any value of it but an array.
   const typed = structured(false, [["docs", array(checked({ type: ["object", "array"] }), true), "doc[]", true, true]]);
   assert.match(renderParamType(typed.type, "postgres", false, typed.members), /docs\?: \(Exclude<.*, readonly unknown\[\]> \| null\)\[\] \| null/);

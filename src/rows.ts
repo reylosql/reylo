@@ -123,16 +123,25 @@ function jsonMember(f: RowField, v: unknown, dialect: Dialect, fail: (message: s
   return dialect !== "postgres" && f.type.kind === "json" ? new Raw(writeJson(v, dialect, fail)!) : v;
 }
 
-/** The JSON value JSON.stringify writes `v` as at `key`, its toJSON() called once as it calls it there, as plain JSON; `fail` says why there is none. */
+/**
+ * The value JSON.stringify writes for `v` at `key`: its toJSON() called once, as JSON.stringify
+ * calls it there, and what that returns written as it is, its own toJSON() never called, so an
+ * object comes back with its own keys alone. Nothing else is written through JSON, so Reylo's own
+ * writer still keeps an infinity, a BigInt and raw JSON as it does elsewhere. `fail` says why a
+ * toJSON() that throws gives no value.
+ */
 function jsonAt(v: unknown, key: string, fail: (message: string) => never): unknown {
-  if (v === null || typeof v !== "object") return v;
-  let text: string | undefined;
+  const hook = (x: unknown) => x !== null && typeof x === "object" && typeof (x as { toJSON?: unknown }).toJSON === "function";
+  if (!hook(v)) return v;
+  let value: unknown;
   try {
-    text = JSON.stringify({ [key]: v });
+    value = (v as { toJSON(key: string): unknown }).toJSON(key);
   } catch (e) {
     return fail(`holds a JSON value: ${(e as Error).message}.`);
   }
-  return (JSON.parse(text) as Record<string, unknown>)[key];
+  const raw = (JSON as { isRawJSON?: (x: unknown) => boolean }).isRawJSON;
+  if (!hook(value) || Array.isArray(value) || raw?.(value)) return value;
+  return Object.fromEntries(Object.entries(value as object).filter(([, field]) => typeof field !== "function"));
 }
 
 /**
