@@ -211,7 +211,7 @@ async function fieldDecoders(fields: Field[], columns: Columns | undefined, key:
 /**
  * The module's column a result's field is: by position where the result has the module's count of
  * columns, else, after a migration under `select *` added or dropped one, by name, the last column of
- * each name, as a row holds it, for the last field of each name alone, the one the row keeps.
+ * each name, as a row holds it, for a field whose name no other field of the result has.
  * `rename` is a driver's own renaming of a result's names (postgres.js's `transform.column`), which
  * the module's names are matched under.
  */
@@ -228,8 +228,12 @@ function declaredColumn(fields: readonly { name: string }[], columns: Columns | 
   const present = new Set(fields.map((f) => f.name));
   const byLoose = new Map<string, Columns[number] | null>();
   for (const c of declared) if (!present.has(rename ? rename(c[0]) : c[0])) byLoose.set(loose(c[0]), byLoose.has(loose(c[0])) ? null : c);
-  const last = new Map(fields.map((f, i) => [f.name, i]));
-  return (f, i) => (last.get(f.name) === i ? (byName.get(f.name) ?? byLoose.get(loose(f.name)) ?? undefined) : undefined);
+  // A name more than one field has (a column a migration added under a name the statement gives
+  // another, or one a renaming makes the same) says nothing of which field a declaration is: none
+  // of them takes a declared kind, and each is read by its type, or as its text.
+  const count = new Map<string, number>();
+  for (const f of fields) count.set(f.name, (count.get(f.name) ?? 0) + 1);
+  return (f) => (count.get(f.name) === 1 ? (byName.get(f.name) ?? byLoose.get(loose(f.name)) ?? undefined) : undefined);
 }
 
 // ---------------------------------------------------------------------------------------------

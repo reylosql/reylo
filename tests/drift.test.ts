@@ -52,7 +52,17 @@ test("postgres: after a migration adds a column under select *, a created type t
     const upper = postgres(own.url, { max: 1, transform: { column: { from: (name: string) => name.toUpperCase() } } });
     try {
       assert.deepEqual(await items.run(upper), [{ ID: 1, TAGS: ["happy", "sad"], NOTE: "x", EXTRA: null }]);
-      // A transaction keeps no options: its names match without their case.
+      // A column a migration adds under a name the renaming gives a declared one: neither takes the declared kind.
+    await admin.unsafe(`create table lists (id int primary key, mood_list mood[]); insert into lists values (1, '{sad}')`);
+    const lists = await built("lists", "select * from lists");
+    await admin.unsafe(`alter table lists add column "moodList" mood; update lists set "moodList" = 'sad'`);
+    const camel = postgres(own.url, { max: 1, transform: postgres.camel });
+    try {
+      assert.deepEqual(await lists.run(camel), [{ id: 1, moodList: "sad" }]);
+    } finally {
+      await camel.end();
+    }
+    // A transaction keeps no options: its names match without their case.
       assert.deepEqual(await upper.begin((tx: unknown) => items.run(tx)), [{ ID: 1, TAGS: ["happy", "sad"], NOTE: "x", EXTRA: null }]);
     } finally {
       await upper.end();
