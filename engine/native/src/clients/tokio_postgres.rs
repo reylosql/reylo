@@ -5,7 +5,7 @@
 //! prepared (`Prepared`) is sent without its prepare, so it waits one round trip rather than two.
 
 use crate::replay::ConcurrentAnswerer;
-use crate::{AnswerCache, Analysis, AsyncAnswerer, DbError, HostError, ReplayError};
+use crate::{server_errors, AnswerCache, Analysis, AsyncAnswerer, DbError, HostError, ReplayError};
 use ::tokio_postgres::types::{ToSql, Type};
 use ::tokio_postgres::{Client, Statement};
 use reylo_engine_core::database::Database;
@@ -177,6 +177,13 @@ async fn describe(client: &Client, sql: &str) -> Result<Result<Describe, DbError
             // `pg_cancel_backend` while it waited on such a lock: a describe runs nothing, so the
             // cancel says nothing of the statement either, and nothing is kept as its error.
             Some(d) if *d.code() == ::tokio_postgres::error::SqlState::QUERY_CANCELED => Err(HostError(format!("The server cancelled the analysis of this statement: {}", pg_message(&e)))),
+            // A statement the client named itself, left by another client on the session or gone from
+            // it, as on a transaction pooler that shares server sessions between clients.
+            Some(_) if pooled(&e).is_some() => Err(HostError(pooled(&e).unwrap_or_default())),
+            // Any other error that is not the statement's, as the deadlock a describe waiting on one
+            // table while another session waits on the table it holds is chosen to end: the next
+            // analysis asks again.
+            Some(d) if !server_errors::postgres(d.code().code()) => Err(HostError(format!("The server failed the analysis of this statement for a reason of its own, so run it again: {}", pg_message(&e)))),
             Some(d) => {
                 let position = match d.position() {
                     Some(::tokio_postgres::error::ErrorPosition::Original(p)) => Some(*p as usize),
@@ -192,7 +199,7 @@ async fn describe(client: &Client, sql: &str) -> Result<Result<Describe, DbError
 
 /// The rows of a catalog query over `client`, its statement taken from `prepared` where there is one.
 async fn query(client: &Client, prepared: Option<&Prepared>, sql: &str, params: &[Value]) -> Result<Result<Vec<Vec<Value>>, DbError>, HostError> {
-    let failed = |what: &str, e: ::tokio_postgres::Error| HostError(if ended(&e) { format!("{ENDED}: {}", pg_message(&e)) } else { format!("catalog query {what}: {}\n    {sql}", pg_message(&e)) });
+    let failed = |what: &str, e: ::tokio_postgres::Error| HostError(if ended(&e) { format!("{ENDED}: {}", pg_message(&e)) } else if let Some(shared) = pooled(&e) { shared } else { format!("catalog query {what}: {}\n    {sql}", pg_message(&e)) });
     let stmt = match prepared {
         Some(prepared) => prepared.statement(client, sql).await,
         None => client.prepare(sql).await,
@@ -260,6 +267,20 @@ pub const ENDED: &str = "the server ended the session";
 /// session's lock on a table the statement names. The connection still has the round's other
 /// describes queued behind the same lock, so its caller opens another for the next statement.
 pub const LOCKED: &str = "A table this statement names is locked by another session, and the analysis stopped waiting for it at lock_timeout";
+
+/// Why the server does not keep the statements the client prepares on the session, where `e` is
+/// one the client named itself (`s<n>`, or the type lookup's) already there (42P05) or gone (26000):
+/// the session is shared between clients, as a transaction pooler shares it. A statement's own
+/// `EXECUTE` of a name it never prepared raises 26000 too, and is not this.
+fn pooled(e: &::tokio_postgres::Error) -> Option<String> {
+    let d = e.as_db_error()?;
+    if !matches!(d.code().code(), "42P05" | "26000") {
+        return None;
+    }
+    let name = d.message().split('"').nth(1)?;
+    let ours = name.strip_prefix('s').is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())) || name.starts_with("typeinfo");
+    ours.then(|| format!("The server's session is shared between clients, as a transaction pooler shares it, so the statements the analysis prepares do not stay on it: point direct_url in .reylo.yaml at a session pooler or the direct connection. The server answered: {}", pg_message(e)))
+}
 
 /// Whether `e` is the server ending the session, rather than its answer to what it was asked.
 pub fn ended(e: &::tokio_postgres::Error) -> bool {

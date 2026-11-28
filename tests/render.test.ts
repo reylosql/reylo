@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import type { EngineType } from "../src/engine.ts";
 import { analysisWithNestedArrays } from "../src/engine-type.ts";
 import { jsonNumbers, orNull, renderParamType, renderType } from "../src/render.ts";
-import { numbersInJson } from "../src/values.ts";
+import { columnKind, numbersInJson } from "../src/values.ts";
 import { typeSchema } from "../src/schema.ts";
 import { array, checked, doc, enumOf, field, lite, my, oneOf, pg, record } from "./descriptors.ts";
 
@@ -87,6 +87,15 @@ test("a union is either", () => {
   assert.equal(renderType(doc({ kind: "array", element: { type: oneOf({ kind: "boolean" }, my("bigint")), nullable: true } }), false, "mysql"), "(boolean | number | null)[]");
   // A member whose JSON form is unknown is nothing known inside a document.
   assert.equal(renderType(oneOf(my("bigint"), { kind: "opaque", label: "mystery" }), true, "mysql"), "Json");
+  // A ClickHouse Variant is whichever of its types its value has, each as a column of that type
+  // is, an array among them; one member of no known type leaves any value.
+  const bytes = array({ kind: "integer", bits: 8, unsigned: true }, false);
+  assert.equal(renderType(oneOf(bytes, { kind: "text" }), false, "clickhouse"), "number[] | string");
+  assert.equal(renderType(oneOf(bytes, { kind: "unknown" }), false, "clickhouse"), "unknown");
+  // A codec reaches a Variant whose members are all of its family, and no member of any other.
+  const decimal = (precision: number): EngineType => ({ kind: "decimal", precision, min_scale: 2, max_scale: 2 });
+  assert.equal(renderType(oneOf(decimal(9), decimal(18)), false, "clickhouse", { decimal: "number" }), "number");
+  assert.equal(renderType(oneOf(array(decimal(9), false), { kind: "text" }), false, "clickhouse", { decimal: "number" }), "string[] | string");
 });
 
 test("pgvector's vector and halfvec are arrays of numbers, as columns and as parameters; inside a document their text", () => {
@@ -97,7 +106,7 @@ test("pgvector's vector and halfvec are arrays of numbers, as columns and as par
     assert.equal(renderType(array(pg(name)), false, "postgres"), "(number[] | null)[]");
     assert.equal(renderParamType(array(pg(name)), "postgres"), "number[][]");
     assert.deepEqual(typeSchema(pg(name), "postgres"), { type: "array", items: { type: "number", format: "float" } });
-    assert.deepEqual(typeSchema(pg(name), "postgres", false, true), { type: "string" });
+    assert.deepEqual(typeSchema(pg(name), "postgres", false, true), { type: "string", description: `pg type ${name}` });
   }
   // A sparsevec stays its text.
   assert.equal(renderType(pg("sparsevec"), false, "postgres"), "string");
@@ -145,6 +154,12 @@ test("SQLite: an INTEGER is a number, exact or an error; a NUMERIC whichever the
   assert.equal(renderType({ ...lite("numeric"), label: "DECIMAL(10,2)" } as EngineType, false, "sqlite"), "number | string");
   assert.equal(renderType({ ...lite("numeric"), label: "bigint(20)" } as EngineType, false, "sqlite"), "bigint");
   assert.equal(renderType({ kind: "union", label: "VARCHAR(20)", members: [lite("text"), lite("blob")] }, false, "sqlite"), "string");
+  // A number SQLite computes as an INTEGER or a REAL is a number, inside a document too.
+  assert.equal(renderType(lite("number"), false, "sqlite"), "number");
+  assert.equal(renderType(lite("number"), true, "sqlite"), "number");
+  assert.equal(columnKind(lite("number"), "sqlite"), "int|float");
+  assert.deepEqual(typeSchema(lite("number"), "sqlite"), { type: "number" });
+  assert.deepEqual(typeSchema(lite("number"), "sqlite", false, true), { type: "number" });
   // The driver binds a number for an INTEGER, and the run time a truth value as 1 or 0.
   assert.equal(renderParamType(lite("integer"), "sqlite"), "number");
   assert.equal(renderParamType(lite("numeric"), "sqlite"), "number | string | boolean");
@@ -262,6 +277,52 @@ test("the run time converts each float or decimal inside Postgres JSON that may 
   assert.deepEqual(jsonNumbers(doc(record([field("x", pg("float8")), field("x", pg("int4"))]))), undefined);
 });
 
+test("the run time refuses an integer past 2^53 - 1 where a 64-bit integer stands inside JSON, on every dialect but ClickHouse", () => {
+  // `json_build_object('id', id, 'n', n, 'big', big)`, and its SQLite and MySQL forms.
+  assert.deepEqual(jsonNumbers(doc(record([field("id", pg("int4")), field("big", pg("int8")), field("o", pg("oid"))]))), { keys: [["big", "integer"]] });
+  assert.deepEqual(jsonNumbers(doc({ kind: "array", element: { type: record([field("amount", lite("int8")), field("n", lite("integer")), field("lead", lite("bool"))]) } }), false, "sqlite"), { items: { keys: [["amount", "integer"], ["n", "integer"]] } });
+  assert.deepEqual(jsonNumbers(doc(record([field("id", my("int")), field("big", my("bigint")), field("u", { kind: "integer", bits: 64, unsigned: true })])), false, "mysql"), { keys: [["big", "integer"], ["u", "unsigned"]] });
+  assert.equal(jsonNumbers(doc(record([field("big", { kind: "integer", bits: 64 })])), false, "clickhouse"), undefined);
+  // Outside JSON a 64-bit integer is a BigInt already, and on SQLite and MySQL a float is a number inside JSON too.
+  assert.equal(jsonNumbers(pg("int8")), undefined);
+  assert.equal(jsonNumbers(lite("int8"), false, "sqlite"), undefined);
+  assert.equal(jsonNumbers(doc(record([field("f", lite("real"))])), false, "sqlite"), undefined);
+  const rounds = { items: { keys: [["amount", "integer"]] } } as const;
+  assert.deepEqual(numbersInJson([{ amount: 9007199254740991 }, { amount: -9007199254740991 }, { amount: null }], rounds, "rounds"), [{ amount: 9007199254740991 }, { amount: -9007199254740991 }, { amount: null }]);
+  assert.throws(() => numbersInJson([{ amount: 1 }, { amount: 9007199254740993 }], rounds, "rounds"), /Column "rounds" holds, inside its JSON at \/1\/amount, the integer 9007199254740992, which is past 2\^53 - 1, where JSON\.parse rounds a number/);
+  assert.throws(() => numbersInJson({ "a/b": -9007199254740992 }, { keys: [["a/b", "integer"]] }, "doc"), /at \/a~1b, the integer -9007199254740992, which is below -\(2\^53 - 1\)/);
+  // A float past what a 64-bit integer holds, as a non-STRICT SQLite INTEGER column may store, is one JSON.parse reads exactly.
+  assert.deepEqual(numbersInJson({ n: 1e19 }, { keys: [["n", "integer"]] }, "doc"), { n: 1e19 });
+  assert.throws(() => numbersInJson({ n: -(2 ** 63) }, { keys: [["n", "integer"]] }, "doc"), /the integer -9223372036854775808/);
+  assert.throws(() => numbersInJson({ n: 1e19 }, { keys: [["n", "unsigned"]] }, "doc"), /the integer 10000000000000000000/);
+  // An integer of one width or another, and an enum of integers; a SQLite NUMERIC may be a float.
+  assert.deepEqual(jsonNumbers(doc(record([field("n", oneOf(my("bigint"), my("int"))), field("e", { kind: "enum", type: pg("int8"), values: [{ value: "1" }] } as EngineType), field("x", lite("numeric"))])), false, "mysql"), { keys: [["n", "integer"], ["e", "integer"]] });
+  // The schema the engine writes for `json_build_array(id, amount)` and SQLite's `json_object(k, amount)`.
+  const tuple = { kind: "json", schema: { "$schema": "https://json-schema.org/draft/2020-12/schema", type: "array", prefixItems: [{ type: "integer", format: "int32" }, { type: "integer", format: "int64" }], items: false, minItems: 2 } } as EngineType;
+  assert.deepEqual(jsonNumbers(tuple), { items: false, elements: [null, "integer"] });
+  const keyed = { kind: "json", schema: { "$schema": "https://json-schema.org/draft/2020-12/schema", type: "object", additionalProperties: { anyOf: [{ type: "integer", format: "int64" }, { type: "null" }] } } } as EngineType;
+  assert.deepEqual(jsonNumbers(keyed, false, "sqlite"), { keys: [], others: "integer" });
+  assert.deepEqual(jsonNumbers(doc(record([field("xs", tuple)]))), { keys: [["xs", { items: false, elements: [null, "integer"] }]] });
+  // A SQLite integer column that may hold a REAL: a whole number from 2^53 to 2^63 may be a rounded integer, as its column reads; a float beside an integer elsewhere is exact.
+  const integerOrReal = { kind: "union", label: "INTEGER", members: [{ kind: "integer", bits: 64 }, { kind: "float", exponent_bits: 11, mantissa_bits: 52, infinity: true }] } as EngineType;
+  assert.deepEqual(jsonNumbers(doc(record([field("n", integerOrReal)])), false, "sqlite"), { keys: [["n", "integer"]] });
+  assert.equal(jsonNumbers(doc(record([field("n", integerOrReal)])), false, "postgres"), undefined);
+  // So does such a value in an array or an object the engine describes by a schema, `json_array(id, amount)` and `json_group_object(k, amount)`.
+  const integerOrRealSchema = { anyOf: [{ type: "integer", format: "int64" }, { type: "number", format: "double" }, { type: "null" }] };
+  const builtArray = { kind: "json", schema: { "$schema": "https://json-schema.org/draft/2020-12/schema", type: "array", prefixItems: [{ type: "integer", format: "int64" }, integerOrRealSchema], items: false } } as EngineType;
+  assert.deepEqual(jsonNumbers(builtArray, false, "sqlite"), { items: false, elements: ["integer", "integer"] });
+  assert.deepEqual(jsonNumbers({ kind: "json", schema: { "$schema": "https://json-schema.org/draft/2020-12/schema", type: "object", additionalProperties: integerOrRealSchema } } as EngineType, false, "sqlite"), { keys: [], others: "integer" });
+  assert.deepEqual(jsonNumbers(builtArray, false, "postgres"), { items: false, elements: ["integer", null] });
+  // `JSON_ARRAY(big, n)` with a nullable int beside the bigint: each place an integer of one width or another.
+  assert.deepEqual(jsonNumbers({ kind: "json", schema: { "$schema": "https://json-schema.org/draft/2020-12/schema", type: "array", items: { anyOf: [{ type: "integer", format: "int64" }, { type: "integer", format: "int32" }] } } } as EngineType), { items: "integer" });
+  // An integer or a float at a place holds numbers a double holds exactly.
+  assert.equal(jsonNumbers({ kind: "json", schema: { "$schema": "https://json-schema.org/draft/2020-12/schema", type: "array", prefixItems: [{ anyOf: [{ type: "integer", format: "int64" }, { type: "number" }] }], items: false } } as EngineType), undefined);
+  assert.equal(jsonNumbers({ kind: "json", schema: { "$schema": "https://json-schema.org/draft/2020-12/schema", type: "array", items: { type: "integer" } } } as EngineType), undefined);
+  assert.throws(() => numbersInJson([1, 9007199254740993], { items: false, elements: [null, "integer"] }, "a"), /at \/1, the integer 9007199254740992/);
+  assert.deepEqual(numbersInJson([9007199254740993, 1], { items: false, elements: [null, "integer"] }, "a"), [9007199254740992, 1]);
+  assert.throws(() => numbersInJson({ ok: 1, big: 9007199254740993 }, { keys: [], others: "integer" }, "b"), /at \/big, the integer/);
+});
+
 test("two columns or keys of one name keep the last, as a row object and JSON.parse do", () => {
   assert.equal(renderType(doc(record([field("x", pg("text")), field("x", pg("int4"), true)])), false, "postgres"), "{ x: number | null }");
   // A row whose columns were not read (a subquery's) is an object of them inside a document.
@@ -359,9 +420,14 @@ test("a JSON column a CHECK holds to a JSON Schema is the type of the values the
   assert.equal(renderType(json(false)), "never");
   assert.equal(renderType(json({})), "Json");
   assert.equal(renderType(json({ type: "array" })), "Json[]");
-  // Reylo parses JSON on every driver; inside a document, and as a parameter, the schema's type stands.
+  // Reylo parses JSON on every driver; inside a document the schema's type stands, and a parameter's
+  // integer takes a BigInt too, which `.run()` writes as its digits, so one past 2^53 - 1 stays exact.
   assert.equal(renderType(json(open), true, "postgres"), "{ name: string; age?: number | null }");
-  assert.equal(renderParamType(json(open), "postgres"), "{ name: string; age?: number | null }");
+  assert.equal(renderParamType(json(open), "postgres"), "{ name: string; age?: number | bigint | null }");
+  assert.equal(renderParamType(json({ type: "array", items: { type: ["number", "integer"], minimum: 0 } }), "sqlite"), "(number | bigint)[]");
+  assert.equal(renderParamType(json({ type: "array", prefixItems: [{ type: "integer" }], items: { type: "number" } }), "mysql"), "[(number | bigint)?, ...number[]]");
+  // Beside a field that takes a BigInt, an index signature takes any value, which the run time checks against the schema.
+  assert.equal(renderParamType(json({ type: "object", properties: { id: { type: "integer" } }, required: ["id"], additionalProperties: { type: "string" } }), "postgres"), "{ id: number | bigint; [key: string]: unknown }");
   assert.equal(renderType({ kind: "json" }), "Json");
 });
 

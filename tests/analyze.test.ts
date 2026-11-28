@@ -1,13 +1,15 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { connect, createServer, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { FINGERPRINT, Session } from "../src/analyze.ts";
+import { Session } from "../src/analyze.ts";
+import { engine, type Connection } from "../src/engine.ts";
 import { sqlModule } from "../src/loader.ts";
 import { mapperHandlers } from "../src/mapper-server.ts";
 import { reportedDiagnostics, type Reported } from "../src/mapper-diagnostics.ts";
@@ -15,7 +17,7 @@ import { mysqlStandIn } from "./mysql-stand-in.ts";
 import { refusedLogin, Unreachable } from "../src/connection.ts";
 import { defineQuery } from "../src/index.ts";
 import { nativeBinary } from "../src/native.ts";
-import { DRIVERS, PG, mysqlDatabase, mysqlLive, postgresDatabase } from "./helpers.ts";
+import { DRIVERS, PG, clickhouseDatabase, clickhouseLive, mysqlAccount, mysqlDatabase, mysqlLive, postgresDatabase } from "./helpers.ts";
 
 // A throwaway Postgres server for the tests that need one, never a database anyone uses: each such
 // test makes a database of its own there and drops it after. The driver is the labs', never the
@@ -230,6 +232,92 @@ test("on Postgres, an analysis made after a migration, by a session that still t
   }
 });
 
+test("on MySQL, an analysis made after a migration, by a session that still trusts the fingerprint from before it, is written under the migrated schema's", { skip: mysqlLive }, async () => {
+  const setup = "create table u (b int); create table t (a int)";
+  const a = await mysqlDatabase("reylo_migrated_a", setup);
+  const b = await mysqlDatabase("reylo_migrated_b", setup);
+  const name = (url: string) => new URL(url).pathname.slice(1);
+  // Each database is reached by an account granted it alone, so that the fingerprint, which reads
+  // every database the account may reach, holds still while other tests make and drop theirs.
+  let ofA: Awaited<ReturnType<typeof mysqlAccount>> | undefined;
+  let ofB: Awaited<ReturnType<typeof mysqlAccount>> | undefined;
+  try {
+    ofA = await mysqlAccount(a.db, `reylo_migrated_a_${process.pid}`, [name(a.url)]);
+    ofB = await mysqlAccount(b.db, `reylo_migrated_b_${process.pid}`, [name(b.url)]);
+    await migratedUnderASession((root, env) => Session.open(root, env), { url: ofA.url(name(a.url)), run: (sql) => a.db.query(sql) }, { url: ofB.url(name(b.url)) }, "alter table t modify a int not null", "alter table t modify a int null");
+  } finally {
+    try {
+      await ofA?.drop();
+      await ofB?.drop();
+    } finally {
+      await a.drop();
+      await b.drop();
+    }
+  }
+});
+
+test("on ClickHouse, an analysis made after a migration, by a session that still trusts the fingerprint from before it, is written under the migrated schema's", { skip: clickhouseLive, timeout: 120_000 }, async () => {
+  const setup = "CREATE TABLE u (b Int32) ENGINE = MergeTree ORDER BY tuple();\nCREATE TABLE t (a Nullable(Int32)) ENGINE = MergeTree ORDER BY tuple()";
+  const a = await clickhouseDatabase("reylo_migrated_a", setup);
+  const b = await clickhouseDatabase("reylo_migrated_b", setup);
+  try {
+    await migratedUnderASession((root, env) => Session.open(root, env), { url: a.url, run: (query) => a.client.command({ query }) }, b, "ALTER TABLE t MODIFY COLUMN a Int32 DEFAULT 0", "ALTER TABLE t MODIFY COLUMN a Nullable(Int32)");
+  } finally {
+    await a.drop();
+    await b.drop();
+  }
+});
+
+/**
+ * Runs `run` with each connection the engine of `dialect` opens changed by `change`, as a test
+ * stands in for what happens on the database while a session works.
+ */
+async function withConnections<T>(dialect: "sqlite", change: (c: Connection) => Connection, run: () => Promise<T>): Promise<T> {
+  const e = await engine(dialect);
+  const open = e.open;
+  e.open = async (url) => change(await open.call(e, url));
+  try {
+    return await run();
+  } finally {
+    e.open = open;
+  }
+}
+
+test("on SQLite, a schema changed and changed back while a statement is analyzed leaves no entry of the schema in between", async () => {
+  const { root, env } = project();
+  const exec = (sql: string) => {
+    const db = new DatabaseSync(join(root, "app.db"));
+    db.exec(sql);
+    db.close();
+  };
+  // SQLite changes a column by building its table again; users is made so for the revert too.
+  const rebuild = (name: string) => `create table users2 (id integer primary key, name ${name}); insert into users2 select * from users; drop table users; alter table users2 rename to users;`;
+  exec(rebuild("text not null"));
+  let analyses = 0;
+  const outcome = await withConnections(
+    "sqlite",
+    (c) => ({
+      ...c,
+      // The first analysis runs on a migration, which is reverted before it ends: the fingerprint
+      // after it is the one before it, and only the schema's stamp says it moved.
+      analyze: async (sql) => {
+        if (analyses++ > 0) return c.analyze(sql);
+        exec(rebuild("text"));
+        try {
+          return await c.analyze(sql);
+        } finally {
+          exec(rebuild("text not null"));
+        }
+      },
+    }),
+    () => analyze(root, env, "select name from users"),
+  );
+  assert.ok(outcome.ok);
+  assert.equal(analyses, 2);
+  assert.ok(!outcome.analysis.columns[0]!.nullable);
+  assert.ok(!(JSON.parse(readFileSync(outcome.entry, "utf8")) as { analysis: { columns: { nullable?: boolean }[] } }).analysis.columns[0]!.nullable);
+});
+
 test("the engine's answers from while the fingerprint query failed are dropped once it runs again", async () => {
   const root = mkdtempSync(join(tmpdir(), "reylo-unverified-"));
   writeFileSync(join(root, "package.json"), "{}");
@@ -239,24 +327,28 @@ test("the engine's answers from while the fingerprint query failed are dropped o
     db.close();
   };
   exec("create table t (a int)");
-  const session = await Session.open(root, { DATABASE_URL: "file:./app.db" });
-  const fingerprint = FINGERPRINT.sqlite;
-  try {
-    // A query the server refuses: the session's fingerprint is its own, unverified value.
-    FINGERPRINT.sqlite = "select * from reylo_no_such_table";
-    const before = await session.analyze("select * from t");
-    assert.ok(before.ok);
-    assert.deepEqual(before.analysis.columns.map((c) => c.name), ["a"]);
-    FINGERPRINT.sqlite = fingerprint;
-    exec("alter table t add column b int");
-    await session.recheck();
-    const after = await session.analyze("select * from t");
-    assert.ok(after.ok);
-    assert.deepEqual(after.analysis.columns.map((c) => c.name), ["a", "b"]);
-  } finally {
-    FINGERPRINT.sqlite = fingerprint;
-    await session.close();
-  }
+  let refused = true;
+  await withConnections(
+    "sqlite",
+    // A fingerprint the database refuses: the session's fingerprint is its own, unverified value.
+    (c) => ({ ...c, schema: () => (refused ? Promise.reject(new Error("no such table: reylo_no_such_table")) : c.schema()) }),
+    async () => {
+      const session = await Session.open(root, { DATABASE_URL: "file:./app.db" });
+      try {
+        const before = await session.analyze("select * from t");
+        assert.ok(before.ok);
+        assert.deepEqual(before.analysis.columns.map((c) => c.name), ["a"]);
+        refused = false;
+        exec("alter table t add column b int");
+        await session.recheck();
+        const after = await session.analyze("select * from t");
+        assert.ok(after.ok);
+        assert.deepEqual(after.analysis.columns.map((c) => c.name), ["a", "b"]);
+      } finally {
+        await session.close();
+      }
+    },
+  );
 });
 
 test("without the database, reylo/.cache/ answers as it is, and a statement it lacks is an error that says where to fill it", async () => {
@@ -332,8 +424,95 @@ test("a build that cannot reach the database reads reylo/.cache/ with another UR
   assert.ok(moved.entry.startsWith(join(copy, "reylo", ".cache")));
 });
 
+test("an entry is named by its server and the URL's parameters that choose the database as the URL writes them, as reylo-build names it", async () => {
+  // reylo-build names its entries by the same cases but ClickHouse's (rust/reylo-build/src/analysis.rs), so that the two share reylo/.cache/.
+  const cases: { case: string; url: string; server: string; env?: Record<string, string> }[] = JSON.parse(readFileSync(new URL("../rust/reylo-build/src/entry-name-cases.json", import.meta.url), "utf8"));
+  // A ClickHouse bearer token, which reylo-build reads no URL with: the engine sends the database header beside it in either order, so it names no entry, and its value never reaches a name.
+  cases.push(
+    { case: "a ClickHouse database header before a bearer token", url: "clickhouse+http://127.0.0.1:8123/?http_header_X-ClickHouse-Database=analytics&access_token=secret", server: "clickhouse+http://@127.0.0.1:8123/?http_header_X-ClickHouse-Database=analytics" },
+    { case: "a ClickHouse database header after a bearer token", url: "clickhouse+http://127.0.0.1:8123/?access_token=secret&http_header_X-ClickHouse-Database=analytics", server: "clickhouse+http://@127.0.0.1:8123/?http_header_X-ClickHouse-Database=analytics" },
+    { case: "a bearer token alone", url: "clickhouse+http://127.0.0.1:8123/?access_token=secret", server: "clickhouse+http://@127.0.0.1:8123/" },
+  );
+  const root = mkdtempSync(join(tmpdir(), "reylo-entry-names-"));
+  writeFileSync(join(root, "package.json"), "{}");
+  // The variables libpq reads, which the engine reads from this process's environment: each case's own, and none of the machine's.
+  const variables = ["PGHOST", "PGPORT", "PGUSER", "PGDATABASE", "PGOPTIONS"];
+  const saved = Object.fromEntries(variables.map((name) => [name, process.env[name]]));
+  try {
+    for (const c of cases) {
+      for (const name of variables) {
+        if (c.env?.[name] === undefined) delete process.env[name];
+        else process.env[name] = c.env[name];
+      }
+      const session = await Session.open(root, { DATABASE_URL: c.url });
+      try {
+        assert.ok(session.entryFile("select 1").endsWith(`-${createHash("sha256").update(c.server).digest("hex").slice(0, 16)}.json`), c.case);
+      } finally {
+        await session.close();
+      }
+    }
+  } finally {
+    for (const name of variables) {
+      if (saved[name] === undefined) delete process.env[name];
+      else process.env[name] = saved[name];
+    }
+  }
+});
+
+test("a session names its entries by libpq's variables as it started, as its connection reads them", async () => {
+  const root = mkdtempSync(join(tmpdir(), "reylo-entry-environment-"));
+  writeFileSync(join(root, "package.json"), "{}");
+  const saved = process.env.PGDATABASE;
+  process.env.PGDATABASE = "first";
+  const session = await Session.open(root, { DATABASE_URL: "postgres://app@db.internal/" });
+  try {
+    const before = session.entryFile("select 1");
+    process.env.PGDATABASE = "second";
+    assert.equal(session.entryFile("select 1"), before);
+    const later = await Session.open(root, { DATABASE_URL: "postgres://app@db.internal/" });
+    assert.notEqual(later.entryFile("select 1"), before);
+    await later.close();
+  } finally {
+    if (saved === undefined) delete process.env.PGDATABASE;
+    else process.env.PGDATABASE = saved;
+    await session.close();
+  }
+});
+
+test("a session's connection reads libpq's variables as the session started, so its analysis is of the database its entries name", { skip: live }, async () => {
+  const first = await postgresDatabase("reylo_env_first", "create table t (v int not null)");
+  const second = await postgresDatabase("reylo_env_second", "create table t (v text)");
+  const root = mkdtempSync(join(tmpdir(), "reylo-entry-environment-"));
+  writeFileSync(join(root, "package.json"), "{}");
+  const saved = process.env.PGDATABASE;
+  // The URL names no database: PGDATABASE does.
+  const url = new URL(first.url);
+  url.pathname = "/";
+  try {
+    process.env.PGDATABASE = new URL(first.url).pathname.slice(1);
+    const session = await Session.open(root, { DATABASE_URL: url.href });
+    // Changed before the session's first connection, which still opens the database its entries name.
+    process.env.PGDATABASE = new URL(second.url).pathname.slice(1);
+    try {
+      const typed = await session.analyze("select v from t");
+      assert.ok(typed.ok);
+      // The first database's `v`, which is never null, where the second's may be.
+      assert.ok(!typed.analysis.columns[0]!.nullable);
+    } finally {
+      await session.close();
+    }
+  } finally {
+    if (saved === undefined) delete process.env.PGDATABASE;
+    else process.env.PGDATABASE = saved;
+    await first.drop();
+    await second.drop();
+  }
+});
+
 test("on a server, a URL that fails reads that server's own entry and no other's, and a build says once that it reads reylo/.cache/ unchecked", { skip: live }, async (t) => {
   const { url, sql, drop } = await postgresDatabase("reylo_offline", "create table users (id int primary key, email text not null)");
+  // Another database on the same server, whose users differ.
+  const second = await postgresDatabase("reylo_offline_other", "create table users (id bigint primary key, email text)");
   const root = mkdtempSync(join(tmpdir(), "reylo-offline-"));
   writeFileSync(join(root, "package.json"), "{}");
   const statement = "select id, email from users where id = :id";
@@ -354,6 +533,21 @@ test("on a server, a URL that fails reads that server's own entry and no other's
     const typed = await analyze(root, env, statement);
     assert.ok(typed.ok);
     assert.deepEqual([typed.source, typed.unverified], ["database", undefined]);
+    // Two databases of the server, each named by `?dbname=` as libpq names one, keep an entry each.
+    // They are a project of their own: the one above reads its newest entry with no URL.
+    const byName = mkdtempSync(join(tmpdir(), "reylo-offline-dbname-"));
+    writeFileSync(join(byName, "package.json"), "{}");
+    const dbname = (database: string) => {
+      const named = new URL(through.href);
+      named.pathname = "/";
+      named.search = `dbname=${new URL(database).pathname.slice(1)}`;
+      return named.href;
+    };
+    const own = await analyze(byName, { DATABASE_URL: dbname(url) }, statement);
+    const another = await analyze(byName, { DATABASE_URL: dbname(second.url) }, statement);
+    assert.ok(own.ok);
+    assert.ok(another.ok);
+    assert.notEqual(own.entry, another.entry);
     await sql.unsafe("alter table users alter email drop not null");
     await new Promise((resolve) => proxy.close(resolve));
     // The server no longer answers: its own entry, as old as it is, and the outcome says so.
@@ -361,6 +555,10 @@ test("on a server, a URL that fails reads that server's own entry and no other's
     assert.ok(stale.ok);
     assert.deepEqual([stale.source, stale.entry], ["cache", typed.entry]);
     assert.match(stale.unverified ?? "", /^cannot connect to the database at 127\.0\.0\.1:\d+\/reylo_offline_\d+ \(DATABASE_URL in the environment\): .+; building from reylo\/\.cache\/, analyzed \d{4}-\d\d-\d\d$/);
+    // Named by `?dbname=`, the database reads its own entry, and never the other database's.
+    const ownStale = await analyze(byName, { DATABASE_URL: dbname(url) }, statement);
+    assert.ok(ownStale.ok);
+    assert.deepEqual([ownStale.source, ownStale.entry, ownStale.analysis], ["cache", own.entry, own.analysis]);
     // A server nothing was analyzed on reads no other's entry: a mistyped host is not the database last analyzed.
     const elsewhere = new URL(url);
     elsewhere.port = "1";
@@ -395,6 +593,7 @@ test("on a server, a URL that fails reads that server's own entry and no other's
   } finally {
     proxy.close();
     await drop();
+    await second.drop();
   }
 });
 
@@ -498,7 +697,7 @@ test("the module a build step emits carries the analysis and reads nothing at ru
       `export const sql = "select id, name from users where id = ?";`,
       `export const raw = ${JSON.stringify(SELECT)};`,
       `export const params = ["id"];`,
-      `export default defineSqliteQuery({ sql: raw, params, cardinality: "maybeOne", readOnly: true, text: sql, order: ["id"], inputs: {"id":{"type":{"kind":"integer","bits":64},"nullable":false}}, columns: [["id","int"],["name","text"]], row: (v) => ({ "id": v[0], "name": v[1] }), source: "user.sql", sqlcommenter: true, jsonSchema: {"input":{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"id":{"type":"integer","format":"int64"}},"required":["id"],"additionalProperties":false},"output":{"$schema":"https://json-schema.org/draft/2020-12/schema","anyOf":[{"type":"object","properties":{"id":{"type":"integer","format":"int64"},"name":{"type":"string"}},"required":["id","name"]},{"type":"null"}]}} });`,
+      `export default defineSqliteQuery({ sql: raw, params, cardinality: "maybeOne", readOnly: true, text: sql, order: ["id"], marks: [[38,39]], inputs: {"id":{"type":{"kind":"integer","bits":64},"nullable":false}}, columns: [["id","int"],["name","text"]], row: (v) => ({ "id": v[0], "name": v[1] }), source: "user.sql", sqlcommenter: true, jsonSchema: {"input":{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"id":{"type":"integer","format":"int64"}},"required":["id"],"additionalProperties":false},"output":{"$schema":"https://json-schema.org/draft/2020-12/schema","anyOf":[{"type":"object","properties":{"id":{"type":"integer","format":"int64"},"name":{"type":"string"}},"required":["id","name"]},{"type":"null"}]}} });`,
       ``,
     ].join("\n"));
     // A statement in a directory carries its file written with `/`.
@@ -670,6 +869,9 @@ test("the Postgres fingerprint runs on the server, holds while nothing changes, 
       await session.close();
     }
   };
+  // A base type of text's functions, with `options` beside them.
+  const baseType = (options: string) =>
+    `create type mt; create function mt_in(cstring) returns mt language internal immutable strict as 'textin'; create function mt_out(mt) returns cstring language internal immutable strict as 'textout'; create type mt (input = mt_in, output = mt_out, internallength = variable, storage = extended, ${options})`;
   // An aggregate that runs `step` and `done`, but for the options `swap` names.
   const total = (swap: Record<string, string> = {}) => {
     const options = { sfunc: "step", finalfunc: "done", combinefunc: "step", msfunc: "step", minvfunc: "step", mfinalfunc: "done", ...swap };
@@ -685,6 +887,7 @@ test("the Postgres fingerprint runs on the server, holds while nothing changes, 
       create function done(int) returns int language sql as 'select $1';
       create function other_done(int) returns int language sql as 'select $1';
       ${total()}`);
+    const standardStringsOnly = Number((await db.unsafe("show server_version_num"))[0]!.server_version_num) >= 190000;
     // A query the server refuses gives "unverified <pid> <time>", a value no entry ever matches.
     const first = await fingerprint();
     assert.match(first ?? "", /^[0-9a-f]{16}$/);
@@ -747,6 +950,40 @@ test("the Postgres fingerprint runs on the server, holds while nothing changes, 
       // one dropped and made again under its name keeps every column that names it as it was.
       "create collation folded (provider = icu, locale = 'und', deterministic = true)",
       "drop collation folded; create collation folded (provider = icu, locale = 'und', deterministic = false)",
+      // A function's language, which decides whether its body is read, and whether it runs as its
+      // owner or has a planner support function, either of which keeps its body unread.
+      "create function g() returns int language sql as 'select 1'",
+      "begin; set local check_function_bodies = off; create or replace function g() returns int language plpgsql as 'select 1'; commit",
+      "alter function g() security definer",
+      "alter function g() support pg_catalog.varchar_support",
+      // A function of an extension's in pg_catalog, read wherever it was made.
+      "alter function pg_catalog.citext_eq(citext, citext) volatile",
+      "alter function pg_catalog.citext_eq(citext, citext) called on null input",
+      // Whether a backslash in a string is an escape, which the CHECKs are read under (Postgres 19
+      // has no other way), and whether one may escape a quote: a new session takes the database's
+      // setting.
+      ...(standardStringsOnly ? [] : [`alter database ${url.pathname.slice(1)} set standard_conforming_strings = off`, `alter database ${url.pathname.slice(1)} reset standard_conforming_strings`]),
+      `alter database ${url.pathname.slice(1)} set backslash_quote = off`,
+      // An operator family's equality, which decides whether a unique key pins one row.
+      "create operator family fam using btree; alter operator family fam using btree add operator 3 = (int4, int4)",
+      "alter operator family fam using btree drop operator 3 (int4, int4)",
+      // The tables an extension owns, which its code may read.
+      "create table side (a int)",
+      "alter extension citext add table side",
+      "alter extension citext drop table side",
+      // plpgsql, which every database has from the server, owns a table too.
+      "alter extension plpgsql add table side",
+      "alter extension plpgsql drop table side",
+      // A sequence a column owns, which an insert may advance.
+      "create sequence extra",
+      "alter sequence extra owned by a.x",
+      "alter sequence extra owned by none",
+      // A domain's collation, and a base type's category, preference and array delimiter, which
+      // none of its functions carries: each made again under its own name.
+      `create domain d as text collate "C"`,
+      `drop domain d; create domain d as text collate "POSIX"`,
+      baseType("delimiter = ',', category = 'U'"),
+      `drop type mt cascade; ${baseType("delimiter = ';', category = 'S', preferred = true")}`,
     ]) {
       await db.unsafe(change);
       const next = await fingerprint();
@@ -766,38 +1003,120 @@ test("the Postgres fingerprint runs on the server, holds while nothing changes, 
   }
 });
 
-test("the MySQL fingerprint holds while nothing changes, and moves with a column's length, precision and scale, fractional seconds and character set, which its type carries, and with a CHECK's expression and whether it is enforced", { skip: mysqlLive }, async () => {
-  const own = await mysqlDatabase("reylo_fingerprint", "create table m (v varchar(20), n decimal(10,2), at datetime(3), body text character set latin1)");
-  await own.db.query(`create table docs (j json not null, constraint j_shape check (json_schema_valid('{"type":"object","properties":{"a":{"type":"integer"}}}', j)))`);
+test("the MySQL fingerprint holds while nothing changes, and moves with a column's length, precision and scale, fractional seconds and character set, which its type carries, with a CHECK's expression and whether it is enforced, with a stored function's arguments, and with what another database holds, but for Reylo Migrate's shadows other than the URL's own, and with the account's TRIGGER privileges", { skip: mysqlLive }, async () => {
   const root = mkdtempSync(join(tmpdir(), "reylo-fingerprint-"));
   writeFileSync(join(root, "package.json"), "{}");
   mkdirSync(join(root, "node_modules"));
   symlinkSync(join(DRIVERS, "mysql2"), join(root, "node_modules", "mysql2"));
+  const own = await mysqlDatabase(
+    "reylo_fingerprint",
+    `create table m (v varchar(20), n decimal(10,2), at datetime(3), body text character set latin1);
+    create table docs (j json not null, constraint j_shape check (json_schema_valid('{"type":"object","properties":{"a":{"type":"integer"}}}', j)));
+    create function f(x int) returns int deterministic return x`,
+  );
+  const ownName = new URL(own.url).pathname.slice(1);
+  const shadow = `reylo_shadow_fingerprint_${process.pid}`;
+  // The session's account is granted only this test's databases (`mysqlAccount`).
+  const user = `reylo_fp_${process.pid}`;
+  let account: Awaited<ReturnType<typeof mysqlAccount>> | undefined;
   // A session per call, as a process of its own, so that none answers from a fingerprint it took.
-  const fingerprint = async () => {
-    const session = await Session.open(root, { DATABASE_URL: own.url });
+  const fingerprint = async (database = ownName) => {
+    const session = await Session.open(root, { DATABASE_URL: account!.url(database) });
     try {
       return (await session.schema()).value;
     } finally {
       await session.close();
     }
   };
+  let other: Awaited<ReturnType<typeof mysqlDatabase>> | undefined;
   try {
+    other = await mysqlDatabase("reylo_fingerprint_other", "create table t (c int not null); create function g(x int) returns int deterministic return x");
+    const otherName = new URL(other.url).pathname.slice(1);
+    account = await mysqlAccount(own.db, user, [ownName, otherName, shadow]);
     let last = await fingerprint();
     assert.match(last ?? "", /^[0-9a-f]{16}$/);
     assert.equal(await fingerprint(), last);
     // A TEXT's character set decides whether its size counts the bytes a client receives.
     // A JSON column is typed by the schema its CHECK holds it to, while the CHECK is enforced.
     const checks = [`alter table docs drop check j_shape, add constraint j_shape check (json_schema_valid('{"type":"object","properties":{"a":{"type":"string"}}}', j))`, "alter table docs alter check j_shape not enforced"];
-    for (const change of ["alter table m modify v varchar(50)", "alter table m modify n decimal(12,4)", "alter table m modify at datetime(6)", "alter table m modify body text character set utf8mb4", ...checks]) {
-      await own.db.query(change);
+    // A parameter is typed as the argument it is passed for, and a call checked against their count.
+    const signatures = ["f(x varchar(10))", "f(x varchar(10), y int)"].map((signature) => ["drop function f", `create function ${signature} returns int deterministic return x`]);
+    // A structured parameter is expanded by the database's character set and collation.
+    const database = [`alter database ${ownName} character set latin1 collate latin1_swedish_ci`, `alter database ${ownName} collate latin1_bin`];
+    // Which keys a structured parameter's rows may leave out is read from each column's default.
+    const defaults = ["alter table m alter v set default 'x'", "alter table m alter v drop default"];
+    // A statement may read another database's table or call its function, and the engine takes a
+    // column of a table for a view's wherever any database has a view of that name.
+    const elsewhere = [`alter table ${otherName}.t modify c varchar(10) null`, `create view ${otherName}.m as select 1 as v`, [`drop function ${otherName}.g`, `create function ${otherName}.g(x varchar(10)) returns int deterministic return x`]];
+    // Without the TRIGGER privilege, a written table's triggers are hidden from the account. A grant
+    // on a database's pattern names the pattern, which the engine does not read as the database.
+    // And a statement is prepared against the account's privileges, a column's included.
+    const privileges = [`grant trigger on \`${ownName}\`.m to '${user}'@'%'`, `grant select (v) on \`${ownName}\`.m to '${user}'@'%'`];
+    for (const change of ["alter table m modify v varchar(50)", "alter table m modify n decimal(12,4)", "alter table m modify at datetime(6)", "alter table m modify body text character set utf8mb4", ...checks, ...signatures, ...elsewhere, ...privileges, ...database, ...defaults]) {
+      const statements = [change].flat();
+      for (const statement of statements) await own.db.query(statement);
       const next = await fingerprint();
-      assert.notEqual(next, last, change);
-      assert.equal(await fingerprint(), next, change);
+      assert.notEqual(next, last, statements.join("; "));
+      assert.equal(await fingerprint(), next, statements.join("; "));
       last = next;
     }
+    // A shadow database, which each check of the migrations makes and drops, under the lock that
+    // keeps another check from dropping it as a leftover.
+    await own.db.query(`select get_lock('${shadow}', 0)`);
+    await own.db.query(`create database ${shadow}`);
+    await own.db.query(`create table ${shadow}.t (c int)`);
+    assert.equal(await fingerprint(), last);
+    // But a dry run's type check reads a shadow as its own database.
+    const before = await fingerprint(shadow);
+    await own.db.query(`alter table ${shadow}.t modify c varchar(10)`);
+    assert.notEqual(await fingerprint(shadow), before);
   } finally {
-    await own.drop();
+    try {
+      await own.db.query(`drop database if exists ${shadow}`);
+      await own.db.query(`select release_lock('${shadow}')`);
+      await account?.drop();
+    } finally {
+      try {
+        await other?.drop();
+      } finally {
+        await own.drop();
+      }
+    }
+  }
+});
+
+test("on MySQL, a view in another check's shadow leaves the analysis of a table of the same name as it was", { skip: mysqlLive }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "reylo-shadow-view-"));
+  writeFileSync(join(root, "package.json"), "{}");
+  mkdirSync(join(root, "node_modules"));
+  symlinkSync(join(DRIVERS, "mysql2"), join(root, "node_modules", "mysql2"));
+  const own = await mysqlDatabase("reylo_view_base", "create table base (n int not null)");
+  const shadow = `reylo_shadow_view_${process.pid}`;
+  // A fresh analysis in a session of its own, which holds no answer from before.
+  const columns = async () => {
+    const session = await Session.open(root, { DATABASE_URL: own.url });
+    try {
+      const outcome = await session.analyze("select n from base", { force: true, store: false });
+      assert.ok(outcome.ok);
+      return JSON.stringify(outcome.analysis.columns);
+    } finally {
+      await session.close();
+    }
+  };
+  try {
+    const before = await columns();
+    // Under the lock that keeps another check from dropping it as a leftover.
+    await own.db.query(`select get_lock('${shadow}', 0)`);
+    await own.db.query(`create database ${shadow}`);
+    await own.db.query(`create view ${shadow}.base as select 1 as n`);
+    assert.equal(await columns(), before);
+  } finally {
+    try {
+      await own.db.query(`drop database if exists ${shadow}`);
+      await own.db.query(`select release_lock('${shadow}')`);
+    } finally {
+      await own.drop();
+    }
   }
 });
 

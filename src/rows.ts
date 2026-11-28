@@ -6,10 +6,10 @@
 // written again without the keys a call leaves out, so every row of a call gives the same keys.
 // Nothing here changes a value: a value the database would round, truncate or read in a zone
 // nobody chose is refused.
-import type { EngineType, JsonSchema } from "./engine-type.ts";
+import { holdsWholeArrays, type EngineType, type JsonSchema } from "./engine-type.ts";
 import type { Marks } from "./execute.ts";
 import { validate, withDefaults } from "./json-schema.ts";
-import { columnKind, describe, given, hstoreText, ParameterError, postgresInterval, postgresLiteral, postgresYear, vectorText, zoned } from "./values.ts";
+import { columnKind, delimiterOf, describe, given, hstoreText, isLevel, ParameterError, postgresInterval, postgresLiteral, postgresYear, RawJson as Raw, vectorText, writeJson, zoned } from "./values.ts";
 
 export { describe, zoned } from "./values.ts";
 
@@ -43,14 +43,6 @@ const INTEGERS: Record<string, readonly [bigint, bigint]> = {
   // SQLite's INTEGER is a 64-bit integer.
   integer: [-TWO_63, TWO_63 - BigInt(1)],
 };
-
-/** Raw JSON text for a value the writer puts in as it is. */
-class Raw {
-  readonly text: string;
-  constructor(text: string) {
-    this.text = text;
-  }
-}
 
 /**
  * Checks a structured parameter's value against its column list, and gives the value to bind:
@@ -98,8 +90,8 @@ export function prepareRows(name: string, type: RowsType, value: unknown, dialec
         const filled = withDefaults(f.schema, checked);
         const failure = validate(f.schema, filled);
         if (failure) fail(`${where}"${f.name}"${failure.path ? ` at ${failure.path}` : ""} ${failure.message}.`);
-        put(f.name, jsonMember(f, filled, dialect));
-      } else put(f.name, jsonMember(f, checked, dialect));
+        put(f.name, jsonMember(f, filled, dialect, (message) => fail(`${where}"${f.name}" ${message}`)));
+      } else put(f.name, jsonMember(f, checked, dialect, (message) => fail(`${where}"${f.name}" ${message}`)));
     }
     // One statement inserts every row of a call, so on MySQL, which copies no default, its column
     // list is the same for each: a key one row leaves out and another gives cannot have its
@@ -118,25 +110,38 @@ export function prepareRows(name: string, type: RowsType, value: unknown, dialec
   const keys = present ?? new Set(type.fields.map((f) => f.name));
   if (inserted && !type.fields.some((f) => keys.has(f.name))) fail("every key is left out, so the insert would name no column; give one at least.");
   const shaped = type.one ? out[0] : out;
-  return { value: dialect === "postgres" ? shaped : write(shaped), present: keys };
+  return { value: dialect === "postgres" ? shaped : writeJson(shaped, dialect, fail), present: keys };
 }
 
 /**
- * A JSON member's value as JSON.stringify writes it, where the rows go to the database as JSON
- * text: it reads a value's `toJSON()` (a Date's) and leaves out a key whose value is undefined, as
- * a JSON parameter of its own is written. Postgres takes the rows as they are.
+ * A JSON member's value as a JSON parameter of its own is written (src/values.ts, `writeJson`),
+ * where the rows go to the database as JSON text: it reads a value's `toJSON()` (a Date's) with
+ * the key a value alone has, and leaves out a key whose value is undefined. Postgres takes the rows
+ * as they are, and writes them so.
  */
-function jsonMember(f: RowField, v: unknown, dialect: Dialect): unknown {
-  return dialect !== "postgres" && f.type.kind === "json" ? new Raw(JSON.stringify(v)) : v;
+function jsonMember(f: RowField, v: unknown, dialect: Dialect, fail: (message: string) => never): unknown {
+  return dialect !== "postgres" && f.type.kind === "json" ? new Raw(writeJson(v, dialect, fail)!) : v;
+}
+
+/**
+ * A whole array's text, from the value `check` gave it: each element in its checked form, a row
+ * value, a range, a geometric type and a vector already its text, so that an array there is a level.
+ */
+function wholeText(t: EngineType & { kind: "array" }, v: readonly unknown[]): string {
+  const element = t.element.type;
+  const json = columnKind(element, "postgres") === "json";
+  const quote = (text: string) => `"${text.replace(/["\\]/g, "\\$&")}"`;
+  return `{${v.map((e) => (e === null || e === undefined ? "NULL" : json ? quote(writeJson(e, "postgres", (message) => { throw new ParameterError(message); }) as string) : Array.isArray(e) ? wholeText(t, e) : quote(Object.is(e, -0) ? "-0" : String(e)))).join(delimiterOf(element) ?? ",")}}`;
 }
 
 /** One value checked against its type, as the JSON the database reads; `fail` says why not. */
 function check(type: EngineType, written: string, v: unknown, dialect: Dialect, fail: (message: string) => never): unknown {
   switch (type.kind) {
     case "json":
-      // JSON.stringify throws on a BigInt and skips a function; a JSON member holds JSON.
+      // A JSON member holds JSON: JSON.stringify skips a function. A BigInt goes in as its digits
+      // (src/values.ts, `writeJson`), which also refuses the numbers its database holds none for.
       try {
-        if (JSON.stringify(v) === undefined) fail(`is ${written}, which holds a JSON value; got ${describe(v)}.`);
+        if (typeof v !== "bigint" && JSON.stringify(v, (_key, x: unknown) => (typeof x === "bigint" ? 0 : x)) === undefined) fail(`is ${written}, which holds a JSON value; got ${describe(v)}.`);
       } catch (e) {
         fail(`is ${written}, which holds a JSON value: ${(e as Error).message}.`);
       }
@@ -154,7 +159,23 @@ function check(type: EngineType, written: string, v: unknown, dialect: Dialect, 
       if (columnKind(type, dialect).endsWith("[]")) {
         if (!Array.isArray(v)) return fail(`is ${written}, an array; got ${describe(v)}.`);
         const element = written.replace(/\s*\[\s*\]\s*$/, "");
-        return v.map((e, i) => (e === null ? null : check(type.element.type, element, e, dialect, (message) => fail(`element ${i + 1} ${message}`))));
+        // A level of a Postgres array is told from one element as a parameter tells it (src/values.ts).
+        const kind = columnKind(type.element.type, dialect);
+        // Each element of an array of whole arrays (a domain's over an array type) is one, whatever
+        // it holds, and goes as its text, as a parameter of its own does: Postgres reads a JSON
+        // array inside a member as one more dimension.
+        const whole = dialect === "postgres" && holdsWholeArrays(type);
+        return v.map((e, i) => {
+          if (e === null) return null;
+          const at = (message: string) => fail(`element ${i + 1} ${message}`);
+          if (whole) {
+            const checked = check(type.element.type, element, e, dialect, at);
+            const inner = type.element.type;
+            return Array.isArray(checked) && inner.kind === "array" ? wholeText(inner, checked) : checked;
+          }
+          const level = dialect === "postgres" && Array.isArray(e) && isLevel(kind, e);
+          return check(level ? type : type.element.type, level ? written : element, e, dialect, at);
+        });
       }
       break;
     case "struct":
@@ -405,18 +426,6 @@ function decimal(type: EngineType, written: string, v: unknown, fail: (message: 
     if (whole.length > precision - scale) fail(`is ${written}, which holds at most ${precision - scale} digit${precision - scale === 1 ? "" : "s"} before the point; got ${text}.`);
   }
   return typeof v === "bigint" ? v.toString() : v;
-}
-
-/** The checked rows as JSON text, each `Raw` value (a 64-bit integer's digits, -0, an infinity) as it is. */
-function write(v: unknown): string {
-  if (v instanceof Raw) return v.text;
-  if (Array.isArray(v)) return `[${v.map(write).join(",")}]`;
-  if (v !== null && typeof v === "object") {
-    return `{${Object.entries(v as Record<string, unknown>)
-      .map(([k, x]) => `${JSON.stringify(k)}:${write(x)}`)
-      .join(",")}}`;
-  }
-  return JSON.stringify(v);
 }
 
 /**

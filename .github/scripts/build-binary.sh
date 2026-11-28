@@ -33,7 +33,11 @@ case "$target" in
   *-linux-musl)
     # musl's compiler wrapper for the C (SQLite, ring) and the linker, and a static
     # binary, as Rust's musl targets link by default: it runs on any Linux of its CPU.
-    sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends musl-tools > /dev/null
+    # A repository the runner image adds can refuse the update (packages.microsoft.com answering
+    # 403), which still refreshes Ubuntu's own lists, where musl-tools is, so the install goes on;
+    # chained with `&&`, the refused update skipped it, and `set -e` let that pass.
+    sudo apt-get update -qq || echo "::warning::apt-get update failed for a repository; installing musl-tools from the lists it refreshed"
+    sudo apt-get install -y -qq --no-install-recommends musl-tools > /dev/null
     triple="${target//-/_}"
     export "CC_$triple=musl-gcc" "AR_$triple=ar"
     ;;

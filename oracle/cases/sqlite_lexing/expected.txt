@@ -1,0 +1,5 @@
+cr_comment.sql: at_most_one (id: int64) -> { id: INTEGER }
+dollar_name.sql: at_most_one (id: int64) -> { a$$b: INTEGER(int64 | float(11,52) | text(UTF-8, ill-formed) | bytes), é$a: int64(1) }
+escape_string.sql: at_most_one (id: int64) -> { \: INTEGER(int64 | float(11,52) | text(UTF-8, ill-formed) | bytes), b: text(UTF-8, ill-formed, '\\') }
+nbsp_name.sql: many () -> { x : INTEGER }
+nested_comment.sql: at_most_one (id: int64) -> { id: INTEGER }

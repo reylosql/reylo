@@ -80,7 +80,7 @@ pub(crate) fn hex(h: &[u8]) -> String {
 /// reader reads, or how it writes a line, changes, so that a release that leaves the reading alone
 /// leaves every stored fingerprint comparable. A test holds each edit to the reader's code to that
 /// choice.
-const READER: u32 = 12;
+const READER: u32 = 14;
 
 /// The catalog reader's part of a fingerprint.
 pub(crate) fn reader_id() -> String {
@@ -107,7 +107,8 @@ fn code_digest(source: &str) -> String {
 
 /// This build's code, as far as it decides what a replay ends in or what the catalog reads: the
 /// version, and the sources that make shadows, run their steps, connect to their servers and read
-/// their catalogs, the last two the native engine's (its `SOURCE_HASH`). Each is this crate's own,
+/// their catalogs, the last two the native engine's (its `SOURCE_HASH`), and core's, whose lexical
+/// rules split a migration into its statements (`reylo_engine_core::lexical`). Each is this crate's own,
 /// so that a build from its package keys its caches as one in the repository does. A development
 /// build edited between two runs keys its caches anew.
 #[cfg(feature = "cli")]
@@ -127,6 +128,7 @@ static CODE: LazyLock<Hash> = LazyLock::new(|| {
     ] {
         h.part(source.as_bytes());
     }
+    h.part(&reylo_engine_core::fingerprint::SOURCE_HASH.to_le_bytes());
     h.finish()
 });
 
@@ -792,7 +794,7 @@ mod tests {
     }
 
     /// The digest of the catalog reader's code when `READER` was last set.
-    const READER_CODE: &str = "bd991ba754e3";
+    const READER_CODE: &str = "543c132cf5f7";
 
     #[test]
     fn the_catalog_reader_keeps_its_version() {

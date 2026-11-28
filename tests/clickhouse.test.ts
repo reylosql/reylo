@@ -164,6 +164,11 @@ const PARAMS: [type: string, name: string, value: unknown, back?: unknown][] = [
   ["Array(String)", "strings", ["it's", "b\tc\\", ""]],
   ["Array(Nullable(UInt8))", "holes", [1, null]],
   ["Array(Array(UInt64))", "nested_list", [[1n], []]],
+  // A tuple's and a map's own value is an array: the type says each level, at any depth.
+  ["Array(Array(Array(UInt8)))", "deep_list", [[[1, 2]], [[3], []]]],
+  ["Array(Array(Tuple(UInt8, String)))", "deep_pairs", [[[1, "a"]], [[2, "b"], [3, "c"]]]],
+  ["Array(Array(Array(Tuple(n UInt8, s String))))", "deep_named", [[[{ n: 1, s: "a" }]]]],
+  ["Array(Array(Map(String, UInt8)))", "deep_maps", [[[{ key: "k", value: 1 }], []]]],
   ["Array(Decimal(18, 2))", "decimals", ["1.5", "-2.25"]],
   ["Array(DateTime64(3, 'UTC'))", "instants", ["2026-01-01T00:00:00.500Z"]],
   ["Array(DateTime('UTC'))", "seconds", ["2026-01-01T00:00:00Z"]],
@@ -187,12 +192,15 @@ const PARAMS: [type: string, name: string, value: unknown, back?: unknown][] = [
 const row = (pairs: [string, unknown][]) => Object.fromEntries(pairs);
 
 test("a ClickHouse type's name reads into its parts and writes back on one line", () => {
-  for (const name of ["UInt64", "Nullable(String)", "Decimal(18, 4)", "DateTime64(3, 'UTC')", "Enum8('admin' = 1, 'it\\'s' = -2)", "Tuple(n UInt8, s Nullable(String))", "Tuple(`a b` UInt8)", "Tuple()", "Map(String, Array(UInt8))", "Variant(String, UInt8)", "AggregateFunction(quantiles(0.5, 0.9), UInt64)", "JSON(a.b UInt32, max_dynamic_paths = 8, SKIP c.d)"]) {
+  for (const name of ["UInt64", "Nullable(String)", "Decimal(18, 4)", "DateTime64(3, 'UTC')", "Enum8('admin' = 1, 'it\\'s' = -2)", "Tuple(n UInt8, s Nullable(String))", "Tuple(`a b` UInt8)", "Tuple(`a.b` UInt8, b String)", "Nested(`a.b` UInt8, `select` String)", "Tuple(`NULL` UInt8, `Values` String)", "Tuple(`a\\nb` UInt8)", "Enum8('a\\nb' = 1, 'c\\td' = 2, 'e\\rf' = 3, 'g\\0h' = 4, 'i\\bj' = 5, 'k\\fl' = 6)", "Tuple()", "Map(String, Array(UInt8))", "Variant(String, UInt8)", "AggregateFunction(quantiles(0.5, 0.9), UInt64)", "JSON(`a.b` UInt32, max_dynamic_paths = 8, SKIP c.d)"]) {
     assert.equal(typeName(parseType(name)!), name);
   }
   // As a describe writes a tuple with names, a member a line, and as a result's header writes it.
   assert.equal(canonical("Tuple(\n    x Float64,\n    y Tuple(\n        z String))"), "Tuple(x Float64, y Tuple(z String))");
   assert.equal(canonical("Decimal(18,4)"), "Decimal(18, 4)");
+  // A module built before member names with a dot were quoted holds them bare, and a result naming the same members is not changed.
+  assert.equal(canonical("Tuple(a.1 UInt8, a..b String, a. UInt8)"), canonical("Tuple(`a.1` UInt8, `a..b` String, `a.` UInt8)"));
+  assert.notEqual(canonical("Tuple(a.2 UInt8)"), canonical("Tuple(`a.1` UInt8)"));
   assert.equal(parseType("Array(String"), undefined);
   assert.equal(parseType("UInt64 extra"), undefined);
 });
@@ -377,6 +385,9 @@ test("ClickHouse: a select is typed from the server's own description, nullabili
       "more.sql": "SELECT max(id) + {more:UInt32} FROM users",
       // The `:` of a conditional may stand before a name and a cast, which is no parameter.
       "either.sql": "SELECT id > 1 ? name :name::String AS v FROM users ORDER BY id",
+      // A Variant is whichever of its types its value has, each as a column of that type is: an
+      // array, a tuple or a map among them, and an integer a setting lets stand beside a wider one.
+      "variant.sql": "SELECT CAST([1, 2], 'Variant(Array(UInt8), String)') AS list, CAST(CAST((1, NULL), 'Tuple(n UInt8, s Nullable(String))'), 'Variant(Tuple(n UInt8, s Nullable(String)), UInt64)') AS named, CAST((toUInt8(1), 'a'), 'Variant(Tuple(UInt8, String), UInt64)') AS pair, CAST(map('k', toUInt8(1)), 'Variant(Map(String, UInt8), String)') AS pairs, [CAST('x', 'Variant(Array(UInt8), String)')] AS listed, CAST(toUInt8(1), 'Variant(UInt8, UInt64)') AS small SETTINGS allow_suspicious_variant_types = 1",
     };
     const out = await declarations(root, files);
     assert.deepEqual(types(out["user.sql"]!), {
@@ -398,6 +409,7 @@ test("ClickHouse: a select is typed from the server's own description, nullabili
     assert.deepEqual(types(out["by_day.sql"]!), { params: "{ zone: string }", row: "{ day: string; n: bigint }" });
     assert.match(out["more.sql"]!, /^declare const query: Query<\{ more: number \}, bigint, "one", "clickhouse", QueryError>/m);
     assert.deepEqual(types(out["either.sql"]!), { params: "Record<never, never>", row: "{ v: string }" });
+    assert.equal(types(out["variant.sql"]!).row, "{ list: string | number[] | null; named: bigint | { n: number; s: string | null } | null; pair: bigint | [number, string] | null; pairs: string | { key: string; value: number }[] | null; listed: (string | number[] | null)[]; small: bigint | number | null }");
     // One column with no name of its own is the statement's value.
     assert.match(out["total.sql"]!, /^declare const query: Query<Record<never, never>, string, "one", "clickhouse", QueryError>/m);
 
@@ -421,6 +433,7 @@ test("ClickHouse: a select is typed from the server's own description, nullabili
     assert.deepEqual(await (await built(root, "by_day", files["by_day.sql"])).run(db.client, { zone: "Asia/Tokyo" }), [{ day: "2026-01-02", n: 1n }, { day: "2026-01-03", n: 1n }]);
     assert.equal(await (await built(root, "more", files["more.sql"])).run(db.client, { more: 5 }), 7n);
     assert.deepEqual(await (await built(root, "either", files["either.sql"])).run(db.client, {}), [{ v: "ada" }, { v: "bob" }]);
+    assert.deepEqual(await (await built(root, "variant", files["variant.sql"])).run(db.client, {}), [{ list: [1, 2], named: { n: 1, s: null }, pair: [1, "a"], pairs: [{ key: "k", value: 1 }], listed: ["x"], small: 1 }]);
     const found = await built(root, "found", files["found.sql"]);
     assert.deepEqual(await found.run(db.client, { ids: [2n, 5n], other: 1 }), [{ id: 1n, found: 0, either: 1 }, { id: 2n, found: 1, either: 0 }]);
     const shown = await built(root, "shown", files["shown.sql"]);
@@ -435,10 +448,10 @@ test("ClickHouse: a select is typed from the server's own description, nullabili
     assert.throws(() => standard.output([{ id: "1" }]), /A Standard Query maps no values on ClickHouse/);
     assert.doesNotMatch(out["user.sql"]!, /~standard/);
     // A query's JSON Schema is of what its parameters take: a wide whole number is a number or a
-    // BigInt and no digits, of no named format past 64 bits, and an array's element is null where
-    // its type says so.
+    // BigInt and no digits, of no named format past a signed 64 bits, a UInt64 among them, and an
+    // array's element is null where its type says so.
     const schemas = await built(root, "schemas", "SELECT {ids:Array(Nullable(UInt8))} AS ids, {wide:UInt128} AS wide, {count:UInt64} AS count");
-    assert.deepEqual(schemas.inputSchema.properties, { ids: { type: "array", items: { anyOf: [{ type: "integer", format: "int32" }, { type: "null" }] } }, wide: { type: "integer" }, count: { type: "integer", format: "int64" } });
+    assert.deepEqual(schemas.inputSchema.properties, { ids: { type: "array", items: { anyOf: [{ type: "integer", format: "int32" }, { type: "null" }] } }, wide: { type: "integer" }, count: { type: "integer" } });
     assert.deepEqual(schemas.outputSchema.items.properties, schemas.inputSchema.properties);
     assert.deepEqual(await schemas.run(db.client, { ids: [1, null], wide: 2n ** 100n, count: 3 }), [{ ids: [1, null], wide: 2n ** 100n, count: 3n }]);
     // A value that is always null admits null alone, which `type` names once.
@@ -461,15 +474,16 @@ test("ClickHouse: the project's codecs reach the values inside a tuple, an array
   try {
     const root = project(db.url);
     writeFileSync(join(root, ".reylo.yaml"), "js:\n  codecs:\n    decimal: number\n");
-    const sql = "SELECT CAST((toDecimal64('12.34', 2), 'a'), 'Tuple(price Decimal(12, 2), label String)') AS named, (toDecimal64('1.5', 2), toUInt8(7)) AS unnamed, [toDecimal64('2.25', 2)] AS list, map('k', toDecimal64('3.5', 1)) AS priced, [(toDecimal64('4.5', 1), 'x')] AS pairs, {p:Tuple(Decimal(9, 2), Array(Decimal(9, 2)))} AS given, {q:Decimal(9, 2)} AS q";
+    // A Variant's value is read as its member's type alone, which no codec reaches.
+    const sql = "SELECT CAST((toDecimal64('12.34', 2), 'a'), 'Tuple(price Decimal(12, 2), label String)') AS named, (toDecimal64('1.5', 2), toUInt8(7)) AS unnamed, [toDecimal64('2.25', 2)] AS list, map('k', toDecimal64('3.5', 1)) AS priced, [(toDecimal64('4.5', 1), 'x')] AS pairs, CAST(toDecimal64('5.5', 2), 'Variant(Array(UInt8), Decimal(18, 2))') AS held, {p:Tuple(Decimal(9, 2), Array(Decimal(9, 2)))} AS given, {q:Decimal(9, 2)} AS q";
     const out = await declarations(root, { "nested.sql": sql });
     assert.deepEqual(types(out["nested.sql"]!), {
       params: "{ p: [number, number[]]; q: number }",
-      row: "{ named: { price: number; label: string }; unnamed: [number, number]; list: number[]; priced: { key: string; value: number }[]; pairs: [number, string][]; given: [number, number[]]; q: number }",
+      row: "{ named: { price: number; label: string }; unnamed: [number, number]; list: number[]; priced: { key: string; value: number }[]; pairs: [number, string][]; held: string | number[] | null; given: [number, number[]]; q: number }",
     });
     // Each value is the type its declaration says, and a parameter's goes back as its type's text.
     const nested = await built(root, "nested", sql);
-    assert.deepEqual([await nested.run(db.client, { p: [1.25, [2.5]], q: 0.5 })].flat(), [{ named: { price: 12.34, label: "a" }, unnamed: [1.5, 7], list: [2.25], priced: [{ key: "k", value: 3.5 }], pairs: [[4.5, "x"]], given: [1.25, [2.5]], q: 0.5 }]);
+    assert.deepEqual([await nested.run(db.client, { p: [1.25, [2.5]], q: 0.5 })].flat(), [{ named: { price: 12.34, label: "a" }, unnamed: [1.5, 7], list: [2.25], priced: [{ key: "k", value: 3.5 }], pairs: [[4.5, "x"]], held: "5.5", given: [1.25, [2.5]], q: 0.5 }]);
     await assert.rejects(nested.run(db.client, { p: ["1.25", []], q: 0.5 }), /takes a number, as js.codecs.decimal in the project file says/);
   } finally {
     await db.drop();

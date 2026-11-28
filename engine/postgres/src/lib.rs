@@ -27,6 +27,7 @@ pub mod pgtypes;
 pub mod postgres;
 pub mod resolution;
 pub mod returning;
+pub mod schema_fingerprint;
 pub mod stack;
 pub mod types;
 

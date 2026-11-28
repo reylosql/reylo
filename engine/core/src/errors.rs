@@ -39,7 +39,7 @@ fn words(sql: &str, dialect: Dialect) -> Vec<(String, Option<char>)> {
     let opaque = lex::lex(sql, dialect).map(|l| l.opaque).unwrap_or_default();
     let span = |i: usize| opaque.iter().find(|&&(s, _)| s == i).map(|&(_, e)| e.max(i + 1));
     let b = sql.as_bytes();
-    let comment = |i: usize| [&b"/*"[..], b"--", b"#"].iter().any(|c| b[i..].starts_with(c)) && !b[i..].starts_with(b"/*!");
+    let comment = |i: usize| lex::is_comment(&sql[i..]) && !b[i..].starts_with(b"/*!");
     // The character after `i` that is neither a space nor in a comment.
     let next = |mut i: usize| loop {
         let c = sql[i..].chars().next()?;

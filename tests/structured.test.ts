@@ -355,6 +355,42 @@ test("Postgres: NaN, the infinities and -0, as `.run()` returns them in a float 
   }
 });
 
+test("Postgres: a rows member of an array of whole arrays, or of segments and ints at any depth, goes in as it comes back, on each driver", { skip: pgLive }, async () => {
+  const own = await postgresDatabase("reylo_structured_nested");
+  const url = new URL(own.url);
+  const sql = own.sql;
+  const root = project("postgres");
+  const pg = driver("pg");
+  const client = new pg.Client(url.href);
+  await client.connect();
+  try {
+    // Postgres reads a JSON array inside a member as one more dimension, so a whole array goes as its text.
+    await sql.unsafe(`create domain ints as int4[]; create type pair as (a int4, b text); create domain pairs as pair[]; create domain spans as int4range[]; create domain bigs as int8[];
+      create table g (id int4 primary key, tags ints[], duos pairs[], spans spans[], bigs bigs[], segs lseg[], cells int4[])`);
+    const insert = await built(root, url.href, "insert_g", "insert into g :g::rows(id int4 not null, tags ints[], duos pairs[], spans spans[], bigs bigs[], segs lseg[], cells int4[])");
+    const seg = [{ x: 0, y: 0 }, { x: 1, y: 1 }];
+    let id = 0;
+    for (const db of [sql, client]) {
+      await insert.run(db, {
+        g: [
+          { id: ++id, tags: [[1, 2], [[3]], null], duos: [[{ a: 1, b: "x,y" }]], spans: [[{ lower: 1, upper: 3, bounds: "[)" }, { empty: true }]], bigs: [["\u00a01\u00a0", 9007199254740993n]], segs: [[seg], [null]], cells: [[[1, 2]], [[3, null]]] },
+          { id: ++id, tags: [null, [4]], duos: null, spans: null, bigs: null, segs: [seg], cells: [5] },
+        ],
+      });
+    }
+    const text = await sql.unsafe("select id, tags::text, duos::text, spans::text, bigs::text, segs::text, cells::text from g order by id");
+    const want = [
+      { tags: '{"{1,2}","{{3}}",NULL}', duos: '{"{\\"(1,\\\\\\"x,y\\\\\\")\\"}"}', spans: '{"{\\"[1,3)\\",empty}"}', bigs: '{"{1,9007199254740993}"}', segs: '{{"[(0,0),(1,1)]"},{NULL}}', cells: "{{{1,2}},{{3,NULL}}}" },
+      { tags: '{NULL,"{4}"}', duos: null, spans: null, bigs: null, segs: '{"[(0,0),(1,1)]"}', cells: "{5}" },
+    ];
+    assert.deepEqual(plain(text), [1, 2, 3, 4].map((n) => ({ id: n, ...want[(n - 1) % 2]! })));
+  } finally {
+    await client.end();
+    await closeSessions();
+    await own.drop();
+  }
+});
+
 test("Postgres: rows that leave out different keys go in one insert, each such row with its column's default copied from the catalog, a sequence advancing only for those rows", { skip: pgLive }, async () => {
   const postgres = driver("postgres");
   const admin = postgres(PG, { max: 1, onnotice: () => {} });
@@ -574,6 +610,36 @@ select value ->> '$.title', value ->> '$.done' from json_each(:todos::json('{
     assert.ok(d);
     assert.match(d.message, /breaks the schema's locality/);
     assert.equal(bad.slice(d.start, d.start + d.length), `'{ "$ref": "#/$defs/x" }'`);
+  } finally {
+    db.close();
+    await closeSessions();
+  }
+});
+
+test("SQLite: a typed JSON parameter's integer takes a BigInt, written exactly, and JSON the statement builds refuses an integer JSON.parse would round", async () => {
+  const root = project();
+  const db = new DatabaseSync(join(root, "app.db"));
+  db.exec("create table rounds (id integer primary key, lead boolean, amount bigint not null)");
+  const url = "file:./app.db";
+  const insert = `insert into rounds (lead, amount)
+select value ->> '$.lead', value ->> '$.amount' from json_each(:rounds::json('{
+  "type": "array",
+  "items": { "type": "object", "properties": { "lead": { "type": "boolean" }, "amount": { "type": "integer" } }, "required": ["amount"] }
+}')) returning id, amount`;
+  try {
+    const q = await built(root, url, "insert_rounds", insert);
+    assert.deepEqual(plain(await q.run(db, { rounds: [{ lead: true, amount: 9007199254740993n }, { amount: -9223372036854775808n }, { amount: 5 }] })), [{ id: 1, amount: 9007199254740993n }, { id: 2, amount: -9223372036854775808n }, { id: 3, amount: 5n }]);
+    // A number past 2^53 - 1 may already be another one: 9007199254740995 is 9007199254740996 by the time `.run()` sees it.
+    await assert.rejects(q.run(db, { rounds: [{ amount: 9007199254740995 }] }), /Parameter "rounds" at \/0\/amount must be integer, and 9007199254740996 is past 2\^53 - 1, where a number stops being exact, so pass it as a BigInt/);
+    assert.deepEqual(db.prepare("select cast(amount as text) as amount from rounds order by id").all().map((r) => r.amount), ["9007199254740993", "-9223372036854775808", "5"]);
+    // Inside JSON the statement builds, a 64-bit integer within 2^53 - 1 is a number, and one past it is refused rather than rounded.
+    const nested = await built(root, url, "nested_rounds", "select json_group_array(json_object('id', id, 'amount', amount)) as rounds from rounds where id in (select value from json_each(:ids::json('{\"type\": \"array\", \"items\": {\"type\": \"integer\"}}')))");
+    assert.deepEqual({ ...(await nested.run(db, { ids: [3] })) }, { rounds: [{ id: 3, amount: 5 }] });
+    await assert.rejects(nested.run(db, { ids: [3, 1] }), /Column "rounds" holds, inside its JSON at \/0\/amount, the integer 9007199254740992, which is past 2\^53 - 1, where JSON\.parse rounds a number/);
+    assert.throws(() => nested.runSync(db, { ids: [2] }), /inside its JSON at \/0\/amount, the integer -9223372036854775808/);
+    // The same value selected as a column comes back exact.
+    const flat = await built(root, url, "flat_rounds", "select amount from rounds where id = 1");
+    assert.deepEqual({ ...(await flat.run(db)) }, { amount: 9007199254740993n });
   } finally {
     db.close();
     await closeSessions();

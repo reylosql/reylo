@@ -1,0 +1,5 @@
+key_md5.sql: many (e: text) -> { id: int }
+left_join_builtin.sql: many () -> { name: varchar(≤20) }
+left_join_md5.sql: many () -> { name: varchar(≤20)? }
+left_join_sha.sql: many () -> { name: varchar(≤20)? }
+left_join_sha1.sql: many () -> { name: varchar(≤20)? }

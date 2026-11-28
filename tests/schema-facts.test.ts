@@ -8,9 +8,10 @@ import { Ajv2020 } from "ajv/dist/2020.js";
 import { Session } from "../src/analyze.ts";
 import { validate } from "../src/json-schema.ts";
 import { sqlModule } from "../src/loader.ts";
-import { querySchemas, typeSchema } from "../src/schema.ts";
+import { POSTGRES_TEXT_IN_JSON, querySchemas, typeSchema } from "../src/schema.ts";
 import type { EngineType } from "../src/engine-type.ts";
-import { DRIVERS, INDEX, MYSQL, driver, mysqlDatabase, mysqlLive, pgLive, postgresDatabase } from "./helpers.ts";
+import { readFileSync } from "node:fs";
+import { DRIVERS, INDEX, MYSQL, ROOT, driver, mysqlDatabase, mysqlLive, pgLive, postgresDatabase } from "./helpers.ts";
 
 const int4 = (facts: object): EngineType => ({ kind: "integer", bits: 32, label: "int4", ...facts }) as EngineType;
 const varchar = (facts: object): EngineType => ({ kind: "text", label: "varchar", ...facts }) as EngineType;
@@ -82,10 +83,60 @@ test("a number's facts are written where its form here is a JSON number and they
   assert.equal((output(numeric, true) as { minimum?: number }).minimum, 0);
   assert.equal((output(numeric, true) as { exclusiveMaximum?: number }).exclusiveMaximum, undefined);
   // A divisor is written only where a JSON number is that very decimal: one a double rounds would hold a value to another divisor.
-  const divisor = (multiple_of: string) => (output({ kind: "decimal", label: "numeric", multiple_of } as EngineType, true) as { multipleOf?: number }).multipleOf;
-  assert.deepEqual([divisor("0.01"), divisor("0.50"), divisor("2.5e-3"), divisor("1E2")], [0.01, 0.5, 0.0025, 100]);
+  // And only a whole one: a validator that divides as a double, ajv's or Python's, finds 0.15 no multiple of 0.05.
+  const divisor = (multiple_of: string) => (output({ kind: "decimal", label: "numeric", precision: 10, min_scale: 2, max_scale: 2, multiple_of } as EngineType, true) as { multipleOf?: number }).multipleOf;
+  assert.deepEqual([divisor("3"), divisor("1E2"), divisor("100.0")], [3, 100, 100]);
+  for (const text of ["0.01", "0.50", "2.5e-3"]) assert.equal(divisor(text), undefined, text);
   for (const text of ["1e-400", "9007199254740993", "0.10000000000000000001", "1e400", `1${"0".repeat(131000)}`]) assert.equal(divisor(text), undefined, text.slice(0, 24));
   assert.equal(divisor(`1.${"0".repeat(131000)}`), 1);
+  // A bound is written only where a JSON number is that very decimal too: an exact reader holds 0.29999999999999999 to it.
+  assert.equal((output({ ...numeric, min: "0.29999999999999999" } as EngineType, true) as { minimum?: number }).minimum, undefined);
+  assert.equal((output({ ...numeric, min: "0.3" } as EngineType, true) as { minimum?: number }).minimum, 0.3);
+  // A divisor and an exclusive bound only where a double holds every value exactly, as JSON.parse reads it: an integer within
+  // ±2^53 by its width or its bounds, a decimal of at most 15 digits. Past that a true multiple, 9007199254740993 of 3, reads
+  // as 9007199254740992, and a value just under an exclusive bound reads as the bound. An inclusive bound holds of a rounded value too.
+  const facts = (t: object, inJson = false) => output(t as EngineType, inJson) as Record<string, unknown>;
+  assert.equal(facts({ ...int8, multiple_of: "3" }).multipleOf, undefined);
+  assert.equal(facts({ ...int8, multiple_of: "3", min: "-9007199254740991", max: "9007199254740991" }).multipleOf, 3);
+  assert.equal(facts({ ...int8, multiple_of: "3", min: "0" }).multipleOf, undefined);
+  assert.equal(facts({ kind: "integer", bits: 53, unsigned: true, multiple_of: "3" }).multipleOf, 3);
+  assert.equal(facts({ kind: "decimal", label: "numeric", multiple_of: "0.05" }, true).multipleOf, undefined);
+  // A decimal's digits before its point bound it, which a negative scale moves: numeric(15,-2) reaches 10^17, whose multiples of 24 read rounded.
+  assert.equal(facts({ kind: "decimal", label: "numeric", precision: 15, min_scale: -2, max_scale: -2, multiple_of: "24" }, true).multipleOf, undefined);
+  assert.equal(facts({ kind: "decimal", label: "numeric", precision: 15, min_scale: 0, max_scale: 0, multiple_of: "24" }, true).multipleOf, 24);
+  assert.equal(facts({ kind: "decimal", label: "numeric", multiple_of: "24", min: "0", max: "1000" }, true).multipleOf, 24);
+  assert.deepEqual(facts({ kind: "decimal", label: "numeric", precision: 16, multiple_of: "0.05", min: "0.1", exclusive_max: "100" }, true), { type: "number", format: "decimal", minimum: 0.1 });
+  assert.deepEqual(facts({ kind: "decimal", label: "numeric", precision: 15, min_scale: 2, max_scale: 2, multiple_of: "5", min: "0.1", exclusive_max: "100" }, true), { type: "number", format: "decimal", minimum: 0.1, exclusiveMaximum: 100, multipleOf: 5 });
+  // A float narrower than a double is written as its own shortest text, which reads as another double: no bounds.
+  assert.deepEqual(facts({ kind: "float", exponent_bits: 8, mantissa_bits: 23, label: "float4", min: "0.1" }), { type: "number", format: "float" });
+});
+
+test("a tuple, a union, an intersection and a tagged union of nothing are JSON Schema 2020-12 schemas still, which refuses an empty prefixItems, anyOf and allOf", () => {
+  const ajv = new Ajv2020({ strict: false });
+  const empty: [EngineType, object][] = [
+    [{ kind: "tuple", elements: [] } as EngineType, { type: "array", items: false, minItems: 0, maxItems: 0 }],
+    [{ kind: "union", members: [] } as EngineType, { not: {} }],
+    [{ kind: "intersection", members: [] } as EngineType, {}],
+    [{ kind: "tagged_union", alternatives: [] } as EngineType, { not: {} }],
+  ];
+  for (const [t, schema] of empty) {
+    assert.deepEqual(output(t), schema, t.kind);
+    assert.ok(ajv.validateSchema(output(t) as object), t.kind);
+  }
+});
+
+test("a field named __proto__ is a key of the schema like any other, required where the others are", () => {
+  const schema = querySchemas({ params: [], columns: [{ name: "__proto__", type: int4({}) }, { name: "b", type: varchar({}) }], cardinality: "one" }, "postgres").output as { properties: object; required: string[] };
+  assert.ok(Object.hasOwn(schema.properties, "__proto__"));
+  assert.deepEqual(schema.required, ["__proto__", "b"]);
+  assert.equal(JSON.stringify(schema.properties), '{"__proto__":{"type":"integer","format":"int32"},"b":{"type":"string"}}');
+});
+
+test("the types Postgres writes as their text inside a document are the engine's own list, which a built array's schema and the Rust crate read", () => {
+  const source = readFileSync(join(ROOT, "engine", "core", "src", "schema.rs"), "utf8");
+  const list = /pub const POSTGRES_TEXT_IN_JSON: &\[&str\] = &\[([^\]]*)\];/.exec(source)?.[1];
+  assert.ok(list !== undefined, "engine/core/src/schema.rs names no POSTGRES_TEXT_IN_JSON");
+  assert.deepEqual([...list.matchAll(/"([^"]+)"/g)].map((m) => m[1]), [...POSTGRES_TEXT_IN_JSON]);
 });
 
 test("an array's size is written on an array", () => {
@@ -197,8 +248,12 @@ test("Postgres: a date or a timestamptz outside 0000–9999 holds to its query's
     await own.sql.unsafe("set time zone 'XXX-30'");
     const posixFour = await fourDigits.run(own.sql);
     assert.deepEqual(posixFour.o, { at: "2026-01-02T06:00:00+30:00", lmt: "1850-01-02T06:00:00+30:00" });
+    // A range and a multirange inside a document are their text.
+    const ranges = await built("ranges", "select jsonb_build_object('r', r) as o, json_build_array(r, int4multirange(int4range(1, 3), int4range(5, 7))) as a from e order by id");
+    const rangeRows = await ranges.run(own.sql);
+    assert.deepEqual(rangeRows.map((row: { a: unknown }) => row.a), [['["0002-06-01 BC",12345-01-01)', "{[1,3),[5,7)}"], ["empty", "{[1,3),[5,7)}"]]);
     const ajv = new Ajv2020({ strict: false, validateFormats: false, logger: false });
-    for (const [query, result] of [[columns, rows], [document, documents], [document, posix], [document, furthest], [fourDigits, localMean], [fourDigits, posixFour]]) {
+    for (const [query, result] of [[columns, rows], [document, documents], [document, posix], [document, furthest], [fourDigits, localMean], [fourDigits, posixFour], [ranges, rangeRows]]) {
       const json = JSON.parse(JSON.stringify(result));
       assert.equal(validate(query.outputSchema, json), undefined);
       assert.ok(ajv.validate(query.outputSchema, json), ajv.errorsText());

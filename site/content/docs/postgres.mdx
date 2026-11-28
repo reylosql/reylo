@@ -348,7 +348,8 @@ Inside JSON, a value can differ from the same value in a column:
 
 | Value | Inside JSON |
 | --- | --- |
-| A number past 2^53 | loses precision in `JSON.parse` |
+| A 64-bit integer past 2^53 | an error naming its column, since `JSON.parse` rounds it |
+| Any other number past 2^53 | rounded by `JSON.parse` |
 | `timestamptz` | the session's time zone, not UTC |
 | `bytea` | hex text |
 | `oid` | text |
@@ -360,7 +361,9 @@ Inside JSON, a value can differ from the same value in a column:
 
 <Pairs>
 
-- `jsonb_build_object('n', 9007199254740993::bigint)` → `{ n: 9007199254740992 }`
+- `jsonb_build_object('n', 9007199254740993::bigint)` → `throws TypeError`
+- `jsonb_build_object('n', 9007199254740993::bigint::text)` → `{ n: "9007199254740993" }`
+- `jsonb_build_object('n', 9007199254740993::numeric)` → `{ n: 9007199254740992 }`
 - `jsonb_build_object('n', 12.50::numeric)` → `{ n: 12.5 }`
 - `jsonb_build_object('n', 'NaN'::numeric)` → `{ n: NaN }`
 - `jsonb_build_object('at', '2026-10-20 08:00:00+00'::timestamptz)` → `{ at: "2026-10-20T01:00:00-07:00" }`
@@ -719,7 +722,7 @@ A parameter accepts the same values `.run()` returns for its type. You can pass 
 | `date`, `timestamp`, `time` | `string` |
 | `timestamptz` | a `string` that names its zone |
 | `interval` | a `string`: an ISO 8601 duration (`-P1D` too) or Postgres's own text |
-| `json`, `jsonb` | any value `JSON.stringify` writes, such as a `Date` inside an object, or what the column's JSON Schema admits |
+| `json`, `jsonb` | any value `JSON.stringify` writes, such as a `Date` inside an object, but no `NaN` or infinity, or what the column's JSON Schema admits |
 | `bytea` | `Uint8Array` |
 | An array | an array of its element's parameter type, without `null` |
 | An enum | the union of its labels |
@@ -806,7 +809,7 @@ where role = coalesce(:role::nullable(user_role), role)
 
 **Written to a nullable column**
 
-Written directly into a column that accepts `NULL`, with no cast. A column accepts it unless it's `NOT NULL`, its domain is `not null`, or a `check (… is not null)` covers it.
+Written directly into a column that accepts `NULL`, with no cast. A column accepts it unless it's `NOT NULL`, its domain is `not null`, or a check is false wherever it's `NULL`, as `check (… is not null)` is. It also refuses `NULL` when a `NOT NULL` generated column is `NULL` wherever it is, as `… + 1` is.
 
 <InferenceCard>
 
@@ -1159,7 +1162,6 @@ What Reylo can't type on Postgres, and what to do instead:
 | A materialized view, which holds the rows of its last `refresh`: every column is nullable, and only its own unique indexes are keys | Create a unique index on it, and wrap a column that is never null in `coalesce` |
 | The row an `insert`, `update` or `merge` writes through a view, or to a table with an `instead` rule, which need not pass the view's `where`: its `returning` columns are nullable | Write to the table itself |
 | A query nested past 1,000 levels, about 164 subqueries deep | None: Reylo falls back to Postgres's own types, any number of rows and every column nullable. The query's hover says why |
-| Syntax new in Postgres 19, `on conflict … do select` and a window function's `ignore nulls` or `respect nulls`, which Reylo's parser doesn't read yet | None: Reylo falls back to Postgres's own types, any number of rows and every column nullable |
 | A statement other than a query, such as `create index` or `explain` | None: it returns nothing, or rows whose columns are all nullable, as Postgres reports |
 | `copy … from stdin` and `copy … to stdout`, whose rows go through the connection | Run them through your driver |
 | A file of several statements, such as a migration | Put each statement in a file of its own |
