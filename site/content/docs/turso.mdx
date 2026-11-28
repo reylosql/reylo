@@ -17,6 +17,7 @@ Turso Cloud runs libSQL, a fork of SQLite, so everything on the [SQLite](/docs/s
 | SQLite versions | Reylo's 3.53, and the SQLite of each driver your `package.json` lists: 3.45.1 for `@libsql/client` |
 | libSQL's own SQL | Vector columns and indexes, the vector functions, `vector_top_k` and `alter table … alter column` ([Vectors](#vectors)) |
 | Extensions | The functions of the sqlean extensions Turso Cloud loads ([Extensions](#extensions)) |
+| Turso's own engine's SQL | Full-text search, string UUIDs and time functions ([Turso's own engine](#turso-engine)) |
 <Rust>
 | Rust | Types against the same local file; sqlx has no libSQL client, so its queries can't run on Turso Cloud |
 </Rust>
@@ -250,3 +251,21 @@ About the compat driver:
 - With `@tursodatabase/database` in your `package.json`, the type check also runs each query on Turso's engine. It skips a schema with an FTS5 table or a vector index, which the engine can't open.
 - From 0.8 on, its errors carry no code. With [`.try()`](/docs/typescript#try), `code` is `undefined` and only `message` names the failure.
 - An integer past 2^53 comes back exact.
+
+Reylo types the SQL of Turso's own engine too. Index a table with `using fts`, and search it with `fts_match`:
+
+```sql
+create index docs_fts on docs using fts (title, body);
+
+select id, title, fts_score(title, body, :q) as score
+from docs
+where fts_match(title, body, :q)
+order by score desc
+```
+
+About its SQL:
+
+- The type check reads a file that has a full-text index, which SQLite can't make.
+- On Turso's engine, `uuid4()` and `uuid7()` return a `Uint8Array`. On Turso Cloud they return a string, so with both drivers in your `package.json` they're `unknown`. For a string on Turso's engine, call `uuid4_str()` or `uuid7_str()`.
+- A time from the time functions, as `time_now()`, is a `Uint8Array`. A duration is a number of nanoseconds.
+- Another driver in your `package.json`, such as `better-sqlite3`, refuses these functions in the type check.
