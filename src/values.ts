@@ -1680,13 +1680,7 @@ export function coerce(kind: Kind, v: unknown, column: string, postgres = false)
     case "vector":
       return typeof v === "string" ? JSON.parse(v) : v;
     case "bytes":
-      if (isBytes(v)) return v;
-      if (v instanceof ArrayBuffer) return new Uint8Array(v);
-      // D1's BLOB is an array of numbers; mariadb's and Bun.sql's BIT(1) a truth value.
-      if (Array.isArray(v)) return Uint8Array.from(v as number[]);
-      if (typeof v === "boolean") return Uint8Array.of(v ? 1 : 0);
-      if (typeof v === "string") return bytea(v);
-      return v;
+      return toBytes(v);
     case "enum":
       // MySQL stores `''` for a value an ENUM does not list, under INSERT IGNORE or outside strict
       // mode, which the column's union does not admit.
@@ -1706,6 +1700,16 @@ export function coerce(kind: Kind, v: unknown, column: string, postgres = false)
     default:
       return v;
   }
+}
+
+/** Binary data as a Uint8Array, from whatever a driver read: D1's BLOB is an array of numbers, mariadb's and Bun.sql's BIT(1) a truth value, and a string Postgres's text of it. */
+export function toBytes(v: unknown): unknown {
+  if (isBytes(v)) return v;
+  if (v instanceof ArrayBuffer) return new Uint8Array(v);
+  if (Array.isArray(v)) return Uint8Array.from(v as number[]);
+  if (typeof v === "boolean") return Uint8Array.of(v ? 1 : 0);
+  if (typeof v === "string") return bytea(v);
+  return v;
 }
 
 /** An array's elements as values of its element kind, `each` reading each one; a nested array is a level of the same array. */

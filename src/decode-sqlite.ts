@@ -38,8 +38,8 @@
 //   past 2^53 may be one, a column with no type included; a BIGINT's number within 2^53, or
 //   libSQL's BigInt or digits, is its BigInt.
 import { lastOfEach, namesInResult, rowOf } from "./row.ts";
-import { bigInteger, coerce, DecodeError, exactInteger, ParameterError, refuseTruth, truth, type Columns, type Kind } from "./values.ts";
-import { drizzleDriver, driversOf, EFFECT_SQL, executeSync, isDurableObjectSql, kindOf, knexDriver, takesFloat, type AnyClient as Client, type Bound, type DriverClient, type EffectSql, type QueryModule, type Runtime } from "./execute.ts";
+import { bigInteger, DecodeError, toBytes, exactInteger, ParameterError, refuseTruth, truth, type Columns, type Kind } from "./values.ts";
+import { drizzleDriver, driversOf, EFFECT_SQL, executeSync, isDurableObjectSql, kindOf, knexDriver, literalsAtMarks, takesFloat, type AnyClient as Client, type Bound, type DriverClient, type EffectSql, type QueryModule, type Runtime } from "./execute.ts";
 import { readSqliteError } from "./query-error.ts";
 
 type AnyClient = Record<string, any>;
@@ -362,7 +362,7 @@ function normalized(p: Plan, v: unknown, d1: boolean): unknown {
     case "object":
       if (p.blob) p.blob(v);
       // libSQL's ArrayBuffer, D1's array of numbers.
-      if (!(v instanceof Uint8Array) && (v instanceof ArrayBuffer || (d1 && Array.isArray(v)))) return coerce("bytes", v, p.name);
+      if (!(v instanceof Uint8Array) && (v instanceof ArrayBuffer || (d1 && Array.isArray(v)))) return toBytes(v);
       return v;
   }
   return v;
@@ -652,6 +652,30 @@ function answersAtOnce(c: Client, query: QueryModule<"sqlite">): boolean {
   return driversOf(query).some((d) => d.atOnce?.(c) === true);
 }
 
+/**
+ * The bound statement as SQLite's drivers take it. SQLite holds an INTEGER in 64 bits, so a BigInt
+ * outside them has no exact form there: better-sqlite3, node:sqlite, libSQL, Turso's engine and
+ * SQLite Wasm refuse one, but bun:sqlite and Bun.sql keep its low 64 bits where the statement reads
+ * numbers (2^63 was stored as -2^63, and 2^64 + 5 as 5), and sqlite3 binds any BigInt as NULL. A
+ * number a SQLite driver binds as another value goes in at its mark as SQLite's literal for it, on
+ * every driver: sqlite3, Turso's engine, sql.js and SQLite Wasm bind -0 as the INTEGER 0, D1 sends
+ * -0 as 0 and an infinity as null, and libSQL refuses an infinity, which a REAL holds. -0 is written
+ * so where the type takes a float, whose sign a REAL value keeps (a REAL column stores it as 0).
+ * Those drivers refuse one whose place isn't known (`unplaced`), as mariadb and PlanetScale do on
+ * MySQL (src/decode-mysql.ts, `signedZeros`). A Standard Query's values bind to the module's own
+ * text (src/standard-query.ts), so they go as they are.
+ */
+function bindSqlite(query: QueryModule<"sqlite">, bound: Bound, run: boolean): Bound {
+  bound.values.forEach((v, i) => {
+    if (typeof v === "bigint" && (v >= 2n ** 63n || v < -(2n ** 63n))) throw new ParameterError(`Parameter "${bound.names[i]}" is ${v}, outside the 64-bit integers SQLite holds (-2^63 to 2^63 - 1), so no SQLite driver binds it exactly.`);
+  });
+  if (!run) return bound;
+  return literalsAtMarks(bound, (v, i) => {
+    if (v === Infinity || v === -Infinity) return v > 0 ? "(9e999)" : "(-9e999)";
+    return Object.is(v, -0) && query.inputs?.[bound.names[i]!] !== undefined && takesFloat(kindOf(query, bound.names[i]!)) ? "(-0.0)" : undefined;
+  });
+}
+
 /** SQLite's half of the run time (src/execute.ts, `Runtime`), which `defineSqliteQuery` passes. */
 export const sqlite: Runtime<"sqlite"> = {
   dialect: "sqlite",
@@ -659,6 +683,7 @@ export const sqlite: Runtime<"sqlite"> = {
   runSync: runSqliteSync,
   executeSync,
   answersAtOnce,
+  bind: bindSqlite,
   readError: readSqliteError,
   readErrorSync: readSqliteError,
   decoder: sqliteDecoder,
