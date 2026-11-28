@@ -273,6 +273,12 @@ pub trait Alterer: Send {
         let _ = (from, to);
         Vec::new()
     }
+    /// The objects the plan drops that a change of `from` to `to` needs dropped first (a table whose
+    /// rows a cascade from a SQLite rebuild's drop would reach).
+    fn waits_for_drops(&self, from: &Object, to: &Object) -> Vec<String> {
+        let _ = (from, to);
+        Vec::new()
+    }
     /// Whether the change or the making of `to` may run before the change of an object it depends
     /// on (`dep_from`, as the target has it `dep_to`), where its database needs nothing of that
     /// change first (a SQLite table beside one it references that changes in place).
@@ -1714,6 +1720,11 @@ pub fn plan_with(from: &Schema, to: &Schema, alterer: &dyn Alterer, renames_stat
                             after[k].insert(j);
                         }
                     }
+                    for d in alterer.waits_for_drops(f, o) {
+                        if let Some(j) = drop_of(&d).filter(|j| *j != k) {
+                            after[k].insert(j);
+                        }
+                    }
                 }
                 // A change that makes objects itself needs what they need, but for what is its own
                 // or what it makes too.
@@ -1855,8 +1866,8 @@ pub fn plan_with(from: &Schema, to: &Schema, alterer: &dyn Alterer, renames_stat
                 if matches!(op, Op::Alter(_)) {
                     for dependent in dependents.get(id.as_str()).into_iter().flatten() {
                         let leaves = from.objects[*dependent].deps.contains(id) && to.objects.get(*dependent).is_some_and(|d| !d.deps.contains(id) && !d.deps.iter().any(|x| taken_by.get(x) == Some(id)));
-                        let needless = to.objects.get(*dependent).is_some_and(|d| alterer.runs_before(o, &from.objects[*dependent], d));
-                        if let Some(j) = find(Op::Alter(dependent.to_string())).filter(|_| leaves && !needless) {
+                        let needless = || to.objects.get(*dependent).is_some_and(|d| alterer.runs_before(o, &from.objects[*dependent], d));
+                        if let Some(j) = find(Op::Alter(dependent.to_string())).filter(|_| leaves && !needless()) {
                             after[k].insert(j);
                         }
                     }

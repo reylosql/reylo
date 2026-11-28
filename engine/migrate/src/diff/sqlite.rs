@@ -756,11 +756,26 @@ impl Alterer for SqliteAlterer {
         out
     }
 
+    /// A rebuild waits for the drop of every table the plan drops that references one it drops,
+    /// whose rows a cascade from that drop would otherwise reach, or which would refuse it.
+    fn waits_for_drops(&self, from: &Object, to: &Object) -> Vec<String> {
+        if to.kind != Some(Kind::Table) {
+            return Vec::new();
+        }
+        let schemas = self.schemas.borrow();
+        let Some((f, t)) = schemas.as_ref() else { return Vec::new() };
+        let made: Vec<&Object> = f.objects.values().filter(|o| o.kind == Some(Kind::Table) && t.objects.contains_key(&o.id) && self.makes_again(&from.id, &o.id)).collect();
+        if made.is_empty() {
+            return Vec::new();
+        }
+        f.objects.values().filter(|o| o.kind == Some(Kind::Table) && !t.objects.contains_key(&o.id) && made.iter().any(|m| o.deps.contains(&m.id))).map(|o| o.id.clone()).collect()
+    }
+
     /// A table's change, or a table made, needs the change of a table it references first only
     /// where that is a rebuild: one in place moves no key a copied row looks up, and makes nothing
-    /// again. Nor does a rebuild of its own that makes that table again, whose change then follows
-    /// it, nor one beside it of the tables that reference each other, which one rebuild takes to the
-    /// target together.
+    /// again. Nor does a table made, which is empty, a rebuild of its own that makes that table
+    /// again, whose change then follows it, nor one beside it of the tables that reference each
+    /// other, which one rebuild takes to the target together.
     fn runs_before(&self, to: &Object, dep_from: &Object, dep_to: &Object) -> bool {
         if to.kind != Some(Kind::Table) || dep_to.kind != Some(Kind::Table) {
             return false;
@@ -772,7 +787,8 @@ impl Alterer for SqliteAlterer {
         match rebuilds(dep_from, dep_to) {
             Some(false) => true,
             Some(true) => {
-                let Some(from) = f.objects.get(&to.id) else { return false };
+                // A table the plan makes is empty, and SQLite checks no reference as it makes one.
+                let Some(from) = f.objects.get(&to.id) else { return true };
                 self.makes_again(&to.id, &dep_to.id) || (rebuilds(from, to) == Some(true) && circle(f, t, &to.id).contains(&dep_to.id))
             }
             None => false,
