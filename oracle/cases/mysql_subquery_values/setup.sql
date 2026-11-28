@@ -7,3 +7,4 @@ create table input (name varchar(100) primary key);
 insert into input values ('a');
 create table singleton (n int primary key);
 insert into singleton values (1);
+create function pick() returns int not deterministic no sql return floor(rand() * 3) + 1;

@@ -1386,7 +1386,7 @@ fn cte_columns(cte: &ast::Cte) -> (String, HashSet<String>) {
 }
 
 /// The ON condition of a join, where it has one.
-fn join_on(op: &ast::JoinOperator) -> Option<&Expr> {
+pub(crate) fn join_on(op: &ast::JoinOperator) -> Option<&Expr> {
     use ast::JoinOperator::*;
     match op {
         Join(ast::JoinConstraint::On(e)) | Inner(ast::JoinConstraint::On(e)) | Left(ast::JoinConstraint::On(e)) | LeftOuter(ast::JoinConstraint::On(e)) | Right(ast::JoinConstraint::On(e)) | RightOuter(ast::JoinConstraint::On(e)) | FullOuter(ast::JoinConstraint::On(e)) | CrossJoin(ast::JoinConstraint::On(e)) | StraightJoin(ast::JoinConstraint::On(e)) => Some(e),
@@ -3835,6 +3835,58 @@ mod tests {
         let mut v = parse(&SessionDialect::default(), sql).unwrap();
         let Statement::Query(q) = v.pop().unwrap() else { panic!("not a query") };
         cardinality(&q, &keys()).0.as_str().to_string()
+    }
+
+    #[test]
+    fn a_derived_column_that_may_differ_from_call_to_call_is_no_one_value() {
+        let mut k = keys();
+        for (table, columns) in [("users", &[("id", "int"), ("name", "varchar")][..]), ("posts", &[("id", "bigint"), ("user_id", "bigint")][..])] {
+            k.columns.insert(table.into(), columns.iter().map(|(c, ty)| (c.to_string(), class_of(ty))).collect());
+        }
+        let rows = |sql: &str| {
+            let mut v = parse(&SessionDialect::default(), sql).unwrap();
+            let Statement::Query(q) = v.pop().unwrap() else { panic!("not a query") };
+            cardinality(&q, &k).0.as_str()
+        };
+        // The server merges the derived table and calls a function it cannot vouch for, a stored
+        // function's, or `RAND()`, again for each row: in any form, at any depth.
+        for sql in [
+            "select distinct x.id from users u, (select pick() as id from posts where posts.id = 1) x",
+            "select x.id from users u, (select pick() as id from posts where posts.id = 1) x group by x.id",
+            "select distinct x.id from users u, (select floor(rand() * 3) + 1 as id from posts where posts.id = 1) x",
+            "select distinct x.v from users u, (select floor(pick()) as v from posts where posts.id = 1) x",
+            "select distinct x.v from users u, (select convert(pick(), signed) as v from posts where posts.id = 1) x",
+            "select distinct x.id from users u, (select y.id from (select pick() as id from posts where posts.id = 1) y) x",
+            "select distinct x.id from users u, (with c as (select pick() as id from posts where posts.id = 1) select id from c) x",
+            "select distinct x.id from users u, (select pick() as id from posts where posts.id = 1) x where x.id = 1",
+            "select distinct x.v from users u, ((select id, pick() as v from posts)) x where x.id = 1",
+            "select distinct x.v from users u, (select (select pick()) as v from posts where id = 1) x",
+            "select distinct x.v from users u, (select pick() in (select 1) as v from posts where id = 1) x",
+            "select distinct x.v from users u, (with c as (select id, pick() as v from posts) (select id, v from c)) x where x.id = 1",
+            "select distinct x.v from users u, (select exists(select pick() as r from posts having r = 1) as v from posts p where p.id = 1) x",
+            "select distinct x.v from users u, (select exists(select 1 from posts where id = 1 having pick() = p.id) as v from posts p where p.id = 1) x",
+            "select distinct x.v from users u, (select exists(select 1 from posts where id = 1 and pick() = p.id having 1 = 1) as v from posts p where p.id = 1) x",
+            "select distinct x.v from users u, (select exists(select 1 from posts a join posts b on b.id = a.id and pick() = p.id where a.id = 1) as v from posts p where p.id = 1) x",
+        ] {
+            assert_eq!(rows(sql), "many", "{sql}");
+        }
+        // The server computes a derived table with a LIMIT, DISTINCT, GROUP BY or an aggregate once.
+        for sql in [
+            "select distinct x.v from users u, (select pick() as v from posts limit 1) x",
+            "select distinct x.v from users u, (select max(pick()) as v from posts) x",
+            // EXISTS reads no value of its select list.
+            "select distinct x.v from users u, (select exists(select pick() from posts) as v from posts where id = 1) x",
+        ] {
+            assert_eq!(rows(sql), "at_most_one", "{sql}");
+        }
+        // A built-in, a column and an aggregate give one value.
+        for sql in [
+            "select distinct x.id from users u, (select abs(user_id) as id from posts where posts.id = 1) x",
+            "select distinct x.id from users u, (select user_id as id from posts where posts.id = 1) x",
+            "select u.id from users u join (select id, user_id, json_object('k', id) as card from posts) p on u.id = p.user_id where p.id = ?",
+        ] {
+            assert_eq!(rows(sql), "at_most_one", "{sql}");
+        }
     }
 
     #[test]
