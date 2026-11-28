@@ -5,7 +5,7 @@
 //! keep its values, unless the plan says it loses or narrows them or the case's `changes.txt` names
 //! the table. A case's `sql_mode` file is the mode its sessions run in. A plan runs as Migrate runs a
 //! migration's statements (`Db::script`). A case's `fails.txt` is the error its plan must fail with,
-//! on a value a change can't hold: then every row must keep its values, and that is all it checks.
+//! on a value a change can't hold: then the schema and every row must be as they were (MySQL commits each DDL statement, so a plan fails before any statement that changes something), and that is all it checks.
 //! Its v1 and v2 must differ to
 //! the comparator, unless `alike.txt` says why they read alike. `server.sql` makes
 //! what a case needs of the server itself (an account), and `check.sql`, where a case has one,
@@ -220,6 +220,7 @@ async fn mysql() {
         let vacuous = a_only.is_empty() && b_only.is_empty() && read(&case.join("alike.txt")).is_empty();
         let before = counts(&mut from).await;
         let rows_before = values(&mut from).await;
+        let schema_before = catalog(&mut from).await.unwrap();
         let plan = diff::plan(&diff::mysql::read(&mut from).await.unwrap(), &diff::mysql::read(&mut to).await.unwrap(), alterer);
         let text = plan.sql();
         let mut failed = None;
@@ -243,6 +244,10 @@ async fn mysql() {
             }
             if values(&mut from).await != rows_before {
                 problems.push("a failed plan changed the rows".to_string());
+            }
+            let (gone, came) = difference(&schema_before, &catalog(&mut from).await.unwrap());
+            if !gone.is_empty() || !came.is_empty() {
+                problems.push(format!("a failed plan changed the schema:\n{}", gone.iter().map(|l| format!("  - {l}")).chain(came.iter().map(|l| format!("  + {l}"))).collect::<Vec<_>>().join("\n")));
             }
             if !bless && read(&expected) != text {
                 problems.push(format!("the plan is not plan.sql's (REYLO_BLESS=1 writes it):\n{text}"));

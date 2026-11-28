@@ -5080,6 +5080,9 @@ async fn pending_findings(shadows: &mut Shadows<'_>, target: &mut Db, ran: &[Mig
     // read for a check only where none of it reaches the columns the check reads, and a check one
     // reaches is said to be left unchecked.
     let mut writes: Vec<Write> = Vec::new();
+    // The MySQL columns, `(table, column)`, whose type, generation or character set a pending
+    // migration so far changes, whose values then reach a later migration converted.
+    let mut converted: BTreeSet<(String, String)> = BTreeSet::new();
     // The tables and columns a pending statement drops or renames, so that one made again under the
     // name holds none of the target's values: MySQL's catalog can show a column dropped and added
     // again as it was.
@@ -5137,6 +5140,10 @@ async fn pending_findings(shadows: &mut Shadows<'_>, target: &mut Db, ran: &[Mig
         for (table, was) in &tables_before {
             let Some(is) = tables_now.get(table).filter(|is| oid(is) == oid(was) && !gone_tables.contains(&bare(table))) else { continue };
             let retyped: Vec<String> = was.columns.iter().filter(|(c, t)| is.columns.get(*c).is_some_and(|n| n != *t)).map(|(c, _)| c.clone()).collect();
+            if d == Dialect::Mysql {
+                let charset = |identity: &str| mysql_column(identity).1.split('_').next().unwrap_or_default().to_string();
+                converted.extend(retyped.iter().filter(|c| is.columns.get(*c).zip(was.columns.get(*c)).is_some_and(|(n, t)| mysql_column(n).0 != mysql_column(t).0 || charset(n) != charset(t))).map(|c| (table.clone(), c.clone())));
+            }
             if !retyped.is_empty() {
                 writes.push(Write { by: m.name.clone(), table: Some(table.clone()), oid: Some(oid(is)).filter(|o| !o.is_empty()), columns: Some(retyped), retyped: true, reads: true });
             }
@@ -5200,6 +5207,31 @@ async fn pending_findings(shadows: &mut Shadows<'_>, target: &mut Db, ran: &[Mig
         let unchecked = |check: &RowCheck, why: &str| Finding::said(format!("holds rows to {}, which can't be checked here: {why}", check.subject()));
         for (key, check) in &now {
             let reached = writes.iter().find(|w| w.reaches(check));
+            let own = standing(&check.ident, check.columns.as_deref());
+            let parent = check.parent.as_ref().map(|(p, refs)| standing(p, Some(refs)));
+            // A MySQL foreign key or unique key whose columns the pending migrations change in
+            // collation alone, on rows nothing else writes, compares the target's values under the
+            // new collation once it holds them again: read so here, once, its rows say what the
+            // deploy meets. A foreign key is read where a migration adds it back: one in place can't
+            // have had its columns re-collated under key checks, which MySQL refuses, so nothing
+            // checks it then. A unique key is read too where this migration's change rebuilds it.
+            // A key dropped and added again in one file (under `lock tables`) is read only where the
+            // file changes each of its columns once: one changed twice may have passed through
+            // another type, which the file's ends don't show.
+            let readded = || drops_foreign_key(&m.sql, &check.ident, &check.name) && check.columns.iter().flatten().all(|c| changes_of(&m.sql, &check.ident, c) <= 1) && check.parent.as_ref().is_some_and(|(p, refs)| refs.iter().all(|r| changes_of(&m.sql, p, r) <= 1));
+            let added = !checks.contains_key(key) || (d == Dialect::Mysql && check.parent.is_some() && readded());
+            let rebuilt = matches!(check.kind, RowCheckKind::Keys(_)) && writes.iter().any(|w| w.by == m.name && w.retyped && w.reaches(check));
+            let recollated = (d == Dialect::Mysql && (added || rebuilt) && own == Standing::Held && parent.is_none_or(|p| p == Standing::Held) && reached.is_some() && writes.iter().filter(|w| w.reaches(check)).all(|w| w.retyped))
+                .then(|| recollated_rows(check, &tables_here, &tables_now, &converted))
+                .flatten();
+            if let Some((query, repeats)) = recollated {
+                match read_rows(target, query, repeats).await {
+                    RowRead::Clean => {}
+                    RowRead::Broken { n, query, repeats } => out.push((m.name.clone(), Finding { what: format!("fails on this database: {} under its columns' new collation", broke(check, n, repeats, true)), fails: true, query: Some(query) })),
+                    RowRead::Unread(why) => out.push((m.name.clone(), unchecked(check, &why))),
+                }
+                continue;
+            }
             // A check already in place is checked again where the migration converts the values it
             // reads, as a change of type or collation rebuilds what holds them.
             if checks.contains_key(key) {
@@ -5208,8 +5240,6 @@ async fn pending_findings(shadows: &mut Shadows<'_>, target: &mut Db, ran: &[Mig
                 }
                 continue;
             }
-            let own = standing(&check.ident, check.columns.as_deref());
-            let parent = check.parent.as_ref().map(|(p, refs)| standing(p, Some(refs)));
             let why: Option<String> = match own {
                 // A table the target doesn't have holds none of its rows but those a pending
                 // statement writes to it.
@@ -5802,6 +5832,8 @@ async fn row_checks(db: &mut Db) -> BTreeMap<String, RowCheck> {
                      group_concat(k.column_name order by k.ordinal_position separator '\u{1f}') as def,
                      group_concat(k.referenced_column_name order by k.ordinal_position separator '\u{1f}') as refs
                    from information_schema.key_column_usage k where k.table_schema = database() and k.referenced_table_name is not null
+                     -- A key to another database's table: its parent is none of this database's tables.
+                     and k.referenced_table_schema = k.table_schema
                    group by k.table_name, k.constraint_name, k.referenced_table_name",
             ];
             for (n, sql) in reads.iter().enumerate() {
@@ -5870,7 +5902,9 @@ async fn table_identities(db: &mut Db) -> BTreeMap<String, TableIdentity> {
         }
         Dialect::Mysql => (
             "select table_name as t, '' as i from information_schema.tables where table_schema = database() and table_type = 'BASE TABLE'".to_string(),
-            "select table_name as t, lower(column_name) as c, concat(column_type, ' ', coalesce(collation_name, '')) as i from information_schema.columns where table_schema = database()".to_string(),
+            // A generated column's expression too, as a digest with no space in it: a new one writes
+            // its values again.
+            "select table_name as t, lower(column_name) as c, concat(column_type, if(generation_expression <> '', concat(' generated ', md5(generation_expression)), ''), ' ', coalesce(collation_name, '')) as i from information_schema.columns where table_schema = database()".to_string(),
         ),
         Dialect::Sqlite => return BTreeMap::new(),
     };
@@ -5930,12 +5964,107 @@ fn broke(check: &RowCheck, n: u64, repeats: bool, named: bool) -> String {
 #[cfg(feature = "cli")]
 async fn broken_rows(target: &mut Db, lane: &mut Db, check: &RowCheck) -> RowRead {
     let Some((query, repeats)) = row_query(lane, check).await else { return RowRead::Unread("no query can list the rows that break it".to_string()) };
+    read_rows(target, query, repeats).await
+}
+
+/// What `query`, which lists the rows that break a check, says of the target's rows.
+#[cfg(feature = "cli")]
+async fn read_rows(target: &mut Db, query: String, repeats: bool) -> RowRead {
     match try_count(target, &query, 1000).await {
         Ok(0) => RowRead::Clean,
         Ok(n) => RowRead::Broken { n, query, repeats },
         Err(e) if timed_out(&e) => RowRead::Unread(format!("reading the rows ran past {} s", READ_MS / 1000)),
         Err(e) if e.contains("read-only transaction") => RowRead::Unread("reading the rows would write to this database".to_string()),
         Err(_) => RowRead::Unread("the read failed on this database".to_string()),
+    }
+}
+
+/// Whether a MySQL migration drops the foreign key `name` of `table`, as one that drops and adds it
+/// again in one file (under `lock tables`) does, leaving the key as it was at the file's ends.
+#[cfg(feature = "cli")]
+fn drops_foreign_key(sql: &str, table: &str, name: &str) -> bool {
+    split_statements(sql, Dialect::Mysql).iter().any(|s| {
+        let t = &s.tokens;
+        let named = |k: usize, n: &str| t.get(k).is_some_and(|w| unquoted(&crate::sql::last_written(&w.text), Dialect::Mysql).eq_ignore_ascii_case(n));
+        t.len() > 2 && t[0].upper() == "ALTER" && t[1].upper() == "TABLE" && named(2, table) && t.windows(3).enumerate().any(|(k, w)| w[0].upper() == "DROP" && w[1].upper() == "FOREIGN" && w[2].upper() == "KEY" && named(k + 3, name))
+    })
+}
+
+/// How many clauses of a MySQL migration's statements change the column `column` of `table`
+/// (`modify` or `change`, with or without `column`), as named before the clause.
+#[cfg(feature = "cli")]
+fn changes_of(sql: &str, table: &str, column: &str) -> usize {
+    let named = |w: Option<&crate::sql::Token>, n: &str| w.is_some_and(|w| unquoted(&crate::sql::last_written(&w.text), Dialect::Mysql).eq_ignore_ascii_case(n));
+    split_statements(sql, Dialect::Mysql)
+        .iter()
+        .filter(|s| s.tokens.len() > 2 && s.tokens[0].upper() == "ALTER" && s.tokens[1].upper() == "TABLE" && named(s.tokens.get(2), table))
+        .map(|s| {
+            let t = &s.tokens;
+            (0..t.len())
+                .filter(|&k| matches!(t[k].upper().as_str(), "MODIFY" | "CHANGE") && (k == 0 || t[k - 1].text == "," || k == 3))
+                .filter(|&k| {
+                    let at = if t.get(k + 1).is_some_and(|w| w.upper() == "COLUMN") { k + 2 } else { k + 1 };
+                    named(t.get(at), column)
+                })
+                .count()
+        })
+        .sum()
+}
+
+/// A MySQL column's identity ([`table_identities`]) in its parts: its type (with a digest of its
+/// generation where it has one) and its collation, empty for a type without one.
+#[cfg(feature = "cli")]
+fn mysql_column(identity: &str) -> (&str, &str) {
+    identity.rsplit_once(' ').unwrap_or((identity, ""))
+}
+
+/// The rows of the target a MySQL foreign key or unique key would refuse once its columns, as
+/// `before` has them, take the collation `after` gives them, their types unchanged: [`orphans_of`], or
+/// the values that repeat, with each column compared under its new collation, and whether they are
+/// values that repeat. None for any other check, for a column whose type a pending migration changes
+/// (`converted`) or whose character set changes, or for a key whose columns keep their collations,
+/// whose own query reads it.
+#[cfg(feature = "cli")]
+fn recollated_rows(check: &RowCheck, before: &BTreeMap<String, TableIdentity>, after: &BTreeMap<String, TableIdentity>, converted: &BTreeSet<(String, String)>) -> Option<(String, bool)> {
+    let columns = check.columns.as_ref()?;
+    // The collations a column has before and after, where its values reach the key as they are: its
+    // type kept at every step, and its character set, whose change converts them (a character the
+    // new one lacks fails the change, where a read would take it as `?`).
+    let charset = |collation: &str| collation.split('_').next().unwrap_or_default().to_string();
+    let pair = |table: &str, column: &str| -> Option<(String, String)> {
+        let (was, is) = (mysql_column(before.get(table)?.columns.get(column)?), mysql_column(after.get(table)?.columns.get(column)?));
+        (was.0 == is.0 && charset(was.1) == charset(is.1) && !converted.contains(&(table.to_string(), column.to_string()))).then(|| (was.1.to_string(), is.1.to_string()))
+    };
+    let bt = |s: &str| format!("`{}`", s.replace('`', "``"));
+    let under = |side: &str, column: &str, collation: &str| match collation {
+        "" => format!("{side}{}", bt(column)),
+        collation => format!("{side}{} collate {collation}", bt(column)),
+    };
+    let mut changed = false;
+    let set: Vec<String> = columns.iter().map(|c| format!("c.{} is not null", bt(c))).collect();
+    match (&check.kind, &check.parent) {
+        (RowCheckKind::Rows(_), Some((parent, refs))) => {
+            let mut on = Vec::new();
+            for (c, r) in columns.iter().zip(refs) {
+                let (own_was, own_is) = pair(&check.ident, c)?;
+                let (ref_was, ref_is) = pair(parent, r)?;
+                changed |= own_was != own_is || ref_was != ref_is;
+                // Both sides under the referencing column's collation, which the key needs the other's to match.
+                on.push(format!("{} = {}", under("p.", r, &own_is), under("c.", c, &own_is)));
+            }
+            changed.then(|| (format!("select c.* from {} as c where {} and not exists (select 1 from {} as p where {});", check.table, set.join(" and "), bt(parent), on.join(" and ")), false))
+        }
+        (RowCheckKind::Keys(_), None) => {
+            let mut keys = Vec::new();
+            for c in columns {
+                let (was, is) = pair(&check.ident, c)?;
+                changed |= was != is;
+                keys.push(under("c.", c, &is));
+            }
+            let keys = keys.join(", ");
+            changed.then(|| (format!("select {keys}, count(*) from {} as c where {} group by {keys} having count(*) > 1;", check.table, set.join(" and ")), true))
+        }
+        _ => None,
     }
 }
 
@@ -12134,6 +12263,18 @@ mod tests {
     }
 
     use super::*;
+
+    #[cfg(feature = "cli")]
+    #[test]
+    fn counts_each_change_a_mysql_file_makes_to_a_column() {
+        let sql = "lock tables c write, p write;\nalter table c drop foreign key c_code;\nalter table c modify column code char(10);\nalter table c modify `code` varchar(10) collate utf8mb4_bin, change column other other int;\nalter table p modify column code varchar(10) collate utf8mb4_bin not null;\nalter table c add constraint c_code foreign key (code) references p (code);\nunlock tables;\n";
+        assert!(drops_foreign_key(sql, "c", "c_code"));
+        assert!(!drops_foreign_key(sql, "p", "c_code"));
+        assert_eq!(changes_of(sql, "c", "code"), 2);
+        assert_eq!(changes_of(sql, "c", "other"), 1);
+        assert_eq!(changes_of(sql, "p", "code"), 1);
+        assert_eq!(changes_of(sql, "c", "id"), 0);
+    }
 
     #[test]
     fn several_lossy_columns_name_their_flags_and_one_command() {

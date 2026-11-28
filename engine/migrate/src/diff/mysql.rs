@@ -587,6 +587,12 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
                 create: vec![format!("alter table {q} add {clause}")],
                 drop: vec![drop],
                 deps,
+                extra: tokenize(&clause, Dialect::Mysql)
+                    .windows(2)
+                    .any(|w| w[0].upper() == "SET" && w[1].upper() == "NULL")
+                    .then(|| format!("{SETS_NULL}{}", json!(fk.cols.iter().map(|c| format!("column {name}.{c}")).collect::<Vec<_>>())))
+                    .into_iter()
+                    .collect(),
                 ..Object::default()
             });
         }
@@ -1171,7 +1177,25 @@ fn without_index_options(def: &str) -> String {
     OPTIONS.replace_all(def, "").into_owned()
 }
 
-fn alter_table(from: &Body, to: &Body, pairs: &[(String, String)], made: &BTreeSet<String>) -> Vec<String> {
+/// MySQL gives each NULL in a column made AUTO_INCREMENT the next value of its sequence, even in
+/// strict mode, which refuses a NULL in a column made NOT NULL: so a nullable column made
+/// AUTO_INCREMENT NOT NULL is made NOT NULL by a statement before, as it was otherwise (its name, its
+/// type, what indexes it), which fails on a NULL rather than numbering it (a row whose key had no
+/// parent would take one). Each such column, by the name it had, and its clause.
+fn held_columns(from: &Body, to: &Body, pairs: &[(String, String)]) -> Vec<(String, String)> {
+    let old_of: BTreeMap<&str, &str> = pairs.iter().map(|(o, n)| (n.as_str(), o.as_str())).collect();
+    let collation = (from.option("collate") == to.option("collate")).then(|| to.option("collate").unwrap_or_default());
+    let computed = |c: &Column| c.generation() == Some("virtual");
+    to.columns
+        .iter()
+        .filter_map(|c| {
+            let was = from.column(old_of.get(c.name.as_str()).copied().unwrap_or(&c.name))?;
+            (c.not_null() && c.counts() && !was.counts() && !was.not_null() && !computed(c) && !computed(was)).then(|| (was.name.clone(), format!("modify column {}", was.held().written(collation))))
+        })
+        .collect()
+}
+
+fn alter_table(from: &Body, to: &Body, pairs: &[(String, String)], made: &BTreeSet<String>, late: &BTreeSet<String>) -> Vec<String> {
     let pairs = pairs.to_vec();
     let map: BTreeMap<String, String> = pairs.iter().map(|(old, new)| (old.clone(), to.column(new).map(|c| c.q.clone()).unwrap_or_default())).collect();
     let old_of: BTreeMap<&str, &str> = pairs.iter().map(|(o, n)| (n.as_str(), o.as_str())).collect();
@@ -1264,17 +1288,11 @@ fn alter_table(from: &Body, to: &Body, pairs: &[(String, String)], made: &BTreeS
     // foreign key would make only after.
     let counts: Vec<&String> = to.columns.iter().filter(|c| c.counts() && from.column(&c.name).is_none_or(|was| !was.counts())).map(|c| &c.name).collect();
     let keys_a_count = |def: &str| counts.iter().any(|c| reads(def, c));
-    // MySQL gives each NULL in a column made AUTO_INCREMENT the next value of its sequence, even in
-    // strict mode, which refuses a NULL in a column made NOT NULL: so a nullable column made
-    // AUTO_INCREMENT NOT NULL is made NOT NULL by a statement before, as it was otherwise (its
-    // name, its type, what indexes it), which fails on a NULL rather than numbering it (a row whose
-    // key had no parent would take one).
-    for c in to.columns.iter().filter(|c| c.not_null() && !remade_columns.contains(&c.name)) {
-        let Some(was) = from.column(old_of.get(c.name.as_str()).copied().unwrap_or(&c.name)) else { continue };
-        if c.counts() && !was.counts() && !was.not_null() {
-            first.push(format!("modify column {}", was.held().written(collation)));
-        }
-    }
+    // The NOT NULL steps [`held_columns`] writes, each set in a statement of its own: those a key holds
+    // back (`late`), which the alterer joins to the key's drop, and the others, which it moves to the
+    // start of the plan.
+    let (late, early): (Vec<(String, String)>, Vec<(String, String)>) = held_columns(from, to, &pairs).into_iter().partition(|(c, _)| late.contains(c));
+    let (late, early): (Vec<String>, Vec<String>) = (late.into_iter().map(|(_, clause)| clause).collect(), early.into_iter().map(|(_, clause)| clause).collect());
     for (name, _, def) in to.indexes.iter().filter(|(n, _, d)| swaps || !made.contains(n) || keys_a_count(d)) {
         let was = from.indexes.iter().find(|(n, _, _)| n == name);
         if was.is_some_and(|(_, _, d)| seen_only(&index_now(d), def) && !indexes_on(d)) {
@@ -1318,8 +1336,14 @@ fn alter_table(from: &Body, to: &Body, pairs: &[(String, String)], made: &BTreeS
     // goes first, since a key the body changes may leave out a column it partitions by, and the
     // new comes last, by the keys the body made. Alone, it is one statement.
     let mut out = Vec::new();
+    if !early.is_empty() {
+        out.push(format!("alter table {} {}", to.q, early.join(", ")));
+    }
     if !first.is_empty() {
         out.push(format!("alter table {} {}", to.q, first.join(", ")));
+    }
+    if !late.is_empty() {
+        out.push(format!("alter table {} {}", to.q, late.join(", ")));
     }
     // A partition taken out of a range or list table is dropped with its rows, first, in place:
     // what follows partitions what is left.
@@ -1483,6 +1507,9 @@ fn partitions_changed(old: &str, new: &str) -> Option<String> {
 /// What a table and its columns carry beside the body: the names of the table's foreign keys, and
 /// of the indexes those keys made for themselves, each a JSON list.
 const KEYS: &str = "foreign keys ";
+/// A foreign key's line naming the columns it sets null, each `column <table>.<column>`, which MySQL
+/// won't make NOT NULL while the key stands.
+const SETS_NULL: &str = "sets null ";
 const OWN: &str = "indexes of keys ";
 
 /// The indexes a new foreign key makes as it is added, which the table's own change leaves to it.
@@ -1500,6 +1527,18 @@ pub struct MysqlAlterer {
     decided: super::Decided,
     /// The triggers both schemas have, which a plan may drop and make again.
     swaps: std::cell::RefCell<Vec<Swap>>,
+    /// The columns, `column <table>.<column>`, of the first schema's foreign keys that set them null,
+    /// which MySQL won't make NOT NULL while such a key stands.
+    set_null: std::cell::RefCell<BTreeSet<String>>,
+    /// Each NOT NULL step a table's statements start with, as written there and as the start of the
+    /// plan writes it, under the table's name before any rename.
+    early: std::cell::RefCell<Vec<(String, String)>>,
+    /// Each NOT NULL step a key holds back, as written, its table as a statement names it, and its
+    /// columns, each `column <table>.<column>`.
+    late: std::cell::RefCell<Vec<(String, String, Vec<String>)>>,
+    /// For each column of the first schema a foreign key reads, on either side, the statements that
+    /// take such a key away: its own drop, and its table's.
+    unkeyed_by: std::cell::RefCell<BTreeMap<String, Vec<String>>>,
 }
 
 impl MysqlAlterer {
@@ -1507,6 +1546,40 @@ impl MysqlAlterer {
     /// made one, else its rule.
     fn pairs(&self, table: &str, from: &Body, to: &Body) -> Vec<(String, String)> {
         self.decided.of(table).unwrap_or_else(|| renames(from, to))
+    }
+
+    /// The statements of a table's change ([`alter_table`]) as the first schema names it `table`,
+    /// with its NOT NULL step ([`held_columns`]) kept for [`Alterer::finish`] to move to the start of
+    /// the plan: there it fails on a NULL before anything else runs, a foreign key's drop included,
+    /// which MySQL commits on its own. A column under a key that sets it null keeps its step in
+    /// place, after the key's drop, and joins that drop's statement where it is of the same table,
+    /// which MySQL runs as one: a NULL then fails it with the key still in place.
+    fn table_statements(&self, table: &str, from: &Body, to: &Body, pairs: &[(String, String)], made: &BTreeSet<String>) -> Vec<String> {
+        let set_null = self.set_null.borrow();
+        let held = held_columns(from, to, pairs);
+        // InnoDB copies a table that has a FULLTEXT index to change it, and the copy refuses a column
+        // made NOT NULL under any foreign key: such a table keeps every step in place.
+        let copies = from.indexes.iter().any(|(_, _, def)| def.starts_with("fulltext "));
+        let late: BTreeSet<String> = held.iter().filter(|(c, _)| copies || set_null.contains(&format!("column {table}.{c}"))).map(|(c, _)| c.clone()).collect();
+        let early: Vec<&str> = held.iter().filter(|(c, _)| !late.contains(c)).map(|(_, clause)| clause.as_str()).collect();
+        if !early.is_empty() {
+            let clauses = early.join(", ");
+            let moved = (format!("alter table {} {clauses}", to.q), format!("alter table {} {clauses}", from.q));
+            let mut kept = self.early.borrow_mut();
+            if !kept.contains(&moved) {
+                kept.push(moved);
+            }
+        }
+        let held_back: Vec<&str> = held.iter().filter(|(c, _)| late.contains(c)).map(|(_, clause)| clause.as_str()).collect();
+        if !held_back.is_empty() {
+            let columns = late.iter().map(|c| format!("column {table}.{c}")).collect();
+            let joined = (format!("alter table {} {}", to.q, held_back.join(", ")), to.q.clone(), columns);
+            let mut kept = self.late.borrow_mut();
+            if !kept.contains(&joined) {
+                kept.push(joined);
+            }
+        }
+        alter_table(from, to, pairs, made, &late)
     }
 }
 
@@ -1743,14 +1816,72 @@ impl Alterer for MysqlAlterer {
             })
             .collect();
         *self.swaps.borrow_mut() = swaps;
+        *self.early.borrow_mut() = Vec::new();
+        *self.late.borrow_mut() = Vec::new();
+        let mut unkeyed_by: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for o in from.objects.values().filter(|o| o.kind == Some(Kind::Constraint) && o.id.starts_with("foreign key ")) {
+            let table_drop = o.owner.as_ref().and_then(|t| from.objects.get(t)).and_then(|t| t.drop.first());
+            let ways: Vec<String> = o.drop.first().into_iter().chain(table_drop).cloned().collect();
+            for column in o.deps.iter().filter(|d| d.starts_with("column ")) {
+                unkeyed_by.entry(column.clone()).or_default().extend(ways.iter().cloned());
+            }
+        }
+        *self.unkeyed_by.borrow_mut() = unkeyed_by;
+        *self.set_null.borrow_mut() = from.objects.values().flat_map(|o| o.extra.iter().filter_map(|l| l.strip_prefix(SETS_NULL)).flat_map(|l| serde_json::from_str::<Vec<String>>(l).unwrap_or_default())).collect();
     }
 
-    /// A trigger dropped and made again goes under `lock tables` ([`lock_swaps`]); then the
+    /// The NOT NULL steps a table's change starts with go first, or join a key's drop where the key
+    /// holds them back ([`MysqlAlterer::table_statements`]);
+    /// a trigger dropped and made again goes under `lock tables` ([`lock_swaps`]); then the
     /// privileges granted (or revoked) on one object to one account, which MySQL takes in one
     /// statement, written as one where the plan has them one after another: `grant select, update
     /// (email) on users to … with grant option`. Only those side by side: one further on may wait
     /// for what the plan makes between them (a column it grants on).
     fn finish(&self, statements: &mut Vec<String>) {
+        // A table's held step joins the last drop of its own keys before it, which MySQL runs as one
+        // statement, placed after every statement that takes a key on the column away (a key that
+        // references it, or that key's table), which the step waits for. The drop moves down past
+        // those, and past other keys' plain drops (no clause of theirs a `modify`), none of which waits
+        // for another's: anything else
+        // between may wait for the drop (the table its key references, dropped), and then the two
+        // stay apart, as the plan has them.
+        let unkeyed_by = self.unkeyed_by.borrow();
+        let drops_a_key = |s: &str| {
+            let t = tokenize(s, Dialect::Mysql);
+            let clause = |k: usize| t.get(k).map(Token::upper).unwrap_or_default();
+            t.len() > 5 && clause(0) == "ALTER" && clause(1) == "TABLE" && clause(3) == "DROP" && clause(4) == "FOREIGN" && clause(5) == "KEY" && !t.windows(2).any(|w| w[0].text == "," && w[1].upper() == "MODIFY")
+        };
+        for (here, table, columns) in self.late.borrow().iter() {
+            let Some(at) = statements.iter().position(|s| s == here) else { continue };
+            let drop = format!("alter table {table} drop foreign key ");
+            let Some(key) = statements[..at].iter().rposition(|s| s.starts_with(&drop)) else { continue };
+            let ways: Vec<&String> = columns.iter().flat_map(|c| unkeyed_by.get(c).into_iter().flatten()).collect();
+            let unkeys = |s: &str| ways.iter().any(|w| s == w.as_str() || s.starts_with(&format!("{w}, ")));
+            let after = statements[key + 1..at].iter().rposition(|s| unkeys(s)).map(|k| key + 1 + k);
+            let clauses = here[format!("alter table {table} ").len()..].to_string();
+            let joined = format!("{}, {clauses}", statements[key]);
+            match after {
+                Some(last) if statements[key + 1..=last].iter().all(|s| unkeys(s) || drops_a_key(s)) => {
+                    statements.remove(at);
+                    statements.insert(last + 1, joined);
+                    statements.remove(key);
+                }
+                Some(_) => {}
+                None => {
+                    statements.remove(at);
+                    statements[key] = joined;
+                }
+            }
+        }
+        // The NOT NULL steps no key holds back go first, before any key goes.
+        let mut front = Vec::new();
+        for (here, first) in self.early.borrow().iter() {
+            if let Some(at) = statements.iter().position(|s| s == here) {
+                statements.remove(at);
+                front.push(first.clone());
+            }
+        }
+        statements.splice(0..0, front);
         lock_swaps(&self.swaps.borrow(), statements);
         // Each statement, or a run of grants (or of revokes) on one object to one account.
         let mut runs: Vec<(String, Option<(bool, Vec<String>, String)>)> = Vec::new();
@@ -1843,7 +1974,8 @@ impl Alterer for MysqlAlterer {
             return None;
         }
         let last = pairs.iter().map(|(_, n)| n.as_str()).max()?;
-        Some(if new == last { alter_table(&a, &b, &pairs, &made_by_keys(&from.extra, &to.extra)) } else { Vec::new() })
+        let was = from.owner.as_deref()?.strip_prefix("table ")?;
+        Some(if new == last { self.table_statements(was, &a, &b, &pairs, &made_by_keys(&from.extra, &to.extra)) } else { Vec::new() })
     }
 
     fn alter(&self, from: &Object, to: &Object) -> Option<Vec<String>> {
@@ -1852,7 +1984,7 @@ impl Alterer for MysqlAlterer {
                 let (a, b) = (Body::from_json(&from.def)?, Body::from_json(&to.def)?);
                 let pairs = self.pairs(to.id.strip_prefix("table ")?, &a, &b);
                 // Where a column is renamed, the rename writes the table's statement.
-                Some(if pairs.is_empty() { alter_table(&a, &b, &pairs, &made_by_keys(&from.extra, &to.extra)) } else { Vec::new() })
+                Some(if pairs.is_empty() { self.table_statements(from.id.strip_prefix("table ")?, &a, &b, &pairs, &made_by_keys(&from.extra, &to.extra)) } else { Vec::new() })
             }
             // The table's statement changes the column.
             Kind::Column => Some(Vec::new()),
@@ -1908,10 +2040,10 @@ mod tests {
         let to = table(column("ticket", "not null auto_increment comment 'keep null rows'"));
         // Renamed as it counts: made NOT NULL as it was, under the name it had; a comment's words
         // are no attribute.
-        let plan = alter_table(&table(column("seq", "comment 'not null until rollout'")), &to, &[("seq".into(), "ticket".into())], &BTreeSet::new());
+        let plan = alter_table(&table(column("seq", "comment 'not null until rollout'")), &to, &[("seq".into(), "ticket".into())], &BTreeSet::new(), &BTreeSet::new());
         assert_eq!(plan.first().map(String::as_str), Some("alter table t modify column seq int comment 'not null until rollout' not null"), "{plan:?}");
         // NOT NULL already: nothing before.
-        let plan = alter_table(&table(column("ticket", "not null comment 'x'")), &to, &[], &BTreeSet::new());
+        let plan = alter_table(&table(column("ticket", "not null comment 'x'")), &to, &[], &BTreeSet::new(), &BTreeSet::new());
         assert_eq!(plan.len(), 1, "{plan:?}");
     }
 
