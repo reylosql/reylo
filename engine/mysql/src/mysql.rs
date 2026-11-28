@@ -22,7 +22,7 @@ use crate::host::{as_str, Host, Lazy};
 use crate::lex::{self, Lexed, MysqlText, Style, Target};
 use crate::types::{Cardinality, Field, Kind as TyKind, Slot, StatementKind, Type};
 use serde_json::{json, Value};
-use syntax::mysql::ast::{self, Expr, FunctionArg, FunctionArgExpr, GroupByExpr, LimitClause, Query, Select, SelectItem, SetExpr, Statement, TableFactor};
+use syntax::mysql::ast::{self, Expr, FunctionArg, FunctionArgExpr, GroupByExpr, LimitClause, Query, Select, SelectItem, SetExpr, Statement, TableFactor, TableWithJoins};
 use std::collections::{HashMap, HashSet};
 
 /// The session's `sql_mode`, asked only for a statement whose reading turns on it.
@@ -833,6 +833,8 @@ fn prove(q: &Query, raw: Option<&MysqlDescribe>, views: &HashSet<String>, host: 
     let mut outcomes: Vec<Option<MysqlDescribe>> = Vec::with_capacity(plan.probes.len());
     // Per probe, the JSON Schema a CHECK holds each JSON column it reads to.
     let mut documents: Vec<Vec<Option<Value>>> = Vec::with_capacity(plan.probes.len());
+    // Per probe, the columns MySQL may write into a document unconverted.
+    let mut unconverted: Vec<Vec<bool>> = Vec::with_capacity(plan.probes.len());
     for probe in &plan.probes {
         let mut described = &probe.sql;
         let mut outcome = host.describe(&probe.sql);
@@ -850,16 +852,25 @@ fn prove(q: &Query, raw: Option<&MysqlDescribe>, views: &HashSet<String>, host: 
                         documents.push(Vec::new());
                     }
                 }
+                match self::unconverted(read.as_ref(), &d, views, host) {
+                    Some(found) => unconverted.push(found),
+                    None => {
+                        pending = true;
+                        unconverted.push(Vec::new());
+                    }
+                }
                 outcomes.push(Some(d));
             }
             Some(Err(_)) => {
                 outcomes.push(None);
                 documents.push(Vec::new());
+                unconverted.push(Vec::new());
             }
             None => {
                 pending = true;
                 outcomes.push(None);
                 documents.push(Vec::new());
+                unconverted.push(Vec::new());
             }
         }
     }
@@ -920,7 +931,7 @@ fn prove(q: &Query, raw: Option<&MysqlDescribe>, views: &HashSet<String>, host: 
         .columns
         .iter()
         .map(|(name, shape)| {
-            let (ty, non_null) = resolve(shape, &outcomes, &plan, &flows, &documents, views, false);
+            let (ty, non_null) = resolve(shape, &outcomes, &plan, &flows, &documents, &unconverted, views, false);
             (name.clone(), ty, non_null)
         })
         .collect();
@@ -972,33 +983,36 @@ pub(crate) fn lone_aggregate(s: &Select) -> bool {
         && (s.having.as_ref().is_some_and(calls_aggregate) || s.projection.iter().filter_map(item_expr).any(calls_aggregate))
 }
 
+/// The subqueries an expression holds, outside any subquery of them: scalar ones, EXISTS, IN and a
+/// call's.
+pub(crate) fn subqueries<'e>(e: &'e Expr, out: &mut Vec<&'e Query>) {
+    match e {
+        Expr::Subquery(q) | Expr::Exists { subquery: q, .. } => out.push(&**q),
+        Expr::InSubquery { expr, subquery, .. } => {
+            out.push(&**subquery);
+            subqueries(expr, out);
+        }
+        Expr::Function(f) => match &f.args {
+            ast::FunctionArguments::Subquery(q) => out.push(&**q),
+            _ => call_args(f).0.into_iter().for_each(|a| subqueries(a, out)),
+        },
+        Expr::Nested(inner) | Expr::UnaryOp { expr: inner, .. } | Expr::Cast { expr: inner, .. } | Expr::IsNull(inner) | Expr::IsNotNull(inner) => subqueries(inner, out),
+        Expr::BinaryOp { left, right, .. } => {
+            subqueries(left, out);
+            subqueries(right, out);
+        }
+        Expr::Case { operand, conditions, else_result, .. } => {
+            for part in operand.as_deref().into_iter().chain(conditions.iter().flat_map(|c| [&c.condition, &c.result])).chain(else_result.as_deref()) {
+                subqueries(part, out);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// The tables, each read alone and by its bare name, of the subqueries among the select items of
 /// an aggregate with no GROUP BY.
 fn rowless_tables(q: &Query) -> Vec<String> {
-    fn subqueries<'e>(e: &'e Expr, out: &mut Vec<&'e Query>) {
-        match e {
-            Expr::Subquery(q) | Expr::Exists { subquery: q, .. } => out.push(&**q),
-            Expr::InSubquery { expr, subquery, .. } => {
-                out.push(&**subquery);
-                subqueries(expr, out);
-            }
-            Expr::Function(f) => match &f.args {
-                ast::FunctionArguments::Subquery(q) => out.push(&**q),
-                _ => call_args(f).0.into_iter().for_each(|a| subqueries(a, out)),
-            },
-            Expr::Nested(inner) | Expr::UnaryOp { expr: inner, .. } | Expr::Cast { expr: inner, .. } | Expr::IsNull(inner) | Expr::IsNotNull(inner) => subqueries(inner, out),
-            Expr::BinaryOp { left, right, .. } => {
-                subqueries(left, out);
-                subqueries(right, out);
-            }
-            Expr::Case { operand, conditions, else_result, .. } => {
-                for part in operand.as_deref().into_iter().chain(conditions.iter().flat_map(|c| [&c.condition, &c.result])).chain(else_result.as_deref()) {
-                    subqueries(part, out);
-                }
-            }
-            _ => {}
-        }
-    }
     let SetExpr::Select(s) = q.body.as_ref() else { return Vec::new() };
     if !lone_aggregate(s) {
         return Vec::new();
@@ -2758,22 +2772,24 @@ fn param_type(code: u32, charset: u32) -> Type {
 
 /// One shape plus its probes' prepares as the column's type and whether it is never NULL. A leaf
 /// stored under its definition ([`stored_column`]) takes its narrowing, its `TEXT`'s capacity
-/// counted in code points, since the probe's origin may be a derived column's own name. `inside`
-/// says the shape stands inside a document, where a JSON value that is JSON's null is a null.
-fn resolve(shape: &Shape, outcomes: &[Option<MysqlDescribe>], plan: &crate::mysql_shape::Plan, flows: &[Vec<u8>], documents: &[Vec<Option<Value>>], views: &HashSet<String>, inside: bool) -> (Type, bool) {
+/// counted in code points, since the probe's origin may be a derived column's own name, and no
+/// length for a CHAR or VARCHAR whose bytes MySQL may write into the document ([`unconverted`]).
+/// `inside` says the shape stands inside a document, where a JSON value that is JSON's null is a null.
+#[allow(clippy::too_many_arguments)]
+fn resolve(shape: &Shape, outcomes: &[Option<MysqlDescribe>], plan: &crate::mysql_shape::Plan, flows: &[Vec<u8>], documents: &[Vec<Option<Value>>], unconverted: &[Vec<bool>], views: &HashSet<String>, inside: bool) -> (Type, bool) {
     match shape {
         Shape::Object { fields, non_null } => {
             let fields = fields
                 .iter()
                 .map(|(k, s)| {
-                    let (ty, nn) = resolve(s, outcomes, plan, flows, documents, views, true);
+                    let (ty, nn) = resolve(s, outcomes, plan, flows, documents, unconverted, views, true);
                     Field::new(k.clone(), ty, !nn)
                 })
                 .collect();
             (Type::structure(fields), *non_null)
         }
         Shape::Array { items, non_null, .. } => {
-            let (ty, nn) = resolve(items, outcomes, plan, flows, documents, views, true);
+            let (ty, nn) = resolve(items, outcomes, plan, flows, documents, unconverted, views, true);
             (Type::array(Slot::new(ty, !nn)), *non_null)
         }
         Shape::Column { probe, index } => match outcomes.get(*probe).and_then(|o| o.as_ref()).and_then(|o| o.columns.get(*index)) {
@@ -2782,7 +2798,7 @@ fn resolve(shape: &Shape, outcomes: &[Option<MysqlDescribe>], plan: &crate::mysq
             Some(c) if c.r#type == 16 && plan.digits.contains(&(*probe, *index)) => (Type::unknown(), c.flags & 1 != 0),
             // A truth value is an integer to the server, so no other type is in doubt.
             Some(c) => {
-                let ty = defined_type(c, Some(views), None);
+                let ty = if unconverted.get(*probe).and_then(|u| u.get(*index)) == Some(&true) { column_type(c) } else { defined_type(c, Some(views), None) };
                 let ty = flows.get(*probe).and_then(|f| f.get(*index)).and_then(|reached| widened(&ty, *reached)).unwrap_or(ty);
                 // A JSON column a CHECK holds to a JSON Schema: the values it admits.
                 let ty = match documents.get(*probe).and_then(|d| d.get(*index)).cloned().flatten() {
@@ -2804,7 +2820,7 @@ fn resolve(shape: &Shape, outcomes: &[Option<MysqlDescribe>], plan: &crate::mysq
             None => (Type::unknown(), false),
         },
         // A value the query may hand back NULL whatever its probe says ([`crate::mysql_shape`]).
-        Shape::Nullable(inner) => (resolve(inner, outcomes, plan, flows, documents, views, inside).0, false),
+        Shape::Nullable(inner) => (resolve(inner, outcomes, plan, flows, documents, unconverted, views, inside).0, false),
         _ => (Type::unknown(), false),
     }
 }
@@ -2973,6 +2989,104 @@ fn documents(statement: Option<&Statement>, raw: &MysqlDescribe, host: &Host) ->
         }
     }
     Some(out)
+}
+
+/// Per result column, whether it is a table's CHAR or VARCHAR column that may store its values in a
+/// character set MySQL writes into a document unconverted
+/// ([`crate::mysql_types::unconverted_in_json`]), where they hold more characters than its length.
+/// The session's own columns of the tables the probe reads, at any depth, say which
+/// ([`session_charsets`]): none where none of them holds a column of such a set. Else the column's
+/// own set decides where the prepare's origin of the column is the column itself
+/// ([`crate::mysql_params::traced_from`]), and any column may elsewhere: through a derived table or
+/// a WITH query the origin names the derived column, and may name an alias in place of the table. A
+/// table named by its schema or one the session will not show is one whose columns are not read,
+/// and a probe the engine does not read may read any. A `TEXT`'s capacity is in bytes, which bound
+/// the characters a document holds of them too.
+fn unconverted(statement: Option<&Statement>, raw: &MysqlDescribe, views: &HashSet<String>, host: &Host) -> Lazy<Vec<bool>> {
+    let sized: Vec<bool> = raw.columns.iter().map(|c| stored_column(c, Some(views)) && matches!(column_type(c).label.as_deref(), Some("char" | "varchar"))).collect();
+    if !sized.contains(&true) {
+        return Some(sized);
+    }
+    let Some(statement) = statement else { return Some(sized) };
+    let mut tables = crate::mysql_params::tables(statement).read;
+    tables.sort();
+    tables.dedup();
+    // Per table, as the statement names it, each column's character set, or `None` where it is not
+    // read. Only a table the catalog lists is shown: `SHOW FULL COLUMNS` of any other name, `DUAL`
+    // or a TEMPORARY table's, is refused only as it runs, which stops the analysis. A TEMPORARY
+    // table that hides none is one whose columns are not read.
+    let listed = match answered_by_table(host, crate::mysql_params::TYPES_QUERY, &tables)? {
+        Ok((_, answers)) => answers,
+        Err(_) => Default::default(),
+    };
+    let mut charsets: Vec<(String, Option<HashMap<String, String>>)> = Vec::with_capacity(tables.len());
+    let mut pending = false;
+    for table in tables {
+        if listed.name(&table).is_none() {
+            charsets.push((table, None));
+            continue;
+        }
+        match session_charsets(&table, host) {
+            Some(found) => charsets.push((table, found)),
+            None => pending = true,
+        }
+    }
+    if pending {
+        return None;
+    }
+    let wide = |charset: &String| crate::mysql_types::unconverted_in_json(charset);
+    let every_one_read = !crate::mysql_params::reads_by_schema(statement) && charsets.iter().all(|(_, columns)| columns.is_some());
+    if every_one_read && !charsets.iter().flat_map(|(_, columns)| columns.iter().flat_map(HashMap::values)).any(wide) {
+        return Some(vec![false; raw.columns.len()]);
+    }
+    // The table the prepare names: the one of that name, else the one name that differs from it in
+    // case alone, as a server that folds names reports it.
+    let named = |table: &str| -> Option<&HashMap<String, String>> {
+        if let Some((_, columns)) = charsets.iter().find(|(name, _)| name == table) {
+            return columns.as_ref();
+        }
+        match charsets.iter().filter(|(name, _)| name.eq_ignore_ascii_case(table)).collect::<Vec<_>>().as_slice() {
+            [(_, columns)] => columns.as_ref(),
+            _ => None,
+        }
+    };
+    let own = crate::mysql_params::traced_from(statement).unwrap_or_default();
+    Some(
+        raw.columns
+            .iter()
+            .zip(sized)
+            .map(|(c, sized)| {
+                let Some(table) = c.org_table.as_deref().filter(|_| sized) else { return false };
+                if !own.iter().any(|t| t.eq_ignore_ascii_case(table)) {
+                    return true;
+                }
+                c.org_name.as_deref().and_then(|name| named(table)?.get(&name.to_ascii_lowercase())).is_none_or(wide)
+            })
+            .collect(),
+    )
+}
+
+/// Each column of a table, in lower case, with its character set, empty for none, as the session's
+/// own `SHOW FULL COLUMNS` has it, which reads the table the name resolves to: `information_schema`
+/// lists none of a TEMPORARY table's columns, and lists those of a table one of the same name hides.
+/// Asked only of a table the catalog lists, which the session can show. `None` where it is not read.
+fn session_charsets(table: &str, host: &Host) -> Lazy<Option<HashMap<String, String>>> {
+    // A host writes a value at each `?` of a catalog query, so a name holding one cannot be asked about.
+    if table.contains('?') {
+        return Some(None);
+    }
+    let sql = format!("SHOW FULL COLUMNS FROM `{}`", table.replace('`', "``"));
+    let Ok(rows) = host.query(&sql, Vec::new(), Scope::Statement)? else { return Some(None) };
+    // `Field`, `Type`, `Collation`, …: a collation's name opens with its character set's.
+    Some(Some(
+        rows.iter()
+            .filter_map(|row| {
+                let column = row.first().and_then(as_str)?;
+                let charset = row.get(2).and_then(as_str).and_then(|collation| collation.split('_').next()).unwrap_or_default();
+                Some((column.to_ascii_lowercase(), charset.to_ascii_lowercase()))
+            })
+            .collect(),
+    ))
 }
 
 /// The tables of a SELECT whose columns' origins in the prepare are the columns themselves: one
@@ -3395,10 +3509,16 @@ pub(crate) fn one_before_limit(q: &Query) -> Result<(), String> {
     }) {
         return Ok(());
     }
-    if s.from.is_empty() && s.selection.is_none() {
+    if (s.from.is_empty() || is_dual(s)) && s.selection.is_none() {
         return Ok(());
     }
     Err("a FROM returns a row per row it matches, and only an aggregate with no GROUP BY collapses them to one".into())
+}
+
+/// Whether a SELECT reads `FROM DUAL`, which is no table: the parser writes it as one named `DUAL`,
+/// with no quotes, which no table can be named, since the word is reserved.
+pub(crate) fn is_dual(s: &Select) -> bool {
+    matches!(s.from.as_slice(), [TableWithJoins { relation: TableFactor::Table { name, alias: None, .. }, joins }] if joins.is_empty() && matches!(name.0.as_slice(), [ast::ObjectNamePart::Identifier(i)] if i.quote_style.is_none() && i.value.eq_ignore_ascii_case("dual")))
 }
 
 /// Whether a key column of this class compared with a value of this one compares the column as
@@ -4252,6 +4372,9 @@ mod tests {
         assert_eq!(one(r"select 'C:\' as p, id from t where id = ?", plain), r"SELECT 'C:\' AS p, id FROM t WHERE id = ?");
         assert!(parse(&SessionDialect(MysqlText::default(), true, false), r"select 'C:\' as p, id from t where id = ?").is_err());
         assert_eq!(one(r#"select "id" from "t" where "id" = 1"#, ansi), r#"SELECT "id" FROM "t" WHERE "id" = 1"#);
+        // A TABLE statement's name in double quotes is the table's.
+        let quoted = parse(&SessionDialect(ansi, true, false), r#"select d.id from (table "t") d"#).unwrap().pop().unwrap();
+        assert_eq!(crate::mysql_params::tables(&quoted).read, ["t"]);
         // `||` is OR, bound as OR binds, unless the session joins strings with it.
         let pipes = |sql: &str, or: bool| parse(&SessionDialect(MysqlText::default(), or, false), sql).unwrap().pop().unwrap().to_string();
         assert_eq!(pipes("select id from t where id = 1 || name = 'a' && n = 2", true), "SELECT id FROM t WHERE id = 1 OR name = 'a' AND n = 2");
@@ -4532,6 +4655,39 @@ mod tests {
         let mut bare = column("name", 253, 255, 80, 0, "users", "name");
         bare.as_object_mut().unwrap().remove("schema");
         assert_eq!(types("select name from users", vec![bare]), "varchar");
+    }
+
+    #[test]
+    fn a_column_inside_a_document_keeps_its_length_by_the_character_set_the_session_resolves() {
+        // `information_schema` lists the permanent `t`, in utf8mb4, while a TEMPORARY `t` the
+        // session reads hides it; `SHOW FULL COLUMNS` reads what the session resolves. `None` for a
+        // `t` the catalog does not list, a TEMPORARY table that hides none.
+        let doc = |shown: Option<&str>| {
+            let json = json!({ "name": "doc", "type": 245, "flags": 0, "charset": 63, "length": 4_294_967_295u32, "decimals": 0, "schema": "", "org_table": "", "org_name": "" });
+            let u = json!({ "name": "u", "type": 253, "flags": 0, "charset": 255, "length": 16, "decimals": 0, "schema": "app", "org_table": "t", "org_name": "u" });
+            let mut answers: HashMap<String, crate::api::Answer> = HashMap::new();
+            for _ in 0..8 {
+                let host = Host::new(&answers);
+                if let Some(analysis) = analyze_text("select json_object('k', u) as doc from t", &host) {
+                    return analysis.columns[0].ty.short();
+                }
+                for need in host.needs() {
+                    let (id, answer) = match need {
+                        crate::api::Need::Describe { id, sql } if sql.to_ascii_lowercase().contains("json_object") => (id, json!({ "mysql": { "columns": [json.clone()], "params": [] } })),
+                        crate::api::Need::Describe { id, .. } => (id, json!({ "mysql": { "columns": [u.clone()], "params": [] } })),
+                        // MySQL refuses `SHOW FULL COLUMNS` of a table it does not hold only as it runs, which stops the analysis.
+                        crate::api::Need::Query { id, sql, .. } if sql.starts_with("SHOW FULL COLUMNS") => (id, json!({ "rows": [["u", "varchar(4)", shown.expect("a table the catalog does not list is not shown"), "YES", "", null, "", "select", ""]] })),
+                        crate::api::Need::Query { id, sql, .. } if sql == crate::mysql_params::TYPES_QUERY => (id, json!({ "rows": if shown.is_some() { json!([["t", "u", "varchar", "varchar(4)", "", "", "utf8mb4"]]) } else { json!([]) } })),
+                        crate::api::Need::Query { id, .. } => (id, json!({ "rows": [] })),
+                    };
+                    answers.insert(id, serde_json::from_value(answer).unwrap());
+                }
+            }
+            panic!("the analysis never settled")
+        };
+        assert_eq!(doc(Some("utf8mb4_0900_ai_ci")), "json { k: varchar(≤4)? }");
+        assert_eq!(doc(Some("utf32_general_ci")), "json { k: varchar? }");
+        assert_eq!(doc(None), "json { k: varchar? }");
     }
 
     #[test]

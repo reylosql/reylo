@@ -22,7 +22,7 @@ static LOCK: Mutex<()> = Mutex::new(());
 /// The version of the tree's format, which the walker writes as the tree's first member
 /// (`REYLO_TREE_VERSION` in `csrc/reylo_sqlite.c`): a tree of another is refused, by both numbers,
 /// before anything in it is read. A change to what either side reads or writes moves both.
-pub const TREE_VERSION: u32 = 4;
+pub const TREE_VERSION: u32 = 6;
 
 #[derive(Debug, Deserialize)]
 #[serde(remote = "Self", rename_all = "camelCase", deny_unknown_fields)]
@@ -35,6 +35,11 @@ pub struct Tree {
     pub statement: Option<Sel>,
     #[serde(default)]
     pub dml: Option<Dml>,
+    /// An UPDATE ... FROM's SELECT, which SQLite builds to find the rows it writes: the target
+    /// table first, then the FROM's items, under the UPDATE's WHERE, resolved there alone (`dml`'s
+    /// WHERE is not). Absent for any other statement.
+    #[serde(default)]
+    pub update_from: Option<Sel>,
     #[serde(default)]
     pub returning: Option<Vec<Col>>,
     /// The public column metadata: the names tsc sees and the declared type.
@@ -425,6 +430,9 @@ pub struct Node {
     /// A window call with a FILTER.
     #[serde(default)]
     pub filter: bool,
+    /// What a FILTER keeps, an aggregate's as well as a window call's; absent where there is none.
+    #[serde(default)]
+    pub filter_where: Option<Box<Node>>,
     /// A `truth` node's: `x IS NOT TRUE` or `x IS NOT FALSE`, the test of `x` against its `right`.
     #[serde(default)]
     pub is_not: bool,
@@ -460,7 +468,7 @@ impl Members for Tree {
         "the tree of a statement that prepared".into()
     }
     fn required(&self) -> Vec<&'static str> {
-        if self.error.is_some() { Vec::new() } else { vec!["statement", "dml", "returning", "columns", "params", "readonly", "tables"] }
+        if self.error.is_some() { Vec::new() } else { vec!["statement", "dml", "updateFrom", "returning", "columns", "params", "readonly", "tables"] }
     }
 }
 
@@ -672,7 +680,7 @@ mod tests {
         let column = json!({ "op": "column", "aff": "none", "outerOn": false, "innerOn": false, "cursor": 0, "index": 0, "register": false, "table": "t", "column": "a", "declared": "", "affinity": "blob", "coll": "BINARY", "notNull": false, "rowid": false, "generated": false, "subtype": false, "outer": false, "strict": false, "view": false });
         let from = json!({ "cursor": 0, "table": "t", "alias": null, "outer": false, "right": false, "leftOfRight": false, "tabFunc": false, "args": [], "vectorTable": null, "cte": false, "recursive": false, "view": false, "virtual": false, "subquery": null, "on": null });
         let statement = json!({ "columns": [{ "name": "a", "named": false, "expr": column }], "from": [from], "where": null, "groupBy": [], "having": null, "orderBy": [], "limit": null, "offset": null, "distinct": false, "aggregate": false, "values": false, "window": false });
-        json!({ "version": TREE_VERSION, "statement": statement, "dml": null, "returning": null, "columns": [{ "name": "a", "declared": null }], "params": [], "readonly": true, "tables": {}, "schemaErrors": [] })
+        json!({ "version": TREE_VERSION, "statement": statement, "dml": null, "updateFrom": null, "returning": null, "columns": [{ "name": "a", "declared": null }], "params": [], "readonly": true, "tables": {}, "schemaErrors": [] })
     }
 
     fn read(tree: &Value) -> Result<Tree, String> {

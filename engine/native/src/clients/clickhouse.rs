@@ -2,11 +2,19 @@
 //! the query is the body, sent as it is written with no parameters, and its rows come back as
 //! JSON (`default_format=JSONCompact`). Nothing else is set: a user whose profile is read-only may
 //! change no setting, and may still name a format.
+//!
+//! A server behind a load balancer may be one of several replicas, which each request can reach a
+//! different one of, and which apply a migration one after another. Each request carries one
+//! `X-ClickHouse-Replica-Tag` per connection, which ClickHouse Cloud sends to one replica, and each
+//! answer is noted by the server that gave it (`X-ClickHouse-Server-Display-Name`), so that a caller
+//! can tell an analysis whose answers came from more than one ([`Server::answered`]).
 
 use crate::{server_errors, AnswerCache, Analysis, Answerer, DbError, HostError, ReplayError};
 use reylo_engine_clickhouse::Clickhouse;
 use reylo_engine_core::database::Database;
 use serde_json::Value;
+use std::collections::BTreeSet;
+use std::sync::Mutex;
 use std::time::Duration;
 
 /// What a ClickHouse describe is answered with: never anything, its describe being a query.
@@ -18,6 +26,9 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long one of the engine's queries may take. None reads a table's rows but through a scalar
 /// subquery of the statement, which the server computes as it reads one.
 const QUERY_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// The header ClickHouse Cloud sends every request that carries one value to one replica.
+const REPLICA_TAG: &str = "X-ClickHouse-Replica-Tag";
 
 /// The most of an answer that is read: a describe's or a query tree's is a few kilobytes.
 const ANSWER_LIMIT: u64 = 256 << 20;
@@ -36,6 +47,10 @@ pub struct Server {
     parameters: Vec<(String, String)>,
     /// What each request's headers carry: the user and password, and the headers the URL names.
     headers: Vec<(String, String)>,
+    /// The connection's own `X-ClickHouse-Replica-Tag`, where the URL names none.
+    tag: Option<String>,
+    /// The servers that answered since [`Server::answered`] last read them.
+    answered: Mutex<BTreeSet<Option<String>>>,
 }
 
 /// What a request came to: the server's answer, or its failure to give one.
@@ -132,7 +147,19 @@ impl Server {
         // No redirect is followed, as `@clickhouse/client` follows none: one would carry the login's
         // headers to whatever host it names. Its answer is then one the interface does not give.
         let config = ureq::Agent::config_builder().http_status_as_error(false).max_redirects(0).timeout_connect(Some(CONNECT_TIMEOUT)).timeout_global(Some(QUERY_TIMEOUT)).build();
-        Ok(Server { agent: ureq::Agent::new_with_config(config), endpoint: format!("{scheme}://{host}{pathname}/"), parameters, headers })
+        // A value of this connection's alone, so that ClickHouse Cloud sends its requests to one replica.
+        let tag = (!headers.iter().any(|(name, _)| name.eq_ignore_ascii_case(REPLICA_TAG))).then(|| {
+            use std::hash::BuildHasher;
+            format!("reylo-{:016x}", std::collections::hash_map::RandomState::new().hash_one((std::process::id(), std::time::SystemTime::now())))
+        });
+        Ok(Server { agent: ureq::Agent::new_with_config(config), endpoint: format!("{scheme}://{host}{pathname}/"), parameters, headers, tag, answered: Mutex::default() })
+    }
+
+    /// The servers that answered since this was last called, by the name each answer carries in
+    /// `X-ClickHouse-Server-Display-Name`, `None` for an answer that carries none or an empty one, which
+    /// a server of 25.11 or later always names: one server unless the connection reaches several replicas.
+    pub fn answered(&self) -> BTreeSet<Option<String>> {
+        std::mem::take(&mut *self.answered.lock().unwrap_or_else(|e| e.into_inner()))
     }
 
     /// The host and port, and the database where the URL names one, for a message.
@@ -164,9 +191,13 @@ impl Server {
         for (name, value) in &self.headers {
             request = request.header(name.as_str(), value.as_str());
         }
+        if let Some(tag) = &self.tag {
+            request = request.header(REPLICA_TAG, tag.as_str());
+        }
         let mut response = request.send(sql.as_bytes()).map_err(|e| e.to_string())?;
         let status = response.status().as_u16();
         let header = |name: &str| response.headers().get(name).and_then(|v| v.to_str().ok()).map(String::from);
+        self.answered.lock().unwrap_or_else(|e| e.into_inner()).insert(header("x-clickhouse-server-display-name").filter(|name| !name.is_empty()));
         let code = header("x-clickhouse-exception-code");
         let ours = code.is_some() || header("x-clickhouse-query-id").is_some() || header("x-clickhouse-summary").is_some();
         let tag = header("x-clickhouse-exception-tag");
@@ -333,6 +364,39 @@ mod tests {
             stream.write_all(response.as_bytes()).unwrap();
         });
         (url, serving)
+    }
+
+    #[test]
+    fn each_request_carries_the_connections_replica_tag_and_each_answer_its_server() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let serving = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0u8; 1024];
+            while !request.windows(8).any(|w| w == b"SELECT 1") {
+                let read = stream.read(&mut chunk).unwrap();
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..read]);
+            }
+            let body = r#"{"meta": [], "data": [[1]]}"#;
+            stream.write_all(format!("HTTP/1.1 200 OK\r\nX-ClickHouse-Query-Id: q\r\nX-ClickHouse-Server-Display-Name: replica7\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).unwrap();
+            String::from_utf8_lossy(&request).to_ascii_lowercase()
+        });
+        let server = Server::of(&url).unwrap();
+        assert!(matches!(server.ask("SELECT 1").unwrap(), Outcome::Rows(_)));
+        let request = serving.join().unwrap();
+        assert!(request.contains("\r\nx-clickhouse-replica-tag: reylo-"), "{request}");
+        assert_eq!(server.answered(), [Some("replica7".to_string())].into());
+        assert!(server.answered().is_empty());
+        // A tag the URL names is the one sent; none is added beside it.
+        let named = Server::of("http://localhost:8123/?http_header_X-ClickHouse-Replica-Tag=app").unwrap();
+        assert_eq!((named.tag, named.headers), (None, vec![("X-ClickHouse-Replica-Tag".to_string(), "app".to_string())]));
+        // Two connections, two tags.
+        assert_ne!(Server::of(&url).unwrap().tag, Server::of(&url).unwrap().tag);
     }
 
     /// `body` as the HTTP interface sends an error, with its code in a header where it has one.

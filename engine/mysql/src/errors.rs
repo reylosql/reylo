@@ -75,9 +75,15 @@ pub(crate) const ERRORS_QUERY: &str = "with recursive w(t) as ( \
     ) k";
 
 /// A string literal every MySQL session reads as written: a quote doubled. A name with a backslash
-/// is left out, since a session reads one by its mode.
+/// is left out, since a session reads one by its mode, and so is one with a `?`, since a host writes
+/// a value at each `?` of a catalog query ([`unwritable`]).
 fn literal(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
+}
+
+/// Whether a name can't be written into a catalog query as a literal ([`literal`]).
+pub(crate) fn unwritable(name: &str) -> bool {
+    name.contains('\\') || name.contains('?')
 }
 
 pub(crate) fn list<'a>(names: impl Iterator<Item = &'a str>) -> String {
@@ -98,7 +104,7 @@ fn request(kind: Option<StatementKind>, tables: &Tables, sql: &str, by_schema: b
     let unqualified = |t: &String| t.rsplit('.').next().unwrap_or(t).to_string();
     let written: Vec<String> = tables.write.iter().map(unqualified).collect();
     let read: Vec<String> = tables.read.iter().map(unqualified).collect();
-    if by_schema || (kind != Some(StatementKind::Select) && written.is_empty()) || written.iter().chain(&read).any(|t| t.contains('\\')) {
+    if by_schema || (kind != Some(StatementKind::Select) && written.is_empty()) || written.iter().chain(&read).any(|t| unwritable(t)) {
         return None;
     }
     let called = called(sql, Dialect::Mysql);
@@ -188,7 +194,7 @@ pub fn read_only(analysis: &Analysis, host: &Host) -> Lazy<bool> {
     if analysis.kind != Some(StatementKind::Select) || analysis.errors.is_none() || has_word(sql, Dialect::Mysql, &["for", "lock", "into"]) || sql.contains(":=") || changes(sql) {
         return Some(false);
     }
-    if tables.read.iter().any(|t| t.contains('.') || t.contains('\\')) {
+    if tables.read.iter().any(|t| t.contains('.') || unwritable(t)) {
         return Some(false);
     }
     if tables.read.is_empty() {

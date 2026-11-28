@@ -45,8 +45,10 @@ static char *gReplayErrors;     /* what its replay reported, as openSchema's err
 static sqlite3_str *gStmt;      /* the top-level SELECT, or a DML's SELECT source */
 static sqlite3_str *gDml;       /* the INSERT / UPDATE / DELETE */
 static sqlite3_str *gReturning; /* the RETURNING list */
+static sqlite3_str *gUpdateFrom; /* the SELECT SQLite builds for an UPDATE ... FROM, its target first */
 static int gCaptured;           /* the first top-level hook has fired */
 static Select *gInsertSelect;   /* the SELECT or VALUES that feeds the INSERT, about to be coded */
+static int gUpdateFromNext;     /* the statement is an UPDATE ... FROM whose SELECT is not coded yet */
 static Table *gTables[128];
 static int gnTables;
 static int gDepth;              /* how many SELECTs the walker is inside */
@@ -307,6 +309,13 @@ static void expr(sqlite3_str *s, Expr *p, Select *pSel){
       if( !ExprHasProperty(p, EP_TokenOnly|EP_Reduced) && p->pLeft && p->pLeft->op==TK_ORDER && ExprUseXList(p->pLeft) ){
         key(s, "orderBy"); exprList(s, p->pLeft->x.pList, pSel); sqlite3_str_appendchar(s, 1, ',');
       }
+#ifndef SQLITE_OMIT_WINDOWFUNC
+      /* What a FILTER keeps, an aggregate's alone (held as a window too) as well as a window
+      ** call's: it may read a column of a query around the call. */
+      if( ExprHasProperty(p, EP_WinFunc) && p->y.pWin && p->y.pWin->pFilter ){
+        key(s, "filterWhere"); expr(s, p->y.pWin->pFilter, pSel); sqlite3_str_appendchar(s, 1, ',');
+      }
+#endif
       break;
     }
     case TK_CAST:
@@ -576,6 +585,11 @@ static void selectHook(Parse *pParse, Select *p, SelectDest *pDest){
   if( p==gInsertSelect ){
     gInsertSelect = 0;
     selectJson(gStmt, p);
+  }else if( gUpdateFromNext && (p->selFlags & SF_UpdateFrom) ){
+    /* SQLite resolves an UPDATE ... FROM's WHERE only in the SELECT it builds of the target and the
+    ** FROM's items, which it codes after the UPDATE hook, before any trigger's program. */
+    gUpdateFromNext = 0;
+    selectJson(gUpdateFrom, p);
   }else if( !gCaptured && pDest->eDest==SRT_Output ){
     gCaptured = 1;
     selectJson(gStmt, p);
@@ -663,7 +677,6 @@ static void insertHook(Parse *pParse, Table *pTab, IdList *pColumn, ExprList *pL
 }
 static void updateHook(Parse *pParse, Table *pTab, ExprList *pChanges, Expr *pWhere, int *aXRef, SrcList *pTabList, int onError, Upsert *pUpsert){
   int i, j;
-  (void)pTabList;
   if( skipHook(pParse) ) return;
   /* An upsert's DO UPDATE, resolved as the UPDATE it runs once the INSERT's hook has written it. */
   if( gCaptured ){
@@ -674,6 +687,7 @@ static void updateHook(Parse *pParse, Table *pTab, ExprList *pChanges, Expr *pWh
   tableSeen(pTab);
   sqlite3_str_appendchar(gDml, 1, '{');
   kv_str(gDml, "kind", pUpsert ? "upsert" : "update");
+  gUpdateFromNext = pUpsert==0 && pTabList && pTabList->nSrc>1;
   kv_str(gDml, "table", pTab->zName);
   kv_str(gDml, "onError", onErrorName(onError));
   key(gDml, "set"); sqlite3_str_appendchar(gDml, 1, '[');
@@ -1305,7 +1319,7 @@ static char *missingSchema(const char *zSql, const char *zMsg, int *piOfst, int 
 /* The version of the tree's format, reylo_sqlite_analyze's first member: TREE_VERSION in
 ** src/sqlite_tree.rs, which refuses a tree of another. A change to what either side reads or writes
 ** moves both. */
-#define REYLO_TREE_VERSION 4
+#define REYLO_TREE_VERSION 6
 
 /*
 ** Analyzes one statement against the schema DDL, with the host's scalar functions (azFn[i] taking
@@ -1313,8 +1327,8 @@ static char *missingSchema(const char *zSql, const char *zMsg, int *piOfst, int 
 ** the same statement as the application runs it, names them (zSql when it is null), and the functions of the
 ** host's SQLite (azHost[i] taking aHostArg[i] arguments, of type zHostType[i]; nHost is negative
 ** when the host did not list them, and every function this build has is then taken to exist).
-** Returns a JSON document (free with reylo_sqlite_free): { version, statement, dml, returning,
-** tables, columns, params, readonly, error, schemaErrors }.
+** Returns a JSON document (free with reylo_sqlite_free): { version, statement, dml, updateFrom,
+** returning, tables, columns, params, readonly, error, schemaErrors }.
 */
 char *reylo_sqlite_analyze(
   const char *const *azDdl, int nDdl, const char *zSql, const char *zSent, const char *const *azFn, const int *aFnArg, int nFn,
@@ -1336,8 +1350,8 @@ char *reylo_sqlite_analyze(
     sqlite3_free(sqlite3_str_finish(schemaErrors));
     return sqlite3_str_finish(out);
   }
-  gStmt = sqlite3_str_new(0); gDml = sqlite3_str_new(0); gReturning = sqlite3_str_new(0);
-  gCaptured = 0; gInsertSelect = 0; gnTables = 0; gTooDeep = 0; gTooTall = 0; gDepth = 0; gFrames = 0;
+  gStmt = sqlite3_str_new(0); gDml = sqlite3_str_new(0); gReturning = sqlite3_str_new(0); gUpdateFrom = sqlite3_str_new(0);
+  gCaptured = 0; gInsertSelect = 0; gUpdateFromNext = 0; gnTables = 0; gTooDeep = 0; gTooTall = 0; gDepth = 0; gFrames = 0;
   gHost = azHost; gnHost = nHost; gExtra = azFn; gnExtra = nFn; gnDenied = 0; gDeniedView = 0;
   if( nHost>=0 ) sqlite3_set_authorizer(gDb, functionAuth, 0);
   installHooks(1);
@@ -1348,7 +1362,7 @@ char *reylo_sqlite_analyze(
   rc = sqlite3_prepare_v2(gDb, zSql, -1, &pStmt, 0);
   installHooks(0);
   if( nHost>=0 ) sqlite3_set_authorizer(gDb, 0, 0);
-  gInsertSelect = 0;
+  gInsertSelect = 0; gUpdateFromNext = 0;
   if( rc!=SQLITE_OK ){
     static const char zDenied[] = "not authorized to use function: ";
     const char *zMsg = sqlite3_errmsg(gDb);
@@ -1370,6 +1384,8 @@ char *reylo_sqlite_analyze(
     key(out, "statement"); if( sqlite3_str_length(gStmt) ) sqlite3_str_appendall(out, sqlite3_str_value(gStmt)); else sqlite3_str_appendall(out, "null");
     sqlite3_str_appendchar(out, 1, ',');
     key(out, "dml"); if( sqlite3_str_length(gDml) ) sqlite3_str_appendall(out, sqlite3_str_value(gDml)); else sqlite3_str_appendall(out, "null");
+    sqlite3_str_appendchar(out, 1, ',');
+    key(out, "updateFrom"); if( sqlite3_str_length(gUpdateFrom) ) sqlite3_str_appendall(out, sqlite3_str_value(gUpdateFrom)); else sqlite3_str_appendall(out, "null");
     sqlite3_str_appendchar(out, 1, ',');
     key(out, "returning"); if( sqlite3_str_length(gReturning) ) sqlite3_str_appendall(out, sqlite3_str_value(gReturning)); else sqlite3_str_appendall(out, "null");
     sqlite3_str_appendchar(out, 1, ',');
@@ -1403,9 +1419,9 @@ char *reylo_sqlite_analyze(
   closeObj(out);
   sqlite3_finalize(pNames);
   sqlite3_finalize(pStmt);
-  sqlite3_free(sqlite3_str_finish(gStmt)); sqlite3_free(sqlite3_str_finish(gDml)); sqlite3_free(sqlite3_str_finish(gReturning));
+  sqlite3_free(sqlite3_str_finish(gStmt)); sqlite3_free(sqlite3_str_finish(gDml)); sqlite3_free(sqlite3_str_finish(gReturning)); sqlite3_free(sqlite3_str_finish(gUpdateFrom));
   sqlite3_free(sqlite3_str_finish(schemaErrors));
-  gStmt = gDml = gReturning = 0;
+  gStmt = gDml = gReturning = gUpdateFrom = 0;
   sqlite3_free(gDeniedView); gDeniedView = 0;
   gHost = gExtra = 0; gnHost = gnExtra = 0;
   return sqlite3_str_finish(out);

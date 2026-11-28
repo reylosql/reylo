@@ -325,6 +325,15 @@ Inside JSON, a value can differ from the same value in a column. A `BIGINT` past
 
 </Pairs>
 
+A string stored as UTF-16 or UTF-32 goes in as its bytes. To get its text, convert it to `utf8mb4`:
+
+<Pairs>
+
+- `json_object('k', CONVERT('Ada' USING utf16))` → `{ k: "\u0000A\u0000d\u0000a" }`
+- `json_object('k', CONVERT(CONVERT('Ada' USING utf16) USING utf8mb4))` → `{ k: "Ada" }`
+
+</Pairs>
+
 **Where a schema's type applies**
 
 A schema's type reaches the column when you select it straight from its table, and inside `json_object` or `json_arrayagg`. Anywhere else, such as through a subquery or in an expression, it's `Json`.

@@ -1,5 +1,7 @@
 casted_insert.sql: at_most_one (id: int4) -> { id: int4 }
 conditional_upsert.sql: one (id: int4) -> { id: int4 }
+delete_key_in_limit.sql: at_most_one (u: int4) -> { id: int4 }
+delete_key_in_many.sql: many (u: int4) -> { id: int4 }
 delete_using_many.sql: many () -> { id: int4 }
 delete_using_table_pinned.sql: at_most_one (id: int4) -> { id: int4, name: text(¬NUL)? }
 delete_using_with.sql: at_most_one (id: int4) -> { id: int4 }
@@ -33,4 +35,6 @@ update_from_with.sql: at_most_one (id: int4) -> { id: int4 }
 update_from_with_many.sql: many () -> { id: int4 }
 update_from_with_nonkey.sql: many (id: int4) -> { id: int4 }
 update_from_with_two_keys.sql: at_most_one (id: int4, name: text(¬NUL)) -> { id: int4 }
+update_key_in.sql: at_most_one (id: int4) -> { id: int4 }
+update_key_with_subquery.sql: at_most_one (id: int4) -> { id: int4 }
 with_write_joined_key.sql: at_most_one (id: int4, acct: int4) -> { id: int4, name: text(¬NUL) }
