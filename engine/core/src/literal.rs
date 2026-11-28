@@ -100,7 +100,8 @@ pub fn narrow(ty: &Type, literals: &[Literal]) -> Option<Type> {
             (Kind::Integer(_), Literal::Boolean(b)) => if *b { "1" } else { "0" }.to_string(),
             _ => return None,
         };
-        if known.is_some_and(|known| !known.iter().any(|k| k.value == value)) {
+        // A value rule 7 refuses, as one outside the type's bounds, is none the column holds.
+        if !base.holds(&value) || known.is_some_and(|known| !known.iter().any(|k| k.value == value)) {
             return None;
         }
         push(&mut values, value);
@@ -269,6 +270,9 @@ mod tests {
         assert_eq!(narrow(&boolean, &[Literal::Boolean(true), Literal::Boolean(false)]), None);
         assert_eq!(narrow(&Type::uuid(), &[Literal::Text("x".into())]), None);
         assert_eq!(narrow(&text, &[]), None);
+        // A number outside the type's bounds is none of its values.
+        let year = Type::new(Kind::Integer(IntegerType { bits: 16, bounds: crate::types::Bounds::between("1901", "2155"), ..IntegerType::default() }));
+        assert_eq!((narrow(&year, &[number("2026")]).is_some(), narrow(&year, &[number("1900")])), (true, None));
         // What a narrowing writes is a valid type, its values among its base's.
         for ty in [
             narrow(&int4, &[number("1")]),
