@@ -697,12 +697,18 @@ pub(crate) fn not_extension(catalog: &str, alias: &str) -> String {
 /// privileges it has and those it was made with (`pg_init_privs`), where they differ: what was
 /// granted or revoked on it since. Each row: the extension (`ext`), `pg_identify_object`'s `type`
 /// and `identity`, and its privileges as `json_build_array(have, made with)`, each a list of
-/// `{grantee, privilege, grantable}` without its owner's. The platform's own are left out.
+/// `{grantee, privilege, grantable}` without its owner's. The platform's own are left out, and so is
+/// what a platform's role other than the Data API's holds on what a platform's extension made
+/// ([`platform_extension`]): Supabase grants its `dashboard_user` on `pg_stat_statements`,
+/// `pgcrypto` and `uuid-ossp` as it makes a project, which no database made since has, and no
+/// shadow may grant, since those extensions are its administrator's there.
 pub(crate) fn extension_member_privileges() -> String {
+    let theirs = PLATFORM_ROLES.iter().filter(|r| !PLATFORM_API_ROLES.contains(r)).map(|r| format!("'{r}'")).collect::<Vec<_>>().join(", ");
+    let platforms = format!("({} and pg_get_userbyid(a.grantee) in ({theirs}))", platform_extension("x", "xn"));
     let explode = |of: &str| {
         format!(
             "(select json_agg(json_build_object('grantee', case when a.grantee = 0 then 'public' else quote_ident(pg_get_userbyid(a.grantee)) end, 'privilege', a.privilege_type, 'grantable', a.is_grantable) order by a.grantee, a.privilege_type)
-               from aclexplode(coalesce({of}, acldefault(m.kind, m.owner))) a where a.grantee <> m.owner)"
+               from aclexplode(coalesce({of}, acldefault(m.kind, m.owner))) a where a.grantee <> m.owner and not {platforms})"
         )
     };
     format!(
@@ -719,6 +725,7 @@ pub(crate) fn extension_member_privileges() -> String {
         ) m
         join pg_depend d on d.classid = m.cls and d.objid = m.oid and d.objsubid = 0 and d.deptype = 'e' and d.refclassid = 'pg_extension'::regclass
         join pg_extension x on x.oid = d.refobjid
+        join pg_namespace xn on xn.oid = x.extnamespace
         left join pg_init_privs i on i.classoid = m.cls and i.objoid = m.oid and i.objsubid = 0
         , lateral pg_identify_object(m.cls, m.oid, 0) o
         where m.acl is distinct from i.initprivs and {}

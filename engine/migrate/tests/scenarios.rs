@@ -4300,6 +4300,7 @@ on!(
     init_writes_the_event_triggers_it_compares,
     init_writes_the_publications_it_compares,
     a_project_begun_on_supabase_runs_on_a_new_supabase_database,
+    supabases_grants_on_its_extensions_are_supabases,
     a_supabase_projects_change_to_its_data_api_grants_is_its_own,
     a_supabase_database_whose_one_change_is_a_default_grant_is_not_empty,
     a_new_supabase_database_starts_an_empty_project_either_way,
@@ -9028,6 +9029,24 @@ create trigger kids_note after insert on kids begin update parents set name = na
             p.exec("alter default privileges for role postgres in schema public revoke usage, select on sequences from anon, authenticated, service_role").await;
         }
         p.exec("create publication supabase_realtime").await;
+    }
+
+    /// What Supabase grants its own `dashboard_user` on its extensions as it makes a project is its
+    /// own: init writes none of it, while a grant the project made on them to a Data API role is the
+    /// project's, and written.
+    pub async fn supabases_grants_on_its_extensions_are_supabases(mut p: P) {
+        as_supabase_makes_it(&p, true).await;
+        p.exec("do $$ begin create role dashboard_user nologin; exception when duplicate_object or unique_violation then null; end $$").await;
+        p.exec("grant execute on function extensions.pg_stat_statements_reset(oid, oid, bigint, boolean) to dashboard_user; grant select on extensions.pg_stat_statements to dashboard_user; grant execute on function extensions.gen_random_bytes(integer) to dashboard_user").await;
+        p.exec("grant execute on function extensions.gen_random_bytes(integer) to authenticated; create table tokens (id int primary key)").await;
+        assert_eq!(p.run(async |o, log| reylo_migrate::init(o, &[], log).await).await, 0, "{}", p.peek());
+        let init = std::fs::read_to_string(p.dir.join("migrations/init.sql")).unwrap();
+        assert!(!init.contains("dashboard_user"), "{init}");
+        assert_has!(init, r"(?i)grant execute on (function|routine) extensions\.gen_random_bytes\(integer\) to authenticated");
+        p.strict = true;
+        assert_eq!(p.status().await, 0, "{}", p.peek());
+        p.exec("revoke execute on function extensions.gen_random_bytes(integer) from dashboard_user").await;
+        assert_eq!(p.status().await, 0, "Supabase's own grants are no drift:\n{}", p.peek());
     }
 
     /// How many of `privilege` on the table `table` `role` holds on the database `q`.
