@@ -258,12 +258,15 @@ function globMatcher(glob: string): RegExp {
   return new RegExp(`^${re}$`);
 }
 
-/** The directories under `dir`, `depth` levels down at most, past `node_modules` and hidden ones. */
+/** Directories a workspace's packages never sit in: dependencies and build output. */
+const SKIPPED = new Set(["node_modules", "dist", "build", "out", "target", "coverage"]);
+
+/** The directories under `dir`, `depth` levels down at most, past `SKIPPED` and hidden ones. */
 function directories(dir: string, depth: number): string[] {
   if (depth === 0) return [];
   let names: string[];
   try {
-    names = readdirSync(dir, { withFileTypes: true }).filter((e) => e.isDirectory() && e.name !== "node_modules" && !e.name.startsWith(".")).map((e) => e.name);
+    names = readdirSync(dir, { withFileTypes: true }).filter((e) => e.isDirectory() && !SKIPPED.has(e.name) && !e.name.startsWith(".")).map((e) => e.name);
   } catch {
     return [];
   }
