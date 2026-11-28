@@ -213,17 +213,6 @@ test("with no lock, the migrations run in name order, init.sql first", async () 
   assert.deepEqual(await names(root), ["init.sql", "20261106120000_bio.sql"]);
 });
 
-test("a migration with its own commit gives migrate the deploy's refusal, as it can't run atomically", async () => {
-  const root = project();
-  mkdirSync(join(root, "reylo", "migrations"));
-  writeFileSync(join(root, "reylo", "migrations", "init.sql"), "create table accounts (id integer primary key, balance int not null);\n");
-  writeFileSync(join(root, "reylo", "migrations", "20261106120000_topup.sql"), "update accounts set balance = balance + 100;\ncommit;\ninsert into ledger values (1);\n");
-  assert.equal((await projectMigrations(root)).error, "Migration 20261106120000_topup.sql can't run atomically: it has its own commit, and Reylo runs each migration in a transaction of its own, so take it out");
-  // A trigger's body is one statement, its begin and end included.
-  writeFileSync(join(root, "reylo", "migrations", "20261106120000_topup.sql"), "create trigger topped after update on accounts begin select raise(rollback, 'negative') where new.balance < 0; end;\n");
-  assert.equal((await projectMigrations(root)).error, undefined);
-});
-
 test("the lock under its old name, alone or beside the lock, gives migrate the error to throw, never the migrations in name order", async () => {
   const root = project();
   await change(root, "users", "create table users (id integer primary key, name text not null);\n");

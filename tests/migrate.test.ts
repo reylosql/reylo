@@ -154,9 +154,9 @@ test("migrate(db): a migration that fails rolls back with its row and names itse
     assert.deepEqual(columns, ["id", "name"]);
     await db.exec("pragma foreign_keys = on");
     assert.deepEqual(await runMigrationsOn(db, [USERS, POSTS]), [POSTS.name]);
-    // Turso's engine answers foreign_key_check with no rows before 0.9, so only SQLite's clients find the orphan.
-    if (db === turso) continue;
-    await assert.rejects(runMigrationsOn(db, [USERS, POSTS, ORPHANS]), /^Error: reylo: the migration 20261108120000_orphans\.sql failed on this database, and rolled back: 1 rows break a foreign key after this migration$/);
+    // SQLite's foreign_key_check finds the orphan; Turso's engine before 0.9 answers the check with no
+    // rows, so its foreign keys stay on, and its commit refuses the orphan.
+    await assert.rejects(runMigrationsOn(db, [USERS, POSTS, ORPHANS]), /^Error: reylo: the migration 20261108120000_orphans\.sql failed on this database, and rolled back: (1 rows break a foreign key after this migration|.*FOREIGN KEY constraint failed)$/);
     assert.deepEqual(await names(db), [USERS.name, POSTS.name]);
     const users = (await (await (db.prepare("select count(*) as n from users") as any)).all()) as { n: number }[];
     assert.equal(Number(users[0]!.n), 1);
@@ -217,4 +217,14 @@ test("migrate refuses a client it can't run migrations on, rather than deploying
   // As @libsql/client's, which has execute() and no prepare().
   const client = { execute: async () => ({ rows: [] }), close() {} };
   await assert.rejects((migrate as (arg: unknown) => Promise<string[]>)(client), /^TypeError: reylo: migrate takes a Durable Object's ctx\.storage, an app's own SQLite connection/);
+});
+
+test("migrate(db) refuses a pending migration with its own commit before running any, and leaves one it ran alone", async () => {
+  const TOPUP = { name: "20261106120000_topup.sql", sql: "insert into users (name) values ('ada');\ncommit;\ninsert into nowhere values (1);\n" };
+  const db = new DatabaseSync(":memory:");
+  await assert.rejects(runMigrationsOn(db, [USERS, TOPUP]), /^Error: reylo: the migration 20261106120000_topup\.sql can't run atomically: it has its own commit, and Reylo runs each migration in a transaction of its own, so take it out$/);
+  assert.deepEqual(await names(db), []);
+  // A comment is no statement, whatever it says, as SQLite reads it.
+  const NOTED = { name: "20261106120000_noted.sql", sql: "--Rollback: drop table bio;\nalter table users add column bio text; -- End of file\n" };
+  assert.deepEqual(await runMigrationsOn(db, [USERS, NOTED]), [USERS.name, NOTED.name]);
 });

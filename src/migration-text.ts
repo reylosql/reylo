@@ -170,46 +170,71 @@ const CONTROL = new Set(["BEGIN", "COMMIT", "END", "ROLLBACK", "SAVEPOINT", "REL
  * `end`, `rollback`, `savepoint`, `release`), lowercase, as `atomicity_problem` refuses one
  * (engine/migrate/src/sql.rs), or none. Each migration runs in a transaction of its own, so one that
  * commits partway would leave what ran before its commit in place, with no row in the history to say
- * so. A trigger's body, from its `begin` to the `end` that closes it, is one statement.
+ * so. It reads the text as SQLite does: a `--` comment to the line's end, a `/*` one to the first
+ * `*\/`, quotes doubled inside their own, and a trigger as one statement, which ends at the `;`
+ * after the `end` that closes it, not after a `case`'s `end` or a column named `end` (`new.end`).
  */
 export function transactionControl(sql: string): string | undefined {
-  const text = canonical(sql);
-  let words: string[] = [];
+  let head: string[] = [];
   let trigger = false;
-  let depth = 0;
+  let cases = 0;
+  let afterEnd = false;
+  let afterDot = false;
   let k = 0;
-  while (k < text.length) {
-    const c = text[k]!;
+  while (k < sql.length) {
+    const c = sql[k]!;
+    if (SPACING.test(c)) {
+      k++;
+      continue;
+    }
+    if (c === "-" && sql[k + 1] === "-") {
+      const end = sql.indexOf("\n", k);
+      k = end < 0 ? sql.length : end + 1;
+      continue;
+    }
+    if (c === "/" && sql[k + 1] === "*") {
+      const end = sql.indexOf("*/", k + 2);
+      k = end < 0 ? sql.length : end + 2;
+      continue;
+    }
     if (c === "'" || c === '"' || c === "`" || c === "[") {
       const close = c === "[" ? "]" : c;
-      // A quote doubled inside its own quotes is one character of the text.
       let end = k + 1;
-      for (; end < text.length; end++) {
-        if (text[end] !== close) continue;
-        if (close !== "]" && text[end + 1] === close) end++;
+      for (; end < sql.length; end++) {
+        if (sql[end] !== close) continue;
+        if (close !== "]" && sql[end + 1] === close) end++;
         else break;
       }
       k = end + 1;
-      words.push("");
+      head.push("");
+      afterEnd = afterDot = false;
       continue;
     }
     if (/[A-Za-z_]/.test(c)) {
       let end = k;
-      while (end < text.length && /[A-Za-z0-9_$]/.test(text[end]!)) end++;
-      const word = text.slice(k, end).toUpperCase();
+      while (end < sql.length && /[A-Za-z0-9_$]/.test(sql[end]!)) end++;
+      const word = sql.slice(k, end).toUpperCase();
       k = end;
-      if (words.length === 0 && CONTROL.has(word)) return word.toLowerCase();
-      words.push(word);
-      if (word === "TRIGGER" && words[0] === "CREATE" && words.length <= 3) trigger = true;
-      if (trigger && (word === "BEGIN" || word === "CASE")) depth++;
-      else if (trigger && word === "END") depth--;
+      if (head.length === 0 && CONTROL.has(word)) return word.toLowerCase();
+      head.push(word);
+      if (word === "TRIGGER" && head[0] === "CREATE" && head.length <= 3) trigger = true;
+      const keyword = trigger && !afterDot;
+      afterEnd = false;
+      if (keyword && word === "CASE") cases++;
+      else if (keyword && word === "END") {
+        if (cases > 0) cases--;
+        else afterEnd = true;
+      }
+      afterDot = false;
       continue;
     }
-    if (c === ";" && depth <= 0) {
-      words = [];
+    if (c === ";" && (!trigger || afterEnd)) {
+      head = [];
       trigger = false;
-      depth = 0;
+      cases = 0;
     }
+    afterDot = c === ".";
+    afterEnd = false;
     k++;
   }
   return undefined;

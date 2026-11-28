@@ -12,7 +12,7 @@
 // drives it through its own `begin` and `commit`, awaiting each answer.
 import { buildTime, type MigrateOptions } from "./build-time.ts";
 import { embedded } from "./embedded-migrations.ts";
-import { sameMigration } from "./migration-text.ts";
+import { sameMigration, transactionControl } from "./migration-text.ts";
 
 /** A Durable Object's storage, `ctx.storage`, as far as `migrate` uses it. */
 export type MigrationStorage = {
@@ -40,10 +40,11 @@ const HISTORY = "__reylo_migrations";
 type Step = { exec: string } | { all: string; values?: unknown[] } | { run: string; values: unknown[] } | "begin" | "commit";
 
 /** The database the error messages name, where its migrations came from, and what to do about one it ran that they lack. */
-type Words = { database: string; any: string; source: string; sourceOrder: string; restore: string };
+type Words = { database: string; any: string; source: string; sourceOrder: string; restore: string; atomic: boolean };
 
-const OBJECT: Words = { database: "this Durable Object", any: "an object", source: "this build", sourceOrder: "this build's order", restore: "deploy a build whose migrations include it" };
-const CONNECTION: Words = { database: "this database", any: "a database", source: "the project", sourceOrder: "the lock's order", restore: "put it back in the project's migrations" };
+// A Durable Object's sql.exec refuses a migration's own transaction statements; a connection runs them, so they are refused first.
+const OBJECT: Words = { database: "this Durable Object", any: "an object", source: "this build", sourceOrder: "this build's order", restore: "deploy a build whose migrations include it", atomic: false };
+const CONNECTION: Words = { database: "this database", any: "a database", source: "the project", sourceOrder: "the lock's order", restore: "put it back in the project's migrations", atomic: true };
 
 /**
  * The steps of a deploy's last step on SQLite: the history table made, the history held against
@@ -65,6 +66,13 @@ function* steps(list: readonly Migration[], words: Words): Generator<Step, strin
     if (list[i]?.name !== row.name) throw new Error(`reylo: ${words.database} ran ${row.name} where ${words.sourceOrder} has ${list[i]?.name ?? "nothing"} first: migrations run in the lock's order, so add a new one after those that ran`);
   });
   const done = new Set((ran as { name: string }[]).map((r) => r.name));
+  // As a deploy refuses a migration that can't run atomically (`atomicity_problem` in
+  // engine/migrate/src/sql.rs), before any runs: one with its own commit would leave what ran before
+  // it in place, with no row to say so, and every start would run that part again.
+  for (const m of list) {
+    const control = words.atomic && !done.has(m.name) && m.name !== "init.sql" ? transactionControl(m.sql) : undefined;
+    if (control) throw new Error(`reylo: the migration ${m.name} can't run atomically: it has its own ${control}, and Reylo runs each migration in a transaction of its own, so take it out`);
+  }
   const applied: string[] = [];
   for (const m of list) {
     if (done.has(m.name)) continue;
@@ -75,7 +83,9 @@ function* steps(list: readonly Migration[], words: Words): Generator<Step, strin
     }
     try {
       // Another start of the app, on the same file, may have run it since the history was read.
-      if (((yield { all: `select 1 from ${HISTORY} where name = ?`, values: [m.name] }) ?? []).length) {
+      const [again] = ((yield { all: `select sql from ${HISTORY} where name = ?`, values: [m.name] }) ?? []) as { sql: string }[];
+      if (again) {
+        if (!sameMigration(m.sql, again.sql)) throw new Error(`it isn't the text another start ran under this name`);
         yield "commit";
         continue;
       }
@@ -154,7 +164,7 @@ export function runMigrations(storage: MigrationStorage, list: readonly Migratio
  * migration between its own `begin` and `commit`. As reylo migrate runs one on SQLite (`run_once` in
  * engine/migrate/src/commands.rs), foreign keys are off while it runs, and back on after, so that a
  * rebuilt table's drop cascades to no row of the tables that reference it; the check before the
- * commit holds every key instead.
+ * commit holds every key instead, on an engine whose check holds them.
  */
 export async function runMigrationsOn(db: MigrationConnection, list: readonly Migration[]): Promise<string[]> {
   const run = steps(list, CONNECTION);
@@ -162,9 +172,16 @@ export async function runMigrationsOn(db: MigrationConnection, list: readonly Mi
   const rows = async (sql: string, values: unknown[] = []) => (await (await statement(sql)).all(...values)) as unknown[];
   let open = false;
   let keys = false;
+  // Foreign keys go off only where foreign_key_check holds them instead: on SQLite. Turso's engine
+  // answers the pragma with no rows before 0.9, and a connection can't tell which release it is
+  // (`turso_version()` gives the file's SQLite version once it is written), so its foreign keys stay
+  // as the app set them, and its commit refuses a key the migration broke.
+  let checked: boolean | undefined;
+  const checksKeys = () => rows("select turso_version()").then(() => false, () => true);
   const restore = async () => {
-    if (keys) await db.exec("pragma foreign_keys = on");
+    const was = keys;
     keys = false;
+    if (was) await db.exec("pragma foreign_keys = on");
   };
   let next = run.next();
   try {
@@ -174,8 +191,9 @@ export async function runMigrationsOn(db: MigrationConnection, list: readonly Mi
       try {
         if (step === "begin") {
           // Outside a transaction, where SQLite takes the pragma.
+          checked ??= await checksKeys();
           const [row] = (await rows("pragma foreign_keys")) as Record<string, unknown>[];
-          if (Number(row?.foreign_keys) === 1) {
+          if (checked && Number(row?.foreign_keys) === 1) {
             await db.exec("pragma foreign_keys = off");
             keys = true;
           }
@@ -184,7 +202,6 @@ export async function runMigrationsOn(db: MigrationConnection, list: readonly Mi
         } else if (step === "commit") {
           await db.exec("commit");
           open = false;
-          await restore();
         } else if ("exec" in step) await db.exec(step.exec);
         else if ("all" in step) answer = await rows(step.all, step.values);
         else await (await statement(step.run)).run(...step.values);
@@ -192,6 +209,8 @@ export async function runMigrationsOn(db: MigrationConnection, list: readonly Mi
         next = run.throw(e);
         continue;
       }
+      // Outside the step, since the migration and its row are in place by now.
+      if (step === "commit") await restore();
       next = run.next(answer);
     }
   } catch (e) {

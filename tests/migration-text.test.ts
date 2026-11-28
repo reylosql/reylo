@@ -71,5 +71,11 @@ test("a SQLite migration's own begin, commit, end, rollback, savepoint or releas
     "/* rollback */ create table x (a);",
     "insert into t values ('; commit;'), ('it''s; end');",
     "select [begin; end] from t;",
+    "create table users (id integer primary key);\n--Rollback: drop table users;\n",
+    "create table a (b int); -- don't\ncreate table c (d int);",
+    "create trigger t after update on s begin update s set total = total + new.end - new.start; end; create table x (a);",
   ]) assert.equal(transactionControl(sql), undefined, sql);
+  // An apostrophe in a comment opens no string that hides the commit after it.
+  assert.equal(transactionControl("create table a (b int); -- don't\ncommit;"), "commit");
+  assert.equal(transactionControl("create trigger t after update on s when new.begin > 0 begin select 1; end; commit;"), "commit");
 });
