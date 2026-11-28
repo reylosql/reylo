@@ -7,11 +7,11 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join, relative } from "node:path";
-import { anyEngine, DIAGNOSTIC, engine, reason, MissingEngine, REYLO_VERSION, Unreachable, type Analysis, type Connection, type Engine, type Lexed, type Schema } from "./engine.ts";
+import { anyEngine, DIAGNOSTIC, engine, reason, MissingEngine, REYLO_VERSION, Unreachable, type Analysis, type Engine, type Lexed, type Schema } from "./engine.ts";
 import { packageDir, resolveProject, sqlitePath, type Dialect, type ResolvedProject } from "./project.ts";
 import { NotMysql, refusedLogin } from "./connection.ts";
 import { keptError } from "./server-errors.ts";
-import { appFunctions, NotPrepared, openProjectDrivers, placeRefusal, projectDriverVersions, type SqliteDriver } from "./sqlite-drivers.ts";
+import { NotPrepared, openProjectDrivers, placeRefusal, projectDriverVersions, type SqliteDriver } from "./sqlite-drivers.ts";
 
 /** What `reylo/.cache/` holds for one statement. */
 export type Entry = {
@@ -632,15 +632,14 @@ export class Session {
     // The engine opens the database itself: on SQLite the file the project names, and the statement
     // is prepared on the app's own SQLite drivers too, which are the app's, not the engine's.
     const target = dialect === "sqlite" ? sqlitePath(url, root) : url;
-    // The drivers open first: where one runs Turso's own engine, the engine lists its functions too.
-    const drivers = dialect === "sqlite" ? await openProjectDrivers(root, target) : undefined;
-    let c: Connection;
+    // libpq's variables as the session started, which name its entries, set and unset alike. On
+    // SQLite the project's directory too, whose package.json names the SQLite engines the app runs.
+    const c = await this.#engine.open(target, Object.fromEntries(ENVIRONMENT.map((name) => [name, this.#libpq[name]])), dialect === "sqlite" ? { project: packageDir(root) } : {});
+    let drivers: SqliteDriver[] | undefined;
     try {
-      const functions = appFunctions(drivers ?? []);
-      // libpq's variables as the session started, which name its entries, set and unset alike.
-      c = await this.#engine.open(target, Object.fromEntries(ENVIRONMENT.map((name) => [name, this.#libpq[name]])), functions.length ? { functions } : {});
+      drivers = dialect === "sqlite" ? await openProjectDrivers(root, target) : undefined;
     } catch (e) {
-      await Promise.all((drivers ?? []).map((d) => d.close().catch(() => {})));
+      await c.close();
       throw e;
     }
     return {

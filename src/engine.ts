@@ -294,8 +294,7 @@ export class Engine extends EngineCore {
    * child of its own, so that a server slow to answer holds up no other connection; an Unreachable
    * where it cannot be opened. `variables` stand in for this process's own (one left undefined is
    * unset), for a caller that names its entries by them: the bridge and the child read those.
-   * `options` go to the engine with the request, as SQLite's `functions` (src/sqlite-drivers.ts's
-   * `appFunctions`).
+   * `options` go to the engine with the request, as the project's directory on SQLite (`project`).
    */
   async open(url: string, variables: Record<string, string | undefined> = {}, options: Record<string, unknown> = {}): Promise<Connection> {
     const env = withVariables(process.env, variables);

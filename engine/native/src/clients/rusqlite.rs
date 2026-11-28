@@ -17,8 +17,8 @@ pub fn analyze(conn: &Connection, sql: &str, cache: &mut AnswerCache<Describe>) 
 }
 
 /// [`analyze`], with `functions` (rows of `FUNCTIONS_QUERY`) listed beside the ones `conn`'s SQLite
-/// has: the functions of the app's own SQLite drivers, where they decide what a statement may call
-/// and what it answers with, as Turso's own engine does.
+/// has: those that name the app's own SQLite engines, whose answers differ (`engine_functions` in
+/// the SQLite program).
 pub fn analyze_with(conn: &Connection, sql: &str, cache: &mut AnswerCache<Describe>, functions: &[Vec<Value>]) -> Result<Analysis, ReplayError<HostError>> {
     crate::replay::run::<Sqlite, _>(sql, &mut Listing { answers: Answers(conn), functions }, cache)
 }

@@ -312,14 +312,14 @@ test("the sqlean functions the driver check lets through are the ones the engine
 
 const turso = skip || (!existsSync(join(DRIVERS, "@tursodatabase", "database")) && "lab/drivers has no @tursodatabase/database installed");
 
-/** A project on a file Turso's own engine made, with a full-text index unless `fts` is false, and defaults that call its functions. */
-async function tursoProject(drivers: string[], fts = true): Promise<{ root: string; env: Record<string, string> }> {
+/** A project on a file Turso's own engine made, with a full-text index, and defaults that call its functions; each of `drivers` is listed, and installed unless `unlinked` names it. */
+async function tursoProject(drivers: string[], unlinked: string[] = []): Promise<{ root: string; env: Record<string, string> }> {
   const root = mkdtempSync(join(tmpdir(), "reylo-turso-"));
   writeFileSync(join(root, "package.json"), JSON.stringify({ dependencies: Object.fromEntries(drivers.map((d) => [d, "*"])) }));
-  for (const d of drivers) link(root, d);
+  for (const d of drivers) if (!unlinked.includes(d)) link(root, d);
   const db = await tursoConnect(join(root, "app.db"));
   await db.exec("create table docs (id integer primary key, title text, body text not null)");
-  if (fts) await db.exec("create index docs_fts on docs using fts (title, body)");
+  await db.exec("create index docs_fts on docs using fts (title, body)");
   await db.exec("create table users (id integer primary key, name text not null, public_id text not null unique default (uuid4_str()), stamp blob not null default (time_now()))");
   await db.exec("insert into docs (title, body) values ('kiwi', 'apple pie'), (null, 'kiwi and banana')");
   await db.exec("insert into users (name) values ('Ada')");
@@ -340,7 +340,7 @@ const TURSO_CALLS: [string, Record<string, unknown>?][] = [
   ["fts_match(title, body, :q)", { q: "kiwi" }], ["fts_score(title, body, :q)", { q: "kiwi" }], ["fts_highlight(body, :q, '<b>', '</b>')", { q: "kiwi" }], ["fts_highlight(title, 'kiwi', '<b>', '</b>')"],
   ["vector32_sparse(:v)", { v: "[1,0,2]" }], ["vector_concat(vector(:v), vector(:w))", { v: "[1,2]", w: "[3]" }], ["vector_slice(vector(:v), :from, 2)", { v: "[1,2,3]", from: 0 }],
   ["vector_distance_dot(vector(:v), vector(:w))", { v: "[1,2]", w: "[3,4]" }], ["vector_distance_jaccard(vector(:v), vector(:w))", { v: "[1,2]", w: "[3,4]" }],
-  ["time_now()"], ["time_date(2024, 1, 2, 3, 4, 5)"], ["time_get(time_now(), :field)", { field: "second" }], ["time_get(time_now(), :field)", { field: "year" }], ["time_get(time_now(), 'second')"], ["time_get(time_now(), 'epoch')"], ["time_get(time_now(), 'year')"],
+  ["time_now()"], ["time_date(2024, 1, 2, 3, 4, 5)"], ["time_date(:year, 1, 1)", { year: 300000 }], ["body regexp :re", { re: "(" }], ["time_get(time_now(), :field)", { field: "second" }], ["time_get(time_now(), :field)", { field: "year" }], ["time_get(time_now(), 'second')"], ["time_get(time_now(), 'epoch')"], ["time_get(time_now(), 'year')"],
   ...["year", "month", "day", "hour", "minute", "second", "nano", "weekday", "yearday", "isoyear", "isoweek"].map((f) => [`time_get_${f}(time_now())`] as [string]),
   ["time_unix(:s)", { s: 1700000000 }], ["time_milli(1700000000000)"], ["time_micro(1)"], ["time_nano(1)"],
   ...["unix", "milli", "micro", "nano"].map((u) => [`time_to_${u}(time_unix(1700000000))`] as [string]),
@@ -391,9 +391,13 @@ test("a file Turso's own engine made is read, full-text index and all, and its f
   assert.deepEqual([...known].filter((name) => !TURSO_CALLS.some(([call]) => call.includes(`${name}(`))), []);
 });
 
-test("a project that runs libSQL beside Turso's own engine types uuid4() as either's value", { skip: turso, timeout: 60_000 }, async () => {
-  // libSQL's SQLite can't read a file with a full-text index, and a driver that can't open the file is left out.
-  const { root, env } = await tursoProject(["@tursodatabase/database", "@libsql/client"], false);
-  const outcome = await analyze(root, env, "select uuid4() as v");
-  assert.equal(outcome.analysis.columns[0]!.type.kind, "unknown");
+test("uuid4() follows the SQLite engines package.json names, installed or not", { skip: turso, timeout: 60_000 }, async () => {
+  const uuid = async (drivers: string[], unlinked: string[] = []) => {
+    const { root, env } = await tursoProject(drivers, unlinked);
+    return (await analyze(root, env, "select uuid4() as v")).analysis.columns[0]!.type.kind;
+  };
+  // Beside libSQL, whose SQLite can't even open this file, it's either's value.
+  assert.equal(await uuid(["@tursodatabase/database", "@libsql/client"]), "unknown");
+  assert.equal(await uuid(["@tursodatabase/database"], ["@tursodatabase/database"]), "bytes");
+  assert.equal(await uuid(["@libsql/client"], ["@libsql/client"]), "text");
 });

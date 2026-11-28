@@ -268,4 +268,5 @@ About its SQL:
 - The type check reads a file that has a full-text index, which SQLite can't make.
 - On Turso's engine, `uuid4()` and `uuid7()` return a `Uint8Array`. On Turso Cloud they return a string, so with both drivers in your `package.json` they're `unknown`. For a string on Turso's engine, call `uuid4_str()` or `uuid7_str()`.
 - A time from the time functions, as `time_now()`, is a `Uint8Array`. A duration is a number of nanoseconds.
+- Turso's engine returns `NULL` from `regexp` for a pattern it can't compile, so a match there is `boolean | null`.
 - Another driver in your `package.json`, such as `better-sqlite3`, refuses these functions in the type check.

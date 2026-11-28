@@ -1602,6 +1602,13 @@ fn skipping_triggers(triggers: &[String]) -> HashMap<String, i32> {
     out
 }
 
+/// The SQLite engines beside its own that the app runs on ([`Analyzer::app_runs`]).
+#[derive(Debug, Clone, Copy)]
+struct AppEngines {
+    turso: bool,
+    libsql: bool,
+}
+
 /// When a function's result can be NULL.
 #[derive(Clone, Copy)]
 enum Nulls {
@@ -2154,6 +2161,9 @@ impl Analyzer<'_> {
             "json_remove" => done("text", if args.len() == 1 { Nulls::IfArgs } else { Nulls::Always }),
             // `unicode('')` is NULL: an empty string has no first character.
             "unicode" => done("integer", Nulls::Always),
+            // Turso's own engine answers `regexp` with NULL for a pattern it can't compile, where
+            // sqlean's raises an error.
+            "regexp" if self.app_runs().turso => done("integer", Nulls::Always),
             "like" | "glob" | "regexp" | "match" | "likely" | "unlikely" | "likelihood" => {
                 if matches!(name, "likely" | "unlikely" | "likelihood") { first.clone() } else { done("integer", Nulls::IfArgs) }
             }
@@ -2234,14 +2244,14 @@ impl Analyzer<'_> {
             // The sqlean extensions Turso Cloud loads (`csrc/reylo_sqlite.c`, `aTurso`), as
             // libsql-ffi 0.10.0 builds them, each by its own name ([`sqlean_alias`]).
             // uuid: a new identifier every call, and a malformed one read as NULL.
-            // Turso's own engine answers `uuid4()` and `uuid7()` with the 16 bytes, where sqlean's
-            // write the text: the host lists Turso's functions where its driver is the app's
-            // ([`Analyzer::uuid_bytes`]). `uuid7(seconds)`, Turso's alone, is NULL for a value it
-            // can't read as a time.
-            "uuid4" | "uuid7" if args.is_empty() => match self.uuid_bytes() {
-                Some(true) => done("blob", Nulls::Never),
-                Some(false) => done("text", Nulls::Never),
-                None => Fact { ty: Ty::Unknown, non_null: true },
+            // Turso's own engine answers `uuid4()` and `uuid7()` with the 16 bytes, where sqlean's,
+            // which Turso Cloud loads, write the text; an app that runs both gets either
+            // ([`Analyzer::app_runs`]). `uuid7(seconds)`, Turso's alone, is NULL for a value it can't
+            // read as a time.
+            "uuid4" | "uuid7" if args.is_empty() => match self.app_runs() {
+                AppEngines { turso: true, libsql: false } => done("blob", Nulls::Never),
+                AppEngines { turso: false, .. } => done("text", Nulls::Never),
+                AppEngines { turso: true, libsql: true } => Fact { ty: Ty::Unknown, non_null: true },
             },
             "uuid7" => done("blob", Nulls::Always),
             "gen_random_uuid" | "uuid4_str" | "uuid7_str" => done("text", Nulls::Never),
@@ -2289,17 +2299,20 @@ impl Analyzer<'_> {
             "vector32_sparse" | "vector_concat" | "vector_slice" => done("blob", Nulls::Never),
             "vector_distance_dot" | "vector_distance_jaccard" => done("real", Nulls::Always),
             // sqlean's time functions: a time is its blob and a duration an integer of
-            // nanoseconds. Each is an error on an argument it can't read, NULL included, never
-            // NULL. `time_get` answers a real for `second` and `epoch`, which carry a fraction, and
-            // an integer for every other field it knows, so a field it isn't written with is either.
-            "time_now" | "time_date" | "time_unix" | "time_milli" | "time_micro" | "time_nano" | "time_add" | "time_add_date" | "time_trunc" | "time_round"
+            // nanoseconds. Each is an error on an argument it can't read, NULL included, and an
+            // arithmetic overflow is an error too, or clamped. Only `time_date` is NULL, for a date
+            // past what it can hold, as the year 300000. `time_get` answers a real for `second` and
+            // `epoch`, which carry a fraction, and an integer for every other field it knows (by
+            // its exact name), so a field it isn't written with is either.
+            "time_date" => done("blob", Nulls::Always),
+            "time_now" | "time_unix" | "time_milli" | "time_micro" | "time_nano" | "time_add" | "time_add_date" | "time_trunc" | "time_round"
             | "time_parse" => done("blob", Nulls::Never),
             "time_get_year" | "time_get_month" | "time_get_day" | "time_get_hour" | "time_get_minute" | "time_get_second" | "time_get_nano" | "time_get_weekday"
             | "time_get_yearday" | "time_get_isoyear" | "time_get_isoweek" | "time_to_unix" | "time_to_milli" | "time_to_micro" | "time_to_nano" | "time_after"
             | "time_before" | "time_compare" | "time_equal" | "time_sub" | "time_since" | "time_until" | "dur_ns" | "dur_us" | "dur_ms" | "dur_s" | "dur_m" | "dur_h" => {
                 done("integer", Nulls::Never)
             }
-            "time_get" => match n.args.get(1).and_then(literal_text).map(str::to_ascii_lowercase).as_deref() {
+            "time_get" => match n.args.get(1).and_then(literal_text) {
                 Some("second" | "epoch") => done("real", Nulls::Never),
                 Some(_) => done("integer", Nulls::Never),
                 None => done("number", Nulls::Never),
@@ -2309,17 +2322,13 @@ impl Analyzer<'_> {
         }
     }
 
-    /// Whether `uuid4()` and `uuid7()` answer with bytes: Some(true) where the host lists the
-    /// functions of Turso's own engine (its `uuid4_str`, which no other SQLite has) and nothing of
-    /// libSQL's, Some(false) where it lists none of Turso's, as on Turso Cloud, whose sqlean
-    /// extension writes the text, and None where it lists both, whose values differ.
-    fn uuid_bytes(&self) -> Option<bool> {
+    /// The SQLite engines the app runs on, which the host names by a function each has alone: Turso's
+    /// own engine's `uuid4_str`, and libSQL's `libsql_vector_idx` (as engine/native's SQLite program
+    /// lists them from the project's `package.json`). Neither where it names none, as a host that
+    /// knows nothing of the app.
+    fn app_runs(&self) -> AppEngines {
         let lists = |name: &str| self.extras.host.as_ref().is_some_and(|h| h.iter().any(|f| f.name.eq_ignore_ascii_case(name)));
-        match (lists("uuid4_str"), lists("libsql_vector_idx")) {
-            (true, false) => Some(true),
-            (true, true) => None,
-            (false, _) => Some(false),
-        }
+        AppEngines { turso: lists("uuid4_str"), libsql: lists("libsql_vector_idx") }
     }
 
     // ---- built JSON ----------------------------------------------------------------------------
@@ -5150,8 +5159,8 @@ mod tests {
             let ids = a("select uuid4_str() as a, uuid7_str() as b, uuid7_str(:at) as c, uuid7(:at2) as d, gen_random_uuid() as e");
             assert_eq!(["a", "b", "c", "d", "e"].map(|c| col(&ids, c)), [("text", false), ("text", false), ("text", false), ("blob", true), ("text", false)].map(|(t, n)| (t.to_string(), n)));
             assert_eq!((param(&ids, "at"), param(&ids, "at2")), ("integer".into(), "integer".into()));
-            let fields = a("select time_get(stamp, 'second') as a, time_get(stamp, 'Epoch') as b, time_get(stamp, 'year') as c from users");
-            assert_eq!(["a", "b", "c"].map(|c| col(&fields, c)), [("real", false), ("real", false), ("integer", false)].map(|(t, n)| (t.to_string(), n)));
+            let fields = a("select time_get(stamp, 'second') as a, time_get(stamp, 'epoch') as b, time_get(stamp, 'year') as c, time_date(:year, 1, 1) as d from users");
+            assert_eq!(["a", "b", "c", "d"].map(|c| col(&fields, c)), [("real", false), ("real", false), ("integer", false), ("blob", true)].map(|(t, n)| (t.to_string(), n)));
             let times = a("select time_now() as a, time_unix(:s) as b, time_get_year(stamp) as c, time_get(stamp, :field) as d, time_fmt_iso(stamp, :offset) as e, time_after(stamp, time_now()) as f, time_sub(time_now(), stamp) as g, dur_h() as h, time_trunc(stamp, 'day') as i, time_parse(:text) as j from users");
             assert_eq!(["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"].map(|c| col(&times, c)), [("blob", false), ("blob", false), ("integer", false), ("number", false), ("text", false), ("bool", false), ("integer", false), ("integer", false), ("blob", false), ("blob", false)].map(|(t, n)| (t.to_string(), n)));
             assert_eq!(["s", "field", "offset", "text"].map(|p| param(&times, p)), ["integer", "text", "integer", "text"].map(String::from));
@@ -5169,6 +5178,9 @@ mod tests {
         assert_eq!(fresh(&turso_host(false)), (("blob".into(), false), ("blob".into(), false)));
         assert_eq!(fresh(&sqlite_host()), (("text".into(), false), ("text".into(), false)));
         assert_eq!(fresh(&turso_host(true)), (("unknown".into(), false), ("unknown".into(), false)));
+        // Turso's engine answers NULL for a pattern it can't compile, where sqlean's raises an error.
+        let matched = |extras: &Extras| col(&analyze_ddl("select body regexp :re as m from docs", &turso_schema(), extras).analysis, "m");
+        assert_eq!((matched(&turso_host(false)), matched(&sqlite_host())), (("bool".into(), true), ("bool".into(), false)));
     }
 
     #[test]

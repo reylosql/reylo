@@ -30,8 +30,6 @@ export interface SqliteDriver {
   refuses(sql: string, params: number): Promise<string | undefined>;
   /** The error a refusal is: "@libsql/client runs SQLite 3.45.1, which refuses this statement: …". */
   says(refusal: string): string;
-  /** The functions its SQLite lists, as rows of `name, narg, type` from `pragma_function_list`, where the driver reads them (`appFunctions`). */
-  functions?(): unknown[][];
   close(): Promise<void>;
 }
 
@@ -40,28 +38,8 @@ type Open = (require: Require, path: string) => Promise<SqliteDriver>;
 
 /** better-sqlite3's API, which the `libsql` package and Turso's compat module copy. */
 interface SyncDatabase {
-  prepare(sql: string): { get(): unknown; all(): unknown[] };
+  prepare(sql: string): { get(): unknown };
   close(): void;
-}
-
-/**
- * The functions of the app's own SQLite drivers that the engine lists beside its own (`functions` on
- * the engine's `open`, engine/native/src/sqlite.rs), as rows of `name, narg, type`: Turso's own
- * engine answers `uuid4()` and `uuid7()` with bytes where sqlean, which Turso Cloud loads, writes
- * the text, so where the project runs Turso's engine its functions tell the engine which (with
- * libSQL's beside them where it runs libSQL too, whose values then differ). Nothing where it runs no
- * Turso engine, and the engine lists only its own.
- */
-export function appFunctions(drivers: readonly SqliteDriver[]): unknown[][] {
-  if (!drivers.some((d) => d.name === "@tursodatabase/database")) return [];
-  return drivers.filter((d) => d.name === "@tursodatabase/database" || d.name === "@libsql/client" || d.name === "libsql").flatMap((d) => {
-    // A driver that can't list them leaves the engine with what the others list.
-    try {
-      return d.functions?.() ?? [];
-    } catch {
-      return [];
-    }
-  });
 }
 
 /**
@@ -208,8 +186,6 @@ function sync(name: string, db: SyncDatabase, server = false): SqliteDriver {
   return {
     name,
     says: (refusal) => `${name} runs SQLite ${row.v}, which refuses this statement: ${refusal}`,
-    functions: () =>
-      (db.prepare("select name, narg, type from pragma_function_list").all() as { name: unknown; narg: unknown; type: unknown }[]).map((r) => [r.name, r.narg, r.type]),
     async refuses(sql) {
       let text = sql;
       for (;;) {
