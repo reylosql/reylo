@@ -589,9 +589,19 @@ export function resolveProject(engine: Engine | MissingEngine, projectDir: strin
       const value = CERTIFICATE_VARIABLES.has(name) && file.vars[name] && file.vars[name] !== "system" ? resolve(root, file.vars[name]!) : file.vars[name]!;
       hits.set(name, { value, path: file.path });
     }
-    const folded = withEnvFiles(url, (name) => hits.get(name)?.value);
+    const app = url;
+    const fold = (fresh: string) => (fresh === app ? withEnvFiles(fresh, (name) => hits.get(name)?.value) : { url: fresh, names: [] });
+    const folded = fold(url);
     url = folded.url;
     if (folded.names.length) urlSource += `, ${folded.names.map((name) => `${name} in ${shown(hits.get(name)!.path)}`).join(", ")}`;
+    // A command's URL run again after a refused login is folded again, as the first was.
+    if (refreshUrl) {
+      const refresh = refreshUrl;
+      refreshUrl = () => {
+        const again = refresh();
+        return again === undefined ? undefined : fold(again).url;
+      };
+    }
   }
   let dialect = url ? dialectOf(url) : "postgres";
   if (url && !dialect) error ??= `Cannot tell the database from the URL (${urlSource}): reylo reads postgres://, postgresql://, mysql://, file: and sqlite: URLs, and for ClickHouse clickhouse+http:// or clickhouse+https://, the URL of its HTTP interface.`;

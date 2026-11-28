@@ -538,7 +538,7 @@ fn place(url: &str) -> String {
         _ => (host, None),
     };
     let name = param("host").unwrap_or_else(|| if own_host.is_empty() { "localhost".to_string() } else { own_host.to_string() });
-    let host = match param("port").or_else(|| own_port.map(String::from)) {
+    let host = match param("port").filter(|p| !p.is_empty()).or_else(|| own_port.map(String::from)) {
         Some(port) => format!("{name}:{port}"),
         None => name,
     };
