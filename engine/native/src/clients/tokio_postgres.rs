@@ -9,6 +9,7 @@ use crate::{server_errors, AnswerCache, Analysis, AsyncAnswerer, DbError, HostEr
 use ::tokio_postgres::types::{ToSql, Type};
 use ::tokio_postgres::{Client, Statement};
 use reylo_engine_core::database::Database;
+use reylo_engine_postgres::schema_fingerprint::UNUSABLE_SCHEMAS_QUERY;
 use reylo_engine_postgres::Postgres;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -233,25 +234,25 @@ async fn query(client: &Client, prepared: Option<&Prepared>, sql: &str, params: 
 /// schema is refused by its own describe, which says so at its place, and one that reaches it only
 /// through a view is analyzed without what the role may not read, which each reader of a refused
 /// query takes as unknown. Any other refusal is of the catalog, and the analysis cannot be made.
+/// Where the server cannot be asked which schemas the role may not use (the session ended, or a
+/// transaction of the caller's the refusal aborted), the refusal is `None` too.
 async fn refusal(client: &Client, e: &::tokio_postgres::Error, params: &[Value]) -> Option<Result<DbError, HostError>> {
     let d = e.as_db_error().filter(|d| *d.code() == ::tokio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE)?;
     let answer = DbError { message: d.message().to_string(), code: Some(d.code().code().to_string()), position: None };
     let mut schemas = Vec::new();
     params.iter().for_each(|param| qualifiers(param, &mut schemas));
-    let unusable = if schemas.is_empty() { Ok(Vec::new()) } else { client.query(UNUSABLE_SCHEMAS_QUERY, &[&schemas]).await };
-    Some(match unusable {
-        Ok(rows) if !rows.is_empty() => Ok(answer),
-        _ => Err(HostError(format!("The type check's role may not use part of the catalog the analysis reads: {}. Grant it, or run the type check as a role that may", pg_message(e)))),
+    let unusable = if schemas.is_empty() { Vec::new() } else { client.query(UNUSABLE_SCHEMAS_QUERY, &[&schemas]).await.ok()? };
+    Some(if unusable.is_empty() {
+        Err(HostError(format!("The type check's role may not use part of the catalog the analysis reads: {}. Grant it, or run the type check as a role that may", pg_message(e))))
+    } else {
+        Ok(answer)
     })
 }
 
-/// The schemas among `$1` the session's role may not use.
-const UNUSABLE_SCHEMAS_QUERY: &str = "SELECT n.nspname::pg_catalog.text FROM pg_catalog.pg_namespace n \
-    WHERE n.nspname OPERATOR(pg_catalog.=) ANY ($1::pg_catalog.name[]) AND NOT pg_catalog.has_schema_privilege(n.oid, 'USAGE'::pg_catalog.text)";
-
 /// The schema each name among `value`'s strings is qualified by, as the server reads a name: a
-/// part in double quotes as written (a doubled quote one), any other folded to lowercase, and the
-/// schema the part before the last.
+/// part in double quotes as written (a doubled quote one), any other with its ASCII letters folded
+/// to lowercase, as a database in a multibyte encoding folds them, and the schema the part before
+/// the last.
 fn qualifiers(value: &Value, out: &mut Vec<String>) {
     match value {
         Value::String(name) => {
@@ -267,7 +268,7 @@ fn qualifiers(value: &Value, out: &mut Vec<String>) {
                     '"' => quoted = !quoted,
                     '.' if !quoted => parts.push(String::new()),
                     c if quoted => parts.last_mut().expect("one part at least").push(c),
-                    c => parts.last_mut().expect("one part at least").extend(c.to_lowercase()),
+                    c => parts.last_mut().expect("one part at least").push(c.to_ascii_lowercase()),
                 }
             }
             if parts.len() >= 2 {
@@ -368,7 +369,7 @@ mod tests {
             qualifiers(&value, &mut out);
             out
         };
-        assert_eq!(schemas(json!(["Hidden.items", "items", "\"My.Schema\".t", "db.s.t", "\"a\"\"b\".t"])), ["hidden", "My.Schema", "s", "a\"b"]);
+        assert_eq!(schemas(json!(["Hidden.items", "items", "\"My.Schema\".t", "db.s.t", "\"a\"\"b\".t", "Émoi.seq"])), ["hidden", "My.Schema", "s", "a\"b", "Émoi"]);
         assert_eq!(schemas(json!([3, null, "f"])), Vec::<String>::new());
     }
 
