@@ -943,30 +943,34 @@ static const struct TursoFunction { const char *zName; int nArg; char cKind; int
   {"regexp", 2, 's', D}, {"regexp_capture", 2, 's', D}, {"regexp_capture", 3, 's', D},
   {"regexp_like", 2, 's', D}, {"regexp_replace", 3, 's', D}, {"regexp_substr", 2, 's', D},
 };
-/* Turso's own engine (@tursodatabase/database, 0.8.4), its in-tree extensions as its
-** pragma_function_list lists them, -1 where it takes any count and checks the count itself:
-** registered only where the host lists Turso's engine among the app's (its `uuid4_str`, which
-** engine/native's SQLite program lists from the project's package.json), since no other SQLite
-** runs them, and `uuid7(seconds)` would otherwise pass for sqlean's `uuid7()`. */
+/* Turso's own engine (@tursodatabase/database, 0.8.4), its in-tree extensions, at the argument
+** counts each takes, which Turso checks only as a statement runs: a count below -1 is a minimum,
+** -2 for two or more. Registered only where the host lists Turso's engine among the app's (its
+** `uuid4_str`, which engine/native's SQLite program lists from the project's package.json), since
+** no other SQLite runs them, and `uuid7(seconds)` would otherwise pass for sqlean's `uuid7()`. */
 static const struct TursoFunction aTursoEngine[] = {
-  {"uuid4_str", 0, 's', I}, {"uuid7", 1, 's', I}, {"uuid7_str", -1, 's', I},
-  {"fts_match", -1, 's', DI}, {"fts_score", -1, 's', DI}, {"fts_highlight", -1, 's', DI},
+  {"uuid4_str", 0, 's', I}, {"uuid7", 1, 's', I}, {"uuid7_str", 0, 's', I}, {"uuid7_str", 1, 's', I},
+  {"fts_match", -2, 's', DI}, {"fts_score", -1, 's', DI}, {"fts_highlight", -4, 's', DI},
   {"vector32_sparse", 1, 's', DI}, {"vector_concat", 2, 's', DI}, {"vector_slice", 3, 's', DI},
   {"vector_distance_dot", 2, 's', DI}, {"vector_distance_jaccard", 2, 's', DI},
-  {"time_now", -1, 's', I}, {"time_date", -1, 's', DI}, {"time_get", -1, 's', DI},
-  {"time_get_year", -1, 's', DI}, {"time_get_month", -1, 's', DI}, {"time_get_day", -1, 's', DI},
-  {"time_get_hour", -1, 's', DI}, {"time_get_minute", -1, 's', DI}, {"time_get_second", -1, 's', DI},
-  {"time_get_nano", -1, 's', DI}, {"time_get_weekday", -1, 's', DI}, {"time_get_yearday", -1, 's', DI},
-  {"time_get_isoyear", -1, 's', DI}, {"time_get_isoweek", -1, 's', DI},
-  {"time_unix", -1, 's', DI}, {"time_milli", -1, 's', DI}, {"time_micro", -1, 's', DI}, {"time_nano", -1, 's', DI},
-  {"time_to_unix", -1, 's', DI}, {"time_to_milli", -1, 's', DI}, {"time_to_micro", -1, 's', DI}, {"time_to_nano", -1, 's', DI},
-  {"time_after", -1, 's', DI}, {"time_before", -1, 's', DI}, {"time_compare", -1, 's', DI}, {"time_equal", -1, 's', DI},
-  {"time_add", -1, 's', DI}, {"time_add_date", -1, 's', DI}, {"time_sub", -1, 's', DI},
-  {"time_since", -1, 's', I}, {"time_until", -1, 's', I}, {"time_trunc", -1, 's', DI}, {"time_round", -1, 's', DI},
-  {"time_fmt_iso", -1, 's', DI}, {"time_fmt_datetime", -1, 's', DI}, {"time_fmt_date", -1, 's', DI},
-  {"time_fmt_time", -1, 's', DI}, {"time_parse", -1, 's', DI},
-  {"dur_ns", -1, 's', DI}, {"dur_us", -1, 's', DI}, {"dur_ms", -1, 's', DI}, {"dur_s", -1, 's', DI},
-  {"dur_m", -1, 's', DI}, {"dur_h", -1, 's', DI},
+  {"time_now", 0, 's', I}, {"time_date", 3, 's', DI}, {"time_date", 6, 's', DI}, {"time_date", 7, 's', DI},
+  {"time_date", 8, 's', DI}, {"time_get", 2, 's', DI},
+  {"time_get_year", 1, 's', DI}, {"time_get_month", 1, 's', DI}, {"time_get_day", 1, 's', DI},
+  {"time_get_hour", 1, 's', DI}, {"time_get_minute", 1, 's', DI}, {"time_get_second", 1, 's', DI},
+  {"time_get_nano", 1, 's', DI}, {"time_get_weekday", 1, 's', DI}, {"time_get_yearday", 1, 's', DI},
+  {"time_get_isoyear", 1, 's', DI}, {"time_get_isoweek", 1, 's', DI},
+  {"time_unix", 1, 's', DI}, {"time_unix", 2, 's', DI}, {"time_milli", 1, 's', DI}, {"time_micro", 1, 's', DI},
+  {"time_nano", 1, 's', DI}, {"time_to_unix", 1, 's', DI}, {"time_to_milli", 1, 's', DI},
+  {"time_to_micro", 1, 's', DI}, {"time_to_nano", 1, 's', DI},
+  {"time_after", 2, 's', DI}, {"time_before", 2, 's', DI}, {"time_compare", 2, 's', DI}, {"time_equal", 2, 's', DI},
+  {"time_add", 2, 's', DI}, {"time_add_date", 2, 's', DI}, {"time_add_date", 3, 's', DI},
+  {"time_add_date", 4, 's', DI}, {"time_sub", 2, 's', DI}, {"time_since", 1, 's', I}, {"time_until", 1, 's', I},
+  {"time_trunc", 2, 's', DI}, {"time_round", 2, 's', DI},
+  {"time_fmt_iso", 1, 's', DI}, {"time_fmt_iso", 2, 's', DI}, {"time_fmt_datetime", 1, 's', DI},
+  {"time_fmt_datetime", 2, 's', DI}, {"time_fmt_date", 1, 's', DI}, {"time_fmt_date", 2, 's', DI},
+  {"time_fmt_time", 1, 's', DI}, {"time_fmt_time", 2, 's', DI}, {"time_parse", 1, 's', DI},
+  {"dur_ns", 0, 's', DI}, {"dur_us", 0, 's', DI}, {"dur_ms", 0, 's', DI}, {"dur_s", 0, 's', DI},
+  {"dur_m", 0, 's', DI}, {"dur_h", 0, 's', DI},
 };
 #undef D
 #undef I
@@ -1095,10 +1099,15 @@ static void openLibsql(sqlite3_str *errors, int turso){
     else rc = sqlite3_create_function_v2(gDb, f->zName, f->nArg, f->flags, 0, hostFunctionStub, 0, 0, 0);
     if( rc!=SQLITE_OK ) functionError(errors, f->zName);
   }
-  /* This build has none of Turso's own, which are all scalar. */
+  /* This build has none of Turso's own, which are all scalar; one with a minimum count is
+  ** registered at each count from it to the most a function may take. */
   for(i=0; turso && i<(int)(sizeof(aTursoEngine)/sizeof(aTursoEngine[0])); i++){
     const struct TursoFunction *f = &aTursoEngine[i];
-    if( sqlite3_create_function_v2(gDb, f->zName, f->nArg, f->flags, 0, hostFunctionStub, 0, 0, 0)!=SQLITE_OK ) functionError(errors, f->zName);
+    int n = f->nArg < -1 ? -f->nArg : f->nArg;
+    int last = f->nArg < -1 ? sqlite3_limit(gDb, SQLITE_LIMIT_FUNCTION_ARG, -1) : n;
+    for(; n<=last; n++){
+      if( sqlite3_create_function_v2(gDb, f->zName, n, f->flags, 0, hostFunctionStub, 0, 0, 0)!=SQLITE_OK ){ functionError(errors, f->zName); break; }
+    }
   }
   if( sqlite3_create_module(gDb, "vector_top_k", &vectorTopKModule, 0)!=SQLITE_OK ) functionError(errors, "vector_top_k");
   if( sqlite3_create_module(gDb, "generate_series", &seriesModule, 0)!=SQLITE_OK ) functionError(errors, "generate_series");

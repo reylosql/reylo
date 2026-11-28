@@ -346,7 +346,7 @@ fn turso_schema(e: &rusqlite::Error) -> bool {
 /// The tables, views and indexes `sqlite_schema` lists that SQLite didn't read, as it skips a row it
 /// can't parse once the schema is writable: each one's name and DDL. (A trigger has no list to hold
 /// it to; one that didn't parse is reported by the replay, if a statement it fires on fails.)
-const UNREAD_QUERY: &str = "select name, sql from sqlite_schema s where sql is not null and ((type in ('table', 'view') and not exists (select 1 from pragma_table_list t where t.schema = 'main' and t.name = s.name)) or (type = 'index' and not exists (select 1 from pragma_index_list(s.tbl_name) i where i.name = s.name)))";
+const UNREAD_QUERY: &str = "select name, sql from sqlite_schema s where sql is not null and ((type in ('table', 'view') and name not in (select name from pragma_table_list where schema = 'main')) or (type = 'index' and not exists (select 1 from pragma_index_list(s.tbl_name) i where i.name = s.name)))";
 
 /// Reads the schema past Turso's own rows: with the schema writable, SQLite keeps every row it can
 /// parse, and the engine's catalog query still lists each row's DDL

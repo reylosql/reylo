@@ -5168,6 +5168,11 @@ mod tests {
             let search = a("select id, fts_score(title, body, :q) as score, fts_match(title, body, :q2) as hit, fts_highlight(title, body, '<b>', '</b>', :q3) as a, fts_highlight(title, '<b>', '</b>', 'kiwi') as b, fts_highlight(body, :open, '</b>', 'kiwi') as c from docs where fts_match(title, body, :q4) order by score desc");
             assert_eq!(["score", "hit", "a", "b", "c"].map(|c| col(&search, c)), [("real", false), ("bool", false), ("text", false), ("text", false), ("text", false)].map(|(t, n)| (t.to_string(), n)));
             assert_eq!(["q", "q2", "q3", "q4", "open"].map(|p| param(&search, p)), ["text"; 5].map(String::from));
+            // Turso checks a call's argument count only as it runs, so the type check does: a highlight
+            // takes a text column at least, and a date three parts, or six, seven or eight.
+            for sql in ["select fts_highlight('<b>', '</b>', 'kiwi') as h", "select time_date(2024, 1) as d", "select time_now(1) as t", "select fts_match('kiwi') as m"] {
+                assert!(!analyze_ddl(sql, &turso_schema(), &extras).analysis.diagnostics.is_empty(), "{sql}");
+            }
             // A NULL query or marker makes the highlight NULL; a NULL text column is skipped.
             let nullable = a("select fts_highlight(body, title, '</b>', 'kiwi') as a from docs");
             assert_eq!(col(&nullable, "a"), ("text".into(), true));
