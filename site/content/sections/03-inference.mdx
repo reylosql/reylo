@@ -385,9 +385,8 @@ with input as (
   }') as f)
 )
 select p.id, p.title, u.name as author
-from posts p
+from input, posts p
 join users u on u.id = p.user_id
-cross join input
 where p.title like concat('%', input.q, '%')
   and (input.author_id is null or p.user_id = input.author_id)
   and case input.status
@@ -416,9 +415,8 @@ with input as (
   }') as f) as f
 )
 select p.id, p.title, u.name as author
-from posts p
+from input, posts p
 join users u on u.id = p.user_id
-cross join input
 where p.title like concat('%', input.q, '%')
   and (input.author_id is null or p.user_id = input.author_id)
   and case input.status
@@ -447,9 +445,8 @@ with input as (
   }') as f)
 )
 select p.id, p.title, u.name as author
-from posts p
+from input, posts p
 join users u on u.id = p.user_id
-cross join input
 where p.title like concat('%', input.q, '%')
   and (input.author_id is null or p.user_id = input.author_id)
   and case input.status
@@ -480,7 +477,7 @@ Each filter read with `->>` is a value the database can plan with. On Postgres a
 
 <Callout type="warning" title="Indexes">
 
-A given filter can use an index on Postgres only when each run is planned with its values. Every Postgres driver plans each run, except postgres.js and Bun.sql, and Drizzle over them. Create those clients with `connection: { plan_cache_mode: "force_custom_plan" }` ([postgres.js](/docs/postgres#postgresjs)). Without it, Postgres can switch to a full-table scan after five runs. MySQL plans each run. SQLite reads every row for this query.
+A given filter can use an index on Postgres only when each run is planned with its values. Every Postgres driver plans each run, except postgres.js and Bun.sql, and Drizzle over them. Create those clients with `connection: { plan_cache_mode: "force_custom_plan" }` ([postgres.js](/docs/postgres#postgresjs)). Without it, Postgres can switch to a full-table scan after five runs. MySQL plans each run. SQLite reads every row for this query. To keep one filter's index there, write a `select` for each case and join them with `union all`.
 
 </Callout>
 
