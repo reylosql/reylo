@@ -2062,13 +2062,21 @@ async fn read_objects(db: &mut Db, platform: Option<&[String]>) -> Result<Schema
     } else {
         ("false", "", "'null'")
     };
+    // The tables of another tool's an EXCEPT of the live publication names, which a change to what it
+    // covers names again.
+    let unlisted_except = if version >= 190000 {
+        format!("format('%s', (select json_agg(format('%I.%I', n.nspname, c.relname)) from pg_publication_rel pr join pg_class c on c.oid = pr.prrelid join pg_namespace n on n.oid = c.relnamespace where pr.prpubid = p.oid and pr.prexcept and not {published}))")
+    } else {
+        "'null'".to_string()
+    };
     let excepted = excepted.replace("and pr.prexcept))", &format!("and pr.prexcept and {published}))"));
     for r in db
         .rows(&format!(
             "select p.oid, format('%I', p.pubname) as name, p.puballtables as all_tables, {all_sequences} as all_sequences, {excepted} as excepted, p.pubviaroot as via_root, {generated} as generated,
               concat_ws(', ', case when p.pubinsert then 'insert' end, case when p.pubupdate then 'update' end, case when p.pubdelete then 'delete' end, case when p.pubtruncate then 'truncate' end) as publish,
               format('%s', (select json_agg(json_build_array(format('%I.%I', n.nspname, c.relname), format('%I.%I', n.nspname, c.relname) || {columns}, {listed}) order by format('%I.%I', n.nspname, c.relname)) from pg_publication_rel pr join pg_class c on c.oid = pr.prrelid join pg_namespace n on n.oid = c.relnamespace where pr.prpubid = p.oid {listed_only} and {published})) as tables,
-              format('%s', {schemas}) as schemas
+              format('%s', {schemas}) as schemas,
+              {unlisted_except} as unlisted_except
             from pg_publication p where {} and not {tool_publication}",
             database_wide("p.pubowner")
         ))
@@ -2118,7 +2126,11 @@ async fn read_objects(db: &mut Db, platform: Option<&[String]>) -> Result<Schema
             .collect();
         let mut objects: Vec<String> = tables.iter().map(|(_, t, _)| format!("table only {t}")).collect();
         objects.extend(in_schemas.iter().map(|n| format!("tables in schema {n}")));
-        let extra = vec![format!("all {all}"), format!("objects {}", objects.join(", ")), format!("with {}", with.join(", ")), format!("publish {}", r.text("publish"))];
+        let mut extra = vec![format!("all {all}"), format!("objects {}", objects.join(", ")), format!("with {}", with.join(", ")), format!("publish {}", r.text("publish"))];
+        let unlisted_except: Vec<String> = serde_json::from_str(r.text("unlisted_except")).unwrap_or_default();
+        if !unlisted_except.is_empty() {
+            extra.push(format!("unlisted except {}", unlisted_except.iter().map(|t| format!("only {t}")).collect::<Vec<_>>().join(", ")));
+        }
         ids.publications.insert(oid(&r, "oid"), format!("publication {name}"));
         // After the tables it names, among the last objects made.
         s.add(Object {
@@ -5442,10 +5454,17 @@ impl Alterer for PostgresAlterer {
                 let name = to.id.strip_prefix("publication ")?;
                 let part = |o: &Object, what: &str| o.extra.iter().find_map(|l| l.strip_prefix(what)).map(String::from).unwrap_or_default();
                 let mut out = Vec::new();
+                // An EXCEPT the live publication names for another tool's table, which no file lists,
+                // stays named.
+                let unlisted_except = part(from, "unlisted except ");
                 match (part(from, "all "), part(to, "all ")) {
                     (a, b) if a == b => {}
                     (a, b) if a.is_empty() || b.is_empty() => return None,
-                    (_, b) => out.push(format!("alter publication {name} set {b}")),
+                    (_, b) if unlisted_except.is_empty() => out.push(format!("alter publication {name} set {b}")),
+                    (_, b) => {
+                        let b = if b.contains("all tables except (table ") { b.replacen("all tables except (table ", &format!("all tables except (table {unlisted_except}, "), 1) } else { b.replacen("all tables", &format!("all tables except (table {unlisted_except})"), 1) };
+                        out.push(format!("alter publication {name} set {b}"));
+                    }
                 }
                 match (part(from, "objects "), part(to, "objects ")) {
                     (a, b) if a == b => {}

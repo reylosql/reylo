@@ -116,20 +116,27 @@ pub(crate) fn mysql_project(column: &str, tools: &[String]) -> String {
     if tools.is_empty() {
         return not_history(column);
     }
-    format!("{} and {column} not in ({})", not_history(column), tools.iter().map(|t| literal(t)).collect::<Vec<_>>().join(", "))
+    // Each name as its bytes, which no SQL mode reads otherwise: a backslash in a quoted string is an
+    // escape under MySQL's default mode and a character under NO_BACKSLASH_ESCAPES.
+    let names = tools.iter().map(|t| format!("x'{}'", t.bytes().map(|b| format!("{b:02x}")).collect::<String>())).collect::<Vec<_>>().join(", ");
+    format!("{} and cast({column} as binary) not in ({names})", not_history(column))
 }
 
 /// A condition on an `information_schema.triggers` row that holds for every trigger of the project's:
 /// on a table of its own ([`mysql_project`]), and none an online schema change left on the table it
 /// copied, which writes to that copy: pt-online-schema-change's `pt_osc_<database>_<table>_ins`,
-/// `_upd` and `_del` (`rt_pt_osc_…` reversed), and LHM's `lhmt_ins_<table>` and the like, each told by
-/// its name and what its body writes.
+/// `_upd` and `_del` (`rt_pt_osc_…` reversed), whose body replaces into or deletes from `_<table>_new`
+/// or `_<table>_old`, and LHM's `lhmt_ins_<table>` and the like, whose body writes to `lhmn_<table>`.
+/// Each is told by its name and the copy its body names; one named so that writes elsewhere is the
+/// project's.
 pub(crate) fn mysql_project_trigger(tools: &[String]) -> String {
     format!(
         "{} and not ((trigger_name like 'pt!_osc!_%' escape '!' or trigger_name like 'rt!_pt!_osc!_%' escape '!')
             and (trigger_name like '%!_ins' escape '!' or trigger_name like '%!_upd' escape '!' or trigger_name like '%!_del' escape '!')
-            and (upper(action_statement) like '%DELETE IGNORE FROM%' or upper(action_statement) like '%REPLACE INTO%'))
-          and not ((trigger_name like 'lhmt!_ins!_%' escape '!' or trigger_name like 'lhmt!_upd!_%' escape '!' or trigger_name like 'lhmt!_del!_%' escape '!') and lower(action_statement) like '%lhmn!_%' escape '!')",
+            and (upper(action_statement) like '%DELETE IGNORE FROM%' or upper(action_statement) like '%REPLACE INTO%')
+            and (locate(concat('_', lower(event_object_table), '_new'), lower(action_statement)) > 0 or locate(concat('_', lower(event_object_table), '_old'), lower(action_statement)) > 0))
+          and not ((trigger_name like 'lhmt!_ins!_%' escape '!' or trigger_name like 'lhmt!_upd!_%' escape '!' or trigger_name like 'lhmt!_del!_%' escape '!')
+            and locate(concat('lhmn_', lower(event_object_table)), lower(action_statement)) > 0)",
         mysql_project("event_object_table", tools)
     )
 }
@@ -157,30 +164,32 @@ pub const PG_TOOL_TABLES: &[&str] = &[
     "attrep_wal_heartbeat",
 ];
 
-/// Every name [`pg_not_history`] leaves out, in lowercase as a SQL list: the history tables' and
-/// [`PG_TOOL_TABLES`].
-fn pg_kept_out_names() -> String {
-    [HISTORY_TABLE].iter().chain(OTHER_HISTORY_TABLES).chain(PG_TOOL_TABLES).map(|t| format!("'{}'", t.to_ascii_lowercase())).collect::<Vec<_>>().join(", ")
+/// Whether the `pg_class` row `c` is another tool's table: one of [`PG_TOOL_TABLES`] or one defined as
+/// its tool makes it ([`pg_tool_table`]), unless a publication of the project's names it, which makes
+/// it the project's: a publication that lists a table (Estuary's watermarks, as its setup adds them)
+/// has its whole list replaced by a change to what it publishes, which would leave the table out if
+/// no file made it. One an EXCEPT names, and one Zero's own publication lists, stay the tool's.
+fn pg_tool_relation(c: &str) -> String {
+    let tools = PG_TOOL_TABLES.iter().map(|t| format!("'{t}'")).collect::<Vec<_>>().join(", ");
+    format!(
+        "((lower({c}.relname) in ({tools}) or {}) and not exists (select 1 from pg_publication_rel tr join pg_publication tpb on tpb.oid = tr.prpubid where tr.prrelid = {c}.oid
+           and coalesce((to_jsonb(tr) ->> 'prexcept')::boolean, false) = false and not {}))",
+        pg_tool_table(c),
+        zero_publication("tpb")
+    )
 }
 
-/// A condition on a column of Postgres table names that holds for every name but those
-/// [`pg_not_history`] leaves out.
-fn pg_not_kept_out(column: &str) -> String {
-    format!("lower({column}) not in ({})", pg_kept_out_names())
-}
-
-/// Whether the `pg_class` row `c` is no history table, no table of another tool's, and comes with
-/// none: such a table's indexes, its sequences (`serial` or identity) and its TOAST table go with it.
-/// Another tool's is one of [`PG_TOOL_TABLES`], or one whose definition is the tool's: Estuary's
-/// watermarks, and the health check Neon keeps in a database beside its `neon_migration` schema.
+/// Whether the `pg_class` row `c` is no history table, no table of another tool's
+/// ([`pg_tool_relation`]), and comes with none: such a table's indexes, its sequences (`serial` or
+/// identity) and its TOAST table go with it.
 pub(crate) fn pg_not_history(c: &str) -> String {
     format!(
         "({} and not exists (select 1 from pg_depend hd join pg_class ht on ht.oid = hd.refobjid where hd.classid = 'pg_class'::regclass and hd.objid = {c}.oid and hd.refclassid = 'pg_class'::regclass and hd.deptype in ('a', 'i') and (lower(ht.relname) in ({}) or {}))
           and not {})",
-        pg_not_kept_out(&format!("{c}.relname")),
-        pg_kept_out_names(),
-        pg_tool_table("ht"),
-        pg_tool_table(c)
+        not_history(&format!("{c}.relname")),
+        history_names(),
+        pg_tool_relation("ht"),
+        pg_tool_relation(c)
     )
 }
 
@@ -247,11 +256,20 @@ pub(crate) fn pg_published(c: &str, n: &str) -> String {
 pub(crate) fn pg_tool_publication(p: &str, version: i64) -> String {
     let schemas = if version >= 150000 { format!(" and not exists (select 1 from pg_publication_namespace tps where tps.pnpubid = {p}.oid)") } else { String::new() };
     format!(
-        "(exists (select 1 from pg_namespace tz where {p}.pubname in ('_' || regexp_replace(tz.nspname, '_([0-9]+)$', '_metadata_\\1'), '_' || regexp_replace(tz.nspname, '_([0-9]+)$', '_public_\\1'))
-            and exists (select 1 from pg_class tc where tc.relnamespace = tz.oid and tc.relname = 'shardConfig') and exists (select 1 from pg_class tc where tc.relnamespace = tz.oid and tc.relname = 'replicas'))
+        "({}
           or not {p}.puballtables and exists (select 1 from pg_publication_rel tpr where tpr.prpubid = {p}.oid){schemas}
             and not exists (select 1 from pg_publication_rel tpr join pg_class tpc on tpc.oid = tpr.prrelid join pg_namespace tpn on tpn.oid = tpc.relnamespace where tpr.prpubid = {p}.oid and {}))",
+        zero_publication(p),
         pg_published("tpc", "tpn")
+    )
+}
+
+/// Whether the publication `p` (a `pg_publication` row) is one of Zero's: `_<app>_metadata_<n>` or
+/// `_<app>_public_<n>`, beside its shard's schema `<app>_<n>`.
+fn zero_publication(p: &str) -> String {
+    format!(
+        "exists (select 1 from pg_namespace tz where {p}.pubname in ('_' || regexp_replace(tz.nspname, '_([0-9]+)$', '_metadata_\\1'), '_' || regexp_replace(tz.nspname, '_([0-9]+)$', '_public_\\1'))
+            and exists (select 1 from pg_class tc where tc.relnamespace = tz.oid and tc.relname = 'shardConfig') and exists (select 1 from pg_class tc where tc.relnamespace = tz.oid and tc.relname = 'replicas'))"
     )
 }
 

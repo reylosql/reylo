@@ -107,7 +107,8 @@ It also leaves out what other tools keep in your database:
 | AWS DMS, Qlik Replicate | The `awsdms_` and `attrep_` tables, functions and event triggers |
 | Hasura | `hdb_catalog`, and its triggers on your tables |
 | Bucardo, Slony, Zero | Their schemas, and Bucardo's and Slony's triggers on your tables |
-| Neon, Estuary | `neon_migration`, `public.health_check` and `flow_watermarks` |
+| Neon | `neon_migration` and `public.health_check` |
+| Estuary | `flow_watermarks`, unless one of your publications lists it |
 | Litestream | `_litestream_seq` and `_litestream_lock` |
 | D1 and Durable Objects | Cloudflare's `_cf_` tables |
 
