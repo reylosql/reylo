@@ -174,7 +174,11 @@ const quoted = (name: string) => `"${name.replace(/"/g, '""')}"`;
  */
 export async function brokenKeys(rows: (sql: string, values?: unknown[]) => Promise<unknown[]>): Promise<number> {
   let broken = 0;
-  const same = (a: string[], b: string[]) => a.length === b.length && a.every((c) => b.some((d) => d.toLowerCase() === c.toLowerCase()));
+  // The same columns one to one, in any order, as a parent key matches an index.
+  const same = (a: string[], b: string[]) => {
+    const sorted = (c: string[]) => c.map((n) => n.toLowerCase()).sort().join("\0");
+    return a.length === b.length && sorted(a) === sorted(b);
+  };
   const tables = (await rows("select name from sqlite_schema where type = 'table' and name not like 'sqlite!_%' escape '!'")) as { name: string }[];
   for (const { name } of tables) {
     // The pragmas' statement forms: Turso's table-valued ones fail on a name holding a `"`.
@@ -261,7 +265,12 @@ export async function runMigrationsOn(db: MigrationConnection, list: readonly Mi
         } else if (step === "commit") {
           await db.exec("commit");
           open = false;
-        } else if (step === "keys") answer = [turso ? await brokenKeys(rows) : (await rows("pragma foreign_key_check")).length];
+        } else if (step === "keys") {
+          // On Turso's engine, a migration that turned foreign keys on in a way the preflight didn't
+          // read has its cascades undone by the rollback this refusal leads to.
+          if (turso && Number(((await rows("pragma foreign_keys")) as Record<string, unknown>[])[0]?.foreign_keys) === 1) throw new Error("it turned foreign keys on, which Turso's engine takes inside the migration's transaction, so dropping a table others reference would cascade to their rows: take it out, since Reylo sets them back as the app had them after each migration");
+          answer = [turso ? await brokenKeys(rows) : (await rows("pragma foreign_key_check")).length];
+        }
         else if ("exec" in step) await db.exec(step.exec);
         else if ("all" in step) answer = await rows(step.all, step.values);
         else await (await statement(step.run)).run(...step.values);

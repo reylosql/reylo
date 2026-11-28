@@ -273,6 +273,7 @@ test("the key check Turso's engine runs counts the rows SQLite's foreign_key_che
     "create table p (a int unique, b int); create unique index p_b on p (b) where b > 0; create table c (x references p (b)); insert into c values (1);",
     "create table t (id integer primary key); create view v as select id from t; create table c (x references v (id)); insert into c values (1);",
     "create table t (id int); create table c (x references t (rowid)); insert into c values (1);",
+    "create table p (a int, b int, unique (a, b)); create table c (x int, y int, foreign key (x, y) references p (a, a)); insert into c values (1, 1);",
   ];
   for (const schema of mismatched) {
     const db = new DatabaseSync(":memory:");
@@ -289,6 +290,11 @@ test("migrate(db) refuses, on Turso's engine, a migration that turns foreign key
   const turso = await driver("@tursodatabase/database").connect(":memory:");
   assert.deepEqual(await runMigrationsOn(turso, [USERS, PARENT]), [USERS.name, PARENT.name]);
   await assert.rejects(runMigrationsOn(turso, [USERS, PARENT, REBUILD]), /^Error: reylo: the migration 20261108120000_rebuild\.sql turns foreign keys on, which Turso's engine takes inside the migration's transaction/);
+  // A way of turning them on the preflight doesn't read, as this connection does with the migration's
+  // own text, is caught once the migration ran, inside its transaction, whose rollback undoes the cascade.
+  const SILENT = { ...REBUILD, sql: REBUILD.sql.replace("pragma foreign_keys = on; ", "") };
+  const sneaky: MigrationConnection = { exec: (sql: string) => turso.exec(sql === SILENT.sql ? `pragma foreign_keys = on; ${sql}` : sql), prepare: (sql: string) => turso.prepare(sql) };
+  await assert.rejects(runMigrationsOn(sneaky, [USERS, PARENT, SILENT]), /^Error: reylo: the migration 20261108120000_rebuild\.sql failed on this database, and rolled back: it turned foreign keys on/);
   const posts = (await (await turso.prepare("select count(*) as n from posts")).all()) as { n: number }[];
   assert.equal(Number(posts[0]!.n), 1);
   // SQLite takes the pragma only outside a transaction, so there it runs, and cascades to nothing.

@@ -264,11 +264,17 @@ export function transactionControl(sql: string): string | undefined {
   return statementTokens(sql).find((t) => CONTROL.has(t[0]!))?.[0]!.toLowerCase();
 }
 
-/** Whether a SQLite migration turns foreign keys on (`pragma foreign_keys = on`, or `1`, `true`, `yes`), as itself or as `pragma main.foreign_keys`. */
+/**
+ * Whether a SQLite migration turns foreign keys on: `pragma foreign_keys` (its name quoted or not,
+ * as itself or `main.foreign_keys`) set to a value SQLite reads as on (`getSafetyLevel`): a nonzero
+ * integer, or `on`, `yes`, `true`, `full` or `extra`, quoted or not.
+ */
 export function turnsForeignKeysOn(sql: string): boolean {
+  const bare = (token: string | undefined) => token?.replace(/^'/, "").toUpperCase();
   return statementTokens(sql).some((t) => {
-    const at = t[0] === "PRAGMA" ? t.indexOf("FOREIGN_KEYS") : -1;
-    const value = at === 1 || at === 2 ? t[at + 1]?.replace(/^'/, "").toUpperCase() : undefined;
-    return value !== undefined && ["ON", "1", "TRUE", "YES"].includes(value);
+    const at = t[0] === "PRAGMA" ? t.findIndex((token, i) => i > 0 && i < 3 && bare(token) === "FOREIGN_KEYS") : -1;
+    const value = at > 0 ? bare(t[at + 1]) : undefined;
+    if (value === undefined) return false;
+    return /^[+-]?\d+$/.test(value) ? Number(value) !== 0 : ["ON", "YES", "TRUE", "FULL", "EXTRA"].includes(value);
   });
 }
