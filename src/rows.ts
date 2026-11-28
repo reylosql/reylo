@@ -124,24 +124,18 @@ function jsonMember(f: RowField, v: unknown, dialect: Dialect, fail: (message: s
 }
 
 /**
- * The value JSON.stringify writes for `v` at `key`: its toJSON() called once, as JSON.stringify
- * calls it there, and what that returns written as it is, its own toJSON() never called, so an
- * object comes back with its own keys alone. Nothing else is written through JSON, so Reylo's own
- * writer still keeps an infinity, a BigInt and raw JSON as it does elsewhere. `fail` says why a
- * toJSON() that throws gives no value.
+ * An element of a jsonb[] member as the JSON text the database receives, written once by Reylo's
+ * writer at its index, as JSON.stringify writes it there (its toJSON() read once, with that key),
+ * so that what is checked is what is bound: an element whose text is an array is refused, since
+ * Postgres reads a JSON array inside a member as one more dimension of the array.
  */
-function jsonAt(v: unknown, key: string, fail: (message: string) => never): unknown {
-  const hook = (x: unknown) => x !== null && typeof x === "object" && typeof (x as { toJSON?: unknown }).toJSON === "function";
-  if (!hook(v)) return v;
-  let value: unknown;
-  try {
-    value = (v as { toJSON(key: string): unknown }).toJSON(key);
-  } catch (e) {
-    return fail(`holds a JSON value: ${(e as Error).message}.`);
-  }
-  const raw = (JSON as { isRawJSON?: (x: unknown) => boolean }).isRawJSON;
-  if (!hook(value) || Array.isArray(value) || raw?.(value)) return value;
-  return Object.fromEntries(Object.entries(value as object).filter(([, field]) => typeof field !== "function"));
+function jsonElement(v: unknown, index: number, written: string, fail: (message: string) => never): Raw | null {
+  const key = String(index);
+  const text = writeJson({ [key]: v }, "postgres", (message) => fail(`is ${message}`));
+  // `{}` where it writes nothing, as JSON.stringify writes null for such an element of an array.
+  const element = text === undefined || text === "{}" ? "null" : text.slice(`{${JSON.stringify(key)}:`.length, -1);
+  if (element.startsWith("[")) fail(`is a JSON array, which an element of ${written} can't be: Postgres reads it as one more dimension of the array. Pass the array as one value of a jsonb column, or wrap it in an object.`);
+  return element === "null" ? null : new Raw(element);
 }
 
 /**
@@ -194,12 +188,8 @@ function check(type: EngineType, written: string, v: unknown, dialect: Dialect, 
             const inner = type.element.type;
             return Array.isArray(checked) && inner.kind === "array" ? wholeText(inner, checked) : checked;
           }
-          // Postgres reads a JSON array inside a member as one more dimension of the array, so a JSON element may be anything but one, read as JSON.stringify writes it, through its toJSON() once.
-          if (dialect === "postgres" && kind === "json") {
-            const value = jsonAt(e, String(i), at);
-            if (Array.isArray(value)) return at(`is a JSON array, which an element of ${written} can't be: Postgres reads it as one more dimension of the array. Pass the array as one value of a jsonb column, or wrap it in an object.`);
-            return check(type.element.type, element, value, dialect, at);
-          }
+          // Postgres reads a JSON array inside a member as one more dimension of the array, so a JSON element may be anything but one (`jsonElement`).
+          if (dialect === "postgres" && kind === "json") return jsonElement(e, i, written, at);
           const level = dialect === "postgres" && Array.isArray(e) && isLevel(kind, e);
           return check(level ? type : type.element.type, level ? written : element, e, dialect, at);
         });
