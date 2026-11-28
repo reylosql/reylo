@@ -36,8 +36,8 @@ export type Migration = { readonly name: string; readonly sql: string };
 
 const HISTORY = "__reylo_migrations";
 
-/** What runs: a script, a query whose rows come back, one statement with its values, or a transaction's ends. */
-type Step = { exec: string } | { all: string; values?: unknown[] } | { run: string; values: unknown[] } | "begin" | "commit";
+/** What runs: a script, a query whose rows come back, one statement with its values, a transaction's ends, or the count of rows that break a foreign key. */
+type Step = { exec: string } | { all: string; values?: unknown[] } | { run: string; values: unknown[] } | "begin" | "commit" | "keys";
 
 /** The database the error messages name, where its migrations came from, and what to do about one it ran that they lack. */
 type Words = { database: string; any: string; source: string; sourceOrder: string; restore: string; atomic: boolean };
@@ -93,7 +93,7 @@ function* steps(list: readonly Migration[], words: Words): Generator<Step, strin
       // As reylo migrate checks a SQLite migration's foreign keys before it commits (`run` in
       // engine/migrate/src/commands.rs): a deferred one it broke fails here, rolling back the
       // migration alone, rather than at the object's commit, which resets the object.
-      const broken = ((yield { all: "pragma foreign_key_check" }) ?? []).length;
+      const [broken = 0] = ((yield "keys") ?? []) as number[];
       if (broken) throw new Error(`${broken} rows break a foreign key after this migration`);
       // The check read every key and found each whole, so what SQLite still counts as deferred
       // violations is none: a table's drop counts its children's rows, and making it again does
@@ -127,7 +127,8 @@ export function runMigrations(storage: MigrationStorage, list: readonly Migratio
   const answer = (step: Step): IteratorResult<Step, string[]> => {
     let rows: unknown[] | undefined;
     try {
-      if (typeof step === "string") rows = undefined;
+      if (step === "keys") rows = [sql.exec("pragma foreign_key_check").toArray().length];
+      else if (typeof step === "string") rows = undefined;
       else if ("exec" in step) sql.exec(step.exec);
       else if ("all" in step) rows = sql.exec(step.all, ...(step.values ?? [])).toArray();
       else sql.exec(step.run, ...step.values);
@@ -159,29 +160,66 @@ export function runMigrations(storage: MigrationStorage, list: readonly Migratio
   return next.value;
 }
 
+/** A name as SQLite quotes it. */
+const quoted = (name: string) => `"${name.replace(/"/g, '""')}"`;
+
+/**
+ * The rows of every table that break one of its foreign keys, as `pragma foreign_key_check` counts
+ * them, read from each key's declaration: a row whose key columns are all set and that no parent
+ * row matches. Turso's engine answers that pragma with no rows before 0.9, so it is held this way.
+ */
+async function brokenKeys(rows: (sql: string, values?: unknown[]) => Promise<unknown[]>): Promise<number> {
+  let broken = 0;
+  const tables = (await rows("select name from sqlite_schema where type = 'table' and name not like 'sqlite!_%' escape '!'")) as { name: string }[];
+  for (const { name } of tables) {
+    const columns = (await rows(`select id, "table" as parent, "from", "to" from pragma_foreign_key_list(?) order by id, seq`, [name])) as { id: number; parent: string; from: string; to: string | null }[];
+    const keys = new Map<number, typeof columns>();
+    for (const c of columns) keys.set(c.id, [...(keys.get(c.id) ?? []), c]);
+    for (const key of keys.values()) {
+      const parent = key[0]!.parent;
+      const set = key.map((k) => `c.${quoted(k.from)} is not null`).join(" and ");
+      let unmatched = "";
+      // A parent table that doesn't exist matches no row; a key that names no columns takes the parent's primary key.
+      if ((await rows("select 1 from sqlite_schema where type = 'table' and name = ? collate nocase", [parent])).length) {
+        const to = key.every((k) => k.to) ? key.map((k) => k.to!) : ((await rows("select name from pragma_table_info(?) where pk > 0 order by pk", [parent])) as { name: string }[]).map((r) => r.name);
+        if (to.length !== key.length) continue;
+        unmatched = ` and not exists (select 1 from ${quoted(parent)} as p where ${key.map((k, i) => `p.${quoted(to[i]!)} = c.${quoted(k.from)}`).join(" and ")})`;
+      }
+      const [count] = (await rows(`select count(*) as n from ${quoted(name)} as c where ${set}${unmatched}`)) as { n: number | bigint }[];
+      broken += Number(count?.n ?? 0);
+    }
+  }
+  return broken;
+}
+
 /**
  * Runs `list` on an app's own SQLite connection, as `runMigrations` does on a Durable Object, each
  * migration between its own `begin` and `commit`. As reylo migrate runs one on SQLite (`run_once` in
- * engine/migrate/src/commands.rs), foreign keys are off while it runs, and back on after, so that a
- * rebuilt table's drop cascades to no row of the tables that reference it; the check before the
- * commit holds every key instead, on an engine whose check holds them.
+ * engine/migrate/src/commands.rs), foreign keys are off while it runs, so that a rebuilt table's
+ * drop cascades to no row of the tables that reference it, and the check before the commit holds
+ * every key instead. After each migration, they are as the app had them, whatever the migration set.
  */
 export async function runMigrationsOn(db: MigrationConnection, list: readonly Migration[]): Promise<string[]> {
   const run = steps(list, CONNECTION);
   const statement = async (sql: string) => (await db.prepare(sql)) as { all(...values: unknown[]): unknown; run(...values: unknown[]): unknown };
   const rows = async (sql: string, values: unknown[] = []) => (await (await statement(sql)).all(...values)) as unknown[];
+  // Turso's engine, which has a function SQLite lacks; any other failure is no answer, and fails the run.
+  let turso: boolean | undefined;
+  const isTurso = () =>
+    rows("select turso_version()").then(
+      () => true,
+      (e: unknown) => {
+        if (/no such function/i.test(String((e as Error)?.message))) return false;
+        throw e;
+      },
+    );
   let open = false;
-  let keys = false;
-  // Foreign keys go off only where foreign_key_check holds them instead: on SQLite. Turso's engine
-  // answers the pragma with no rows before 0.9, and a connection can't tell which release it is
-  // (`turso_version()` gives the file's SQLite version once it is written), so its foreign keys stay
-  // as the app set them, and its commit refuses a key the migration broke.
-  let checked: boolean | undefined;
-  const checksKeys = () => rows("select turso_version()").then(() => false, () => true);
+  // The app's own setting, read before each migration, and set back after it.
+  let keys: boolean | undefined;
   const restore = async () => {
     const was = keys;
-    keys = false;
-    if (was) await db.exec("pragma foreign_keys = on");
+    keys = undefined;
+    if (was !== undefined) await db.exec(`pragma foreign_keys = ${was ? "on" : "off"}`);
   };
   let next = run.next();
   try {
@@ -191,18 +229,17 @@ export async function runMigrationsOn(db: MigrationConnection, list: readonly Mi
       try {
         if (step === "begin") {
           // Outside a transaction, where SQLite takes the pragma.
-          checked ??= await checksKeys();
+          turso ??= await isTurso();
           const [row] = (await rows("pragma foreign_keys")) as Record<string, unknown>[];
-          if (checked && Number(row?.foreign_keys) === 1) {
-            await db.exec("pragma foreign_keys = off");
-            keys = true;
-          }
+          keys = Number(row?.foreign_keys) === 1;
+          if (keys) await db.exec("pragma foreign_keys = off");
           await db.exec("begin immediate");
           open = true;
         } else if (step === "commit") {
           await db.exec("commit");
           open = false;
-        } else if ("exec" in step) await db.exec(step.exec);
+        } else if (step === "keys") answer = [turso ? await brokenKeys(rows) : (await rows("pragma foreign_key_check")).length];
+        else if ("exec" in step) await db.exec(step.exec);
         else if ("all" in step) answer = await rows(step.all, step.values);
         else await (await statement(step.run)).run(...step.values);
       } catch (e) {

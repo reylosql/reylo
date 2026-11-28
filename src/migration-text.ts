@@ -210,14 +210,25 @@ export function transactionControl(sql: string): string | undefined {
       afterEnd = afterDot = false;
       continue;
     }
-    if (/[A-Za-z_]/.test(c)) {
+    // A number is one token, its dot and exponent included (`1.`, `2.5e-3`), so its dot qualifies no name.
+    if (/[0-9]/.test(c) || (c === "." && /[0-9]/.test(sql[k + 1] ?? ""))) {
+      let end = k + 1;
+      while (end < sql.length && (/[0-9A-Za-z_.]/.test(sql[end]!) || (/[+-]/.test(sql[end]!) && /[eE]/.test(sql[end - 1]!)))) end++;
+      k = end;
+      head.push("");
+      afterEnd = afterDot = false;
+      continue;
+    }
+    // A name, as SQLite reads one: any character past ASCII is part of it.
+    if (/[A-Za-z_]/.test(c) || c.charCodeAt(0) >= 0x80) {
       let end = k;
-      while (end < sql.length && /[A-Za-z0-9_$]/.test(sql[end]!)) end++;
+      while (end < sql.length && (/[A-Za-z0-9_$]/.test(sql[end]!) || sql.charCodeAt(end) >= 0x80)) end++;
       const word = sql.slice(k, end).toUpperCase();
       k = end;
       if (head.length === 0 && CONTROL.has(word)) return word.toLowerCase();
       head.push(word);
-      if (word === "TRIGGER" && head[0] === "CREATE" && head.length <= 3) trigger = true;
+      // `create trigger` or `create temp trigger`: elsewhere, as in `create table trigger`, it's a name.
+      if (word === "TRIGGER" && head[0] === "CREATE" && (head.length === 2 || (head.length === 3 && (head[1] === "TEMP" || head[1] === "TEMPORARY")))) trigger = true;
       const keyword = trigger && !afterDot;
       afterEnd = false;
       if (keyword && word === "CASE") cases++;

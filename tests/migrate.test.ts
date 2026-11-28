@@ -154,9 +154,8 @@ test("migrate(db): a migration that fails rolls back with its row and names itse
     assert.deepEqual(columns, ["id", "name"]);
     await db.exec("pragma foreign_keys = on");
     assert.deepEqual(await runMigrationsOn(db, [USERS, POSTS]), [POSTS.name]);
-    // SQLite's foreign_key_check finds the orphan; Turso's engine before 0.9 answers the check with no
-    // rows, so its foreign keys stay on, and its commit refuses the orphan.
-    await assert.rejects(runMigrationsOn(db, [USERS, POSTS, ORPHANS]), /^Error: reylo: the migration 20261108120000_orphans\.sql failed on this database, and rolled back: (1 rows break a foreign key after this migration|.*FOREIGN KEY constraint failed)$/);
+    // SQLite's foreign_key_check finds the orphan; on Turso's engine, whose check finds nothing before 0.9, each key is held from its declaration.
+    await assert.rejects(runMigrationsOn(db, [USERS, POSTS, ORPHANS]), /^Error: reylo: the migration 20261108120000_orphans\.sql failed on this database, and rolled back: 1 rows break a foreign key after this migration$/);
     assert.deepEqual(await names(db), [USERS.name, POSTS.name]);
     const users = (await (await (db.prepare("select count(*) as n from users") as any)).all()) as { n: number }[];
     assert.equal(Number(users[0]!.n), 1);
@@ -171,12 +170,34 @@ test("migrate(db) turns foreign keys off while a migration runs, so a rebuilt ta
   const PARENT = { name: "20261107120000_posts.sql", sql: "create table posts (id integer primary key, user_id integer references users (id) on delete cascade); insert into users (name) values ('ada'); insert into posts (user_id) values (1);" };
   // SQLite's own recipe for a change alter table can't make: a new table, its rows copied, the old one dropped.
   const REBUILD = { name: "20261108120000_rebuild.sql", sql: "create table users_new (id integer primary key, name text not null check (length(name) > 0)); insert into users_new select * from users; drop table users; alter table users_new rename to users;" };
-  for (const db of [new (driver("better-sqlite3"))(":memory:"), new DatabaseSync(":memory:")] as MigrationConnection[]) {
+  const turso = await driver("@tursodatabase/database").connect(":memory:");
+  for (const db of [turso, new (driver("better-sqlite3"))(":memory:"), new DatabaseSync(":memory:")] as MigrationConnection[]) {
     await db.exec("pragma foreign_keys = on");
     assert.deepEqual(await runMigrationsOn(db, [USERS, PARENT, REBUILD]), [USERS.name, PARENT.name, REBUILD.name]);
     const posts = (await (await (db.prepare("select count(*) as n from posts") as any)).all()) as { n: number }[];
     assert.equal(Number(posts[0]!.n), 1);
   }
+});
+
+test("migrate(db) leaves the app's foreign keys as it had them, whatever a migration sets", async () => {
+  const OFF = { name: "20261107120000_off.sql", sql: "pragma foreign_keys = off; create table tags (id integer primary key);" };
+  const turso = await driver("@tursodatabase/database").connect(":memory:");
+  for (const db of [turso, new DatabaseSync(":memory:")] as MigrationConnection[]) {
+    await db.exec("pragma foreign_keys = on");
+    assert.deepEqual(await runMigrationsOn(db, [USERS, OFF]), [USERS.name, OFF.name]);
+    const keys = (await (await (db.prepare("pragma foreign_keys") as any)).all()) as { foreign_keys: number }[];
+    assert.equal(Number(keys[0]!.foreign_keys), 1);
+  }
+});
+
+test("migrate(db) on Turso's engine holds keys from their declarations: composite, implied by the parent's primary key, and to a table that's gone", async () => {
+  const db = await driver("@tursodatabase/database").connect(":memory:");
+  const PAIRS = { name: "20261107120000_pairs.sql", sql: "create table pairs (a int, b int, primary key (a, b)); create table refs (x int, y int, note text, foreign key (x, y) references pairs); insert into pairs values (1, 2); insert into refs values (1, 2, 'ok'), (null, 9, 'unset');" };
+  assert.deepEqual(await runMigrationsOn(db, [USERS, PAIRS]), [USERS.name, PAIRS.name]);
+  const ORPHAN = { name: "20261108120000_orphan.sql", sql: "insert into refs values (1, 3, 'orphan');" };
+  await assert.rejects(runMigrationsOn(db, [USERS, PAIRS, ORPHAN]), /rolled back: 1 rows break a foreign key after this migration$/);
+  const GONE = { name: "20261108120000_gone.sql", sql: "create table stale (id integer references nowhere (id)); insert into stale values (1);" };
+  await assert.rejects(runMigrationsOn(db, [USERS, PAIRS, GONE]), /rolled back: 1 rows break a foreign key after this migration$/);
 });
 
 test("migrate(db) takes a migration another start of the app ran after it read the history as run", async () => {

@@ -238,18 +238,21 @@ fn upper(t: Option<&Token>) -> String {
     t.map(Token::upper).unwrap_or_default()
 }
 
-/// Whether a BEGIN read at this point opens a body: the statement creates a trigger, routine or
-/// event (MySQL and SQLite), or a Postgres function or procedure whose body is `begin atomic`.
+/// Whether a BEGIN read at this point opens a body: the statement creates a trigger (SQLite: `create
+/// trigger` or `create temp trigger`, since elsewhere `trigger` is a name, as in `create table
+/// trigger`), a trigger, routine or event (MySQL), or a Postgres function or procedure whose body is
+/// `begin atomic`.
 fn opens_body(tokens: &[Token], dialect: Dialect, next: Option<&Token>) -> bool {
     if upper(tokens.first()) != "CREATE" {
         return false;
     }
     let words: Vec<String> = tokens.iter().take(12).map(Token::upper).collect();
     let has = |w: &str| words.iter().any(|x| x == w);
-    if dialect == Dialect::Postgres {
-        return (has("FUNCTION") || has("PROCEDURE")) && upper(next) == "ATOMIC";
+    match dialect {
+        Dialect::Postgres => (has("FUNCTION") || has("PROCEDURE")) && upper(next) == "ATOMIC",
+        Dialect::Sqlite => words.get(1).is_some_and(|w| w == "TRIGGER") || (words.get(2).is_some_and(|w| w == "TRIGGER") && words.get(1).is_some_and(|w| w == "TEMP" || w == "TEMPORARY")),
+        Dialect::Mysql => ["TRIGGER", "PROCEDURE", "FUNCTION", "EVENT"].iter().any(|w| has(w)),
     }
-    ["TRIGGER", "PROCEDURE", "FUNCTION", "EVENT"].iter().any(|w| has(w))
 }
 
 /// The statements of `sql`, in order; blank statements (`;;`) are dropped. A statement's text starts
@@ -308,8 +311,9 @@ fn split(sql: &str, dialect: Dialect, tokens: &[Token], openings: &[(usize, usiz
         }
         current.push(t.clone());
         // A body opens at BEGIN (and inside it, at a nested BEGIN or a CASE); END closes one, but for
-        // END IF, END LOOP, END WHILE and END REPEAT, which close constructs never counted.
-        let w = t.upper();
+        // END IF, END LOOP, END WHILE and END REPEAT, which close constructs never counted. A word
+        // after a dot is a name (`new.end`), never one of these.
+        let w = if k > 0 && tokens[k - 1].kind == TokenKind::Symbol && tokens[k - 1].text == "." { String::new() } else { t.upper() };
         let after = upper(tokens.get(k + 1));
         if w == "BEGIN" && (depth > 0 || opens_body(&current, dialect, tokens.get(k + 1))) {
             depth += 1;

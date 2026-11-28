@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { canonical, normalized, sameMigration, transactionControl } from "../src/migration-text.ts";
 
 // The port of `canonical` in engine/migrate/src/lock.rs: the Rust tests' cases, each read the same.
@@ -58,24 +59,9 @@ test("a lone carriage return and a dollar quote's tag read as Postgres reads the
   assert.equal(canonical("select data['key'],  arr[1] -- c\nfrom t"), "select data['key'], arr[1] from t");
 });
 
-// SQLite's statements that control the transaction, as `atomicity_problem` in engine/migrate/src/sql.rs finds them.
-test("a SQLite migration's own begin, commit, end, rollback, savepoint or release is found, outside quotes, comments and a trigger's body", () => {
-  assert.equal(transactionControl("update a set b = 1; commit; insert into c values (1);"), "commit");
-  assert.equal(transactionControl("BEGIN; create table x (a);"), "begin");
-  assert.equal(transactionControl("create table \"end\" (a); savepoint s;"), "savepoint");
-  assert.equal(transactionControl("create trigger t after insert on x begin select 1; end; end;"), "end");
-  for (const sql of [
-    "create trigger t after insert on x begin update y set a = case when 1 then 2 end; end; create table z (a);",
-    "create temp trigger t after insert on x begin select raise(rollback, 'no'); end;",
-    "create table x (a); -- commit\nselect 1;",
-    "/* rollback */ create table x (a);",
-    "insert into t values ('; commit;'), ('it''s; end');",
-    "select [begin; end] from t;",
-    "create table users (id integer primary key);\n--Rollback: drop table users;\n",
-    "create table a (b int); -- don't\ncreate table c (d int);",
-    "create trigger t after update on s begin update s set total = total + new.end - new.start; end; create table x (a);",
-  ]) assert.equal(transactionControl(sql), undefined, sql);
-  // An apostrophe in a comment opens no string that hides the commit after it.
-  assert.equal(transactionControl("create table a (b int); -- don't\ncommit;"), "commit");
-  assert.equal(transactionControl("create trigger t after update on s when new.begin > 0 begin select 1; end; commit;"), "commit");
+// SQLite's statements that control the transaction, from the corpus `atomicity_problem` in
+// engine/migrate/src/sql.rs is held to too, so that the two readers can't drift apart.
+test("a SQLite migration's own begin, commit, end, rollback, savepoint or release is found as the command line finds it", () => {
+  const corpus = JSON.parse(readFileSync(new URL("../engine/migrate/tests/atomicity.json", import.meta.url), "utf8")) as { cases: { sql: string; control: string | null }[] };
+  for (const { sql, control } of corpus.cases) assert.equal(transactionControl(sql) ?? null, control, sql);
 });
