@@ -382,7 +382,7 @@ pub fn write(path: &Path, lock: &Lock) -> std::io::Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -477,63 +477,25 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The cases src/migration-text.ts's tests read too, so that the port reads every one the same.
+    pub(crate) fn shared_cases() -> serde_json::Value {
+        serde_json::from_str(include_str!("../tests/migration-text-cases.json")).expect("valid cases")
+    }
+
     #[test]
     fn comments_and_spacing_are_no_edit() {
-        let a = "create table a (\n  id int -- the key\n);\n/* made by hand */";
-        assert_eq!(canonical(a), canonical("create table a ( id int );"));
-        assert_ne!(canonical("insert into a values ('-- not a comment')"), canonical("insert into a values ('')"));
-        assert_eq!(canonical("select $$ two  spaces $$"), "select $$ two  spaces $$");
-        assert_eq!(canonical("do $f$ begin -- x\n end $f$;"), "do $f$ begin -- x\n end $f$;");
-        // MySQL's `\'` is a quote inside the string, so `-- b` is string text there, not a comment.
-        assert_ne!(canonical("insert into t values ('a\\' -- b')"), canonical("insert into t values ('a\\' -- c')"));
-        assert_ne!(canonical("select E'a\\', '-- b'"), canonical("select E'a\\', '-- c'"));
-        assert_ne!(canonical("insert into t values (\"a\\\" -- b\")"), canonical("insert into t values (\"a\\\" -- c\")"));
-        // MySQL runs `/*! … */`, and reads `n--1` as `n - -1`.
-        assert_ne!(canonical("create table t (a int) /*!50100 PARTITION BY HASH (a) */"), canonical("create table t (a int) /*!50100 PARTITION BY KEY (a) */"));
-        assert_ne!(canonical("select 1--1"), canonical("select 1--2"));
-        assert_eq!(canonical("select 1 --\tx\n, 2 --\n"), "select 1 , 2");
-        // A comment Postgres nests and MySQL ends at its first `*/`.
-        assert_ne!(canonical("/* a /* b */ create table t (a int); /* */"), canonical("/* a /* b */ create table t (a bigint); /* */"));
-        assert_eq!(canonical("select /* a /* b */ c */  1"), "select /* a /* b */ c */  1");
-        assert_eq!(canonical("select /* a */  1"), "select 1");
-        // MySQL's `#` comments, and a comment that never ends.
-        assert_ne!(canonical("# see reylo/*.sql\ncreate table t (a int);"), canonical("# see reylo/*.sql\ncreate table t (a bigint);"));
-        assert_ne!(canonical("select 1; /* create table t (a int);"), canonical("select 1; /* create table t (a bigint);"));
-        assert_eq!(canonical("select 1 /* a */"), "select 1");
-        // A backslash both readings agree on changes nothing.
-        assert_eq!(canonical("select 'a\\n' -- x\n,  'b\\\\'"), "select 'a\\n' , 'b\\\\'");
+        let cases = shared_cases();
+        let text = |v: &serde_json::Value, k: &str| v[k].as_str().expect("a string").to_string();
+        for c in cases["canonical"].as_array().unwrap() {
+            assert_eq!(canonical(&text(c, "sql")), text(c, "canonical"), "{c}");
+        }
+        for c in cases["same"].as_array().unwrap() {
+            assert_eq!(canonical(&text(c, "a")), canonical(&text(c, "b")), "{c}");
+        }
+        for c in cases["differ"].as_array().unwrap() {
+            assert_ne!(canonical(&text(c, "a")), canonical(&text(c, "b")), "{c}");
+        }
         assert_ne!(checksum("", "a.sql", "create table a (id int)"), checksum("", "a.sql", "create table a (id bigint)"));
-    }
-
-    #[test]
-    fn a_space_beyond_ascii_is_part_of_a_name() {
-        // Postgres, MySQL and SQLite read U+3000 and U+00A0 outside quotes and comments as part of a
-        // name, so turning one into a space renames a column: an edit.
-        assert_ne!(canonical("create view v as select 1 as x\u{3000}, 2 as y;"), canonical("create view v as select 1 as x , 2 as y;"));
-        assert_ne!(canonical("create table t (a\u{a0}int)"), canonical("create table t (a int)"));
-        assert_eq!(canonical("select  'a\u{3000}b' -- x\n"), "select 'a\u{3000}b'");
-        // MySQL reads `--` before one, or before DEL as the statements are split for it, as `- -`
-        // and runs the rest of the line, a `;` and what follows it included, so the rest is kept.
-        assert_ne!(canonical("select 1 --\u{3000}x"), canonical("select 1 --\u{3000}; drop table users;"));
-        assert_ne!(canonical("select 1 --\u{a0}x"), canonical("select 1 --\u{a0}; drop table users;"));
-        assert_ne!(canonical("select 1 --\u{7f}x"), canonical("select 1 --\u{7f}; drop table users;"));
-        // A lone carriage return ends a `--` comment on Postgres alone, and is spacing elsewhere.
-        assert_ne!(canonical("-- note\rdrop table users;"), canonical("-- note\ndrop table users;"));
-        assert_eq!(canonical("select 1 -- a\r\n,\r2"), "select 1 , 2");
-        // Postgres takes any character past ASCII in a dollar quote's tag, and none after a name's `$`.
-        assert_ne!(canonical("select $\u{3000}$--\nx$\u{3000}$"), canonical("select $\u{3000}$ x$\u{3000}$"));
-        assert_ne!(canonical("select x$$a$, '$a$ -- b'"), canonical("select x$$a$, '$a$ -- c'"));
-        // SQLite's `[…]` is a name: a quote or a dollar sign inside one opens nothing there.
-        let default = |word: &str| canonical(&format!("create table t ([$\u{3000}$] text default 'a $\u{3000}$ -- {word}');"));
-        assert_ne!(default("one"), default("two"));
-        assert_ne!(canonical("create table t ([a'b] text default 'x -- y')"), canonical("create table t ([a'b] text default 'x -- z')"));
-        assert_eq!(canonical("select data['key'],  arr[1] -- c\nfrom t"), "select data['key'], arr[1] from t");
-    }
-
-    #[test]
-    fn a_schema_checked_out_with_crlf_keeps_its_stamp() {
-        let lf = "create function f() returns int as $$\n  select 1\n$$ language sql;\n# made by hand\n";
-        assert_eq!(schema_sum("a", &lf.replace('\n', "\r\n")), schema_sum("a", lf));
     }
 
     #[test]

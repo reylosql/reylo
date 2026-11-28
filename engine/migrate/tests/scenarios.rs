@@ -543,6 +543,7 @@ for_each_dialect!(
     files_that_cannot_run_atomically_are_refused,
     a_lone_statement_cut_off_that_landed,
     a_lone_statement_cut_off_that_did_not_land,
+    an_unnamed_index_cut_off_drops_only_its_own,
     a_lone_statement_cut_off_with_no_fingerprint_to_compare,
     a_shadow_left_by_a_killed_run_is_swept,
     a_rebuilt_table_does_not_cascade,
@@ -2498,6 +2499,40 @@ async fn a_lone_statement_cut_off_that_landed(p: P) {
 
 async fn a_lone_statement_cut_off_that_did_not_land(p: P) {
     a_lone_statement_cut_off(p, false).await
+}
+
+/// A cut-off `create index concurrently` with no name is tied to the invalid index named as the
+/// server names one, never to another invalid index on its table, which deploy leaves in place and
+/// refuses to run past.
+async fn an_unnamed_index_cut_off_drops_only_its_own(mut p: P) {
+    if p.d != Dialect::Postgres {
+        return;
+    }
+    let int = p.t.int;
+    let lone = "create unique index concurrently on a (id)";
+    p.schema(&format!("create table a (id {int});"));
+    p.file("20261027100000_a.sql", &format!("create table a (id {int});"));
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    p.file("20261027110000_index.sql", &format!("{lone};"));
+    p.schema(&format!("create table a (id {int}); create unique index on a (id);"));
+    let mut db = Db::connect(&p.url, &p.dir).await.unwrap();
+    db.exec("insert into a values (1), (1)").await.unwrap();
+    db.exec_with(&format!("insert into __reylo_migrations (name, sql, applied_at) values ({}, {}, null)", db.param(1), db.param(2)), &["20261027110000_index.sql", &format!("{lone};")]).await.unwrap();
+    // The build fails on the duplicates and leaves a_id_idx invalid; another build, run by hand,
+    // left a_other invalid beside it.
+    assert!(db.exec(lone).await.is_err());
+    assert!(db.exec("create unique index concurrently a_other on a (id)").await.is_err());
+    db.exec("delete from a").await.unwrap();
+    db.close().await;
+    p.output();
+    assert_eq!(p.migrate().await, 1);
+    assert_has!(p.output(), "was changed outside its migrations");
+    assert_eq!(p.rows("select relname from pg_class where relname in ('a_id_idx', 'a_other') order by relname").await.iter().map(|r| r.text("relname").to_string()).collect::<Vec<_>>(), ["a_id_idx", "a_other"]);
+    // With the other one gone, deploy drops the build's own and runs it again.
+    p.exec("drop index a_other").await;
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    assert_has!(p.output(), r"Dropped public\.a_id_idx, which 20261027110000_index\.sql left invalid");
+    assert_eq!(p.rows("select 1 from pg_index where indexrelid = 'a_id_idx'::regclass and indisvalid").await.len(), 1);
 }
 
 async fn a_lone_statement_cut_off_with_no_fingerprint_to_compare(mut p: P) {

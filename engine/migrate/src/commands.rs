@@ -1875,7 +1875,7 @@ async fn leftovers(db: &mut Db, history: &[HistoryRow]) -> Result<Vec<Leftover>,
         let Some(statement) = split_statements(&m.sql, Dialect::Postgres).into_iter().next() else { continue };
         let Some(found) = leftover_filter(&statement.text) else { continue };
         for r in db
-            .rows(&format!("select format('%I.%I', n.nspname, c.relname) as qualified, pg_get_indexdef(c.oid) as def from pg_index i join pg_class c on c.oid = i.indexrelid join pg_namespace n on n.oid = c.relnamespace where not i.indisvalid and {found}"))
+            .rows(&format!("select format('%I.%I', n.nspname, c.relname) as qualified, pg_get_indexdef(c.oid) as def from pg_index i join pg_class c on c.oid = i.indexrelid join pg_namespace n on n.oid = c.relnamespace where not i.indisvalid and not exists (select 1 from pg_stat_progress_create_index p where p.relid = i.indrelid) and {found}"))
             .await?
         {
             out.push(Leftover { migration: m.name.clone(), index: r.text("qualified").to_string(), line: format!("index {} (invalid)", r.text("def")) });
@@ -1888,18 +1888,22 @@ async fn leftovers(db: &mut Db, history: &[HistoryRow]) -> Result<Vec<Leftover>,
 /// that builds, drops or rebuilds one concurrently leaves invalid when it is cut off. Spacing is
 /// ASCII's, as Postgres reads it: a U+3000 or a U+00A0 is part of a name there. The server resolves
 /// each name, since how it folds an unquoted one to lower case turns on its encoding and locale.
+/// What it can't tie to the statement it leaves out: an invalid index it doesn't select is a change
+/// deploy refuses to run past, where one it selects wrongly is dropped.
 fn leftover_filter(statement: &str) -> Option<String> {
     const S: &str = r"[ \t\n\r\x0B\x0C]";
     static PATTERNS: LazyLock<[Regex; 3]> = LazyLock::new(|| {
-        let part = r#"(?:"(?:[^"]|"")*"|[^ \t\n\r\x0B\x0C(".;]+)"#;
+        let part = r#"(?:"(?:[^"]|"")*"|[^ \t\n\r\x0B\x0C(".;*]+)"#;
         // A dotted name, the dots with or without spacing around them, ending where a word does.
         let name = format!(r"{part}(?:\s*\.\s*{part})*");
         let end = r"(?:\s|[,;(]|$)";
+        // A parenthesized option list, whose quoted values may hold a `)`.
+        let options = r#"\(((?:"(?:[^"]|"")*"|'(?:[^']|'')*'|[^)"'])*)\)"#;
         let re = |p: String| Regex::new(&p.replace("\\s", S)).expect("a valid pattern");
         [
-            re(format!(r"(?i)^create\s+(?:unique\s+)?index\s+concurrently\s+(?:if\s+not\s+exists\s+)?(?:({name})\s+)?on\s+(?:only\s+)?({name}){end}")),
+            re(format!(r"(?i)^create\s+(?:unique\s+)?index\s+concurrently\s+(?:if\s+not\s+exists\s+)?(?:({name})\s+)?on\s+(?:only\s*\(\s*({name})\s*\)|(?:only\s+)?({name})(?:\s*\*)?){end}")),
             re(format!(r"(?i)^drop\s+index\s+concurrently\s+(?:if\s+exists\s+)?({name}){end}")),
-            re(format!(r"(?i)^reindex\s+(?:\([^)]*\)\s*)?(index|table)\s+concurrently\s+({name}){end}")),
+            re(format!(r"(?i)^reindex\s+(?:{options}\s*)?(index|table|schema|database)\s+(concurrently(?:\s+|$))?({name})?{end}")),
         ]
     });
     let [create, drop, reindex] = &*PATTERNS;
@@ -1920,30 +1924,57 @@ fn leftover_filter(statement: &str) -> Option<String> {
     if let Some(c) = create.captures(sql) {
         // An index is made in its table's schema, and named without one. The server keeps a name's
         // first 63 bytes, as `name` does.
-        let on = format!("i.indrelid = to_regclass({})", literal(&c[2]));
+        let table = c.get(2).or(c.get(3))?.as_str();
+        let on = format!("i.indrelid = to_regclass({})", literal(table));
         return match c.get(1).map(|m| m.as_str()) {
             Some(name) if name.starts_with(|c: char| c == '"' || c == '_' || c.is_ascii_alphabetic() || !c.is_ascii()) => Some(format!("{on} and c.relname = ((parse_ident({}, false))[1])::name", literal(name))),
             // No name the server would have taken, so no index it built.
             Some(_) => None,
-            None => Some(on),
+            // Unnamed, the index takes the name the server chooses: the table's, its columns', then
+            // `idx` and a number where that is taken, cut to fit 63 bytes. Only an invalid index
+            // named so is its build's.
+            None => Some(format!(r"{on} and c.relname ~ '_idx[0-9]*$' and (starts_with(c.relname, (select t.relname from pg_class t where t.oid = i.indrelid) || '_') or octet_length(c.relname) >= 56)")),
         };
     }
     if let Some(c) = drop.captures(sql) {
         return Some(format!("c.oid = to_regclass({})", literal(&c[1])));
     }
     let c = reindex.captures(sql)?;
-    // A concurrent reindex builds <index>_ccnew beside each index, and swaps the old one to <index>_ccold.
-    Some(if c[1].eq_ignore_ascii_case("index") {
-        let index = format!("to_regclass({})", literal(&c[2]));
-        let base = format!("(select x.relname from pg_class x where x.oid = {index})");
-        format!("i.indrelid = (select x.indrelid from pg_index x where x.indexrelid = {index}) and (starts_with(c.relname, {base} || '_ccnew') or starts_with(c.relname, {base} || '_ccold'))")
-    } else {
-        format!(r"i.indrelid = to_regclass({}) and (c.relname like '%\_ccnew%' or c.relname like '%\_ccold%')", literal(&c[2]))
-    })
+    // Concurrently as a keyword, or as an option that isn't turned off.
+    let option = c.get(1).is_some_and(|o| {
+        o.as_str().split(',').any(|o| {
+            let words: Vec<String> = o.split_ascii_whitespace().map(|w| w.to_ascii_lowercase()).collect();
+            words.first().is_some_and(|w| w == "concurrently") && !words.get(1).is_some_and(|v| matches!(v.as_str(), "false" | "off" | "0"))
+        })
+    });
+    if c.get(3).is_none() && !option {
+        return None;
+    }
+    let target = c.get(4).map(|m| literal(m.as_str()));
+    // The indexes the reindex rebuilds, as the tables they are on, a partitioned one's partitions included.
+    let originals = match (c[2].to_ascii_lowercase().as_str(), target) {
+        ("index", Some(t)) => format!("o.indexrelid in (select to_regclass({t}) union select relid from pg_partition_tree(to_regclass({t})))"),
+        ("table", Some(t)) => format!("o.indrelid in (select to_regclass({t}) union select relid from pg_partition_tree(to_regclass({t})))"),
+        ("schema", Some(t)) => format!("o.indrelid in (select x.oid from pg_class x where x.relnamespace = to_regnamespace({t}))"),
+        ("database", _) => "true".to_string(),
+        _ => return None,
+    };
+    // A concurrent reindex builds <index>_ccnew beside each index, and swaps the old one to
+    // <index>_ccold, the base cut to fit 63 bytes and a number added where the name is taken: a copy
+    // is on the same table as an index whose name starts with the copy's base.
+    Some(format!(
+        r"c.relname ~ '_cc(new|old)[0-9]*$' and exists (select 1 from pg_index o join pg_class oc on oc.oid = o.indexrelid where o.indrelid = i.indrelid and oc.oid <> c.oid and {originals} and regexp_replace(c.relname, '_cc(new|old)[0-9]*$', '') <> '' and starts_with(oc.relname, regexp_replace(c.relname, '_cc(new|old)[0-9]*$', '')))"
+    ))
 }
 
 async fn drop_leftovers(db: &mut Db, leftovers: &[Leftover], log: Log<'_>) -> Result<(), Error> {
     for x in leftovers {
+        // Still invalid, and no build of another session's on its table since the plan read it.
+        let index = format!("'{}'", x.index.replace('\'', "''"));
+        let still = db.rows(&format!("select 1 as one from pg_index i where i.indexrelid = to_regclass({index}) and not i.indisvalid and not exists (select 1 from pg_stat_progress_create_index p where p.relid = i.indrelid)")).await?;
+        if still.is_empty() {
+            continue;
+        }
         db.exec(&format!("drop index concurrently if exists {}", x.index)).await?;
         log(&note(format!("Dropped {}, which {} left invalid when it was cut off", x.index, x.migration)));
     }
@@ -12021,21 +12052,40 @@ mod tests {
         // Postgres reads a U+3000 as part of an unquoted name; the server folds the name itself.
         assert_eq!(f("create unique index concurrently users_email\u{3000} on users (email);"), "i.indrelid = to_regclass('users') and c.relname = ((parse_ident('users_email\u{3000}', false))[1])::name");
         // A comment between the words is no name.
-        assert_eq!(f("CREATE INDEX CONCURRENTLY /*review*/ ON app.t (x)"), "i.indrelid = to_regclass('app.t')");
+        assert!(f("CREATE INDEX CONCURRENTLY /*review*/ ON app.t (x)").starts_with("i.indrelid = to_regclass('app.t') and c.relname ~ '_idx[0-9]*$'"));
         assert_eq!(f("drop index concurrently a\u{a0}b;"), "c.oid = to_regclass('a\u{a0}b')");
-        assert_eq!(f("create index concurrently on \"T\"\n  (x)"), "i.indrelid = to_regclass('\"T\"')");
-        assert!(f("reindex index concurrently Édition_IDX").contains("x.oid = to_regclass('Édition_IDX')) || '_ccnew')"));
+        assert!(f("create index concurrently on \"T\"\n  (x)").starts_with("i.indrelid = to_regclass('\"T\"') and"));
         assert_eq!(super::leftover_filter("create index i on t (x)"), None);
         // A name read only in part would name another index: nothing is matched.
         assert_eq!(super::leftover_filter("drop index concurrently U&\"actual_idx\""), None);
         assert_eq!(super::leftover_filter("create index concurrently i on U&\"t\" (x)"), None);
         assert_eq!(f("drop index concurrently app . idx;"), "c.oid = to_regclass('app . idx')");
+        // The table as `only (t)` and `t*` write it.
+        assert!(f("create index concurrently i on only (orders) (x)").starts_with("i.indrelid = to_regclass('orders') and"));
+        assert!(f("create index concurrently i on orders* (x)").starts_with("i.indrelid = to_regclass('orders') and"));
     }
 
     #[test]
-    fn a_space_beyond_ascii_ending_a_file_is_kept() {
-        assert_eq!(super::normalized("select 1 as x\u{3000}\r\n \n"), "select 1 as x\u{3000}");
-        assert_eq!(super::normalized("select 1 as x\u{a0}"), "select 1 as x\u{a0}");
+    fn a_reindex_cut_off_is_found_by_its_copies_alone() {
+        let f = super::leftover_filter;
+        let copies = |sql: &str| f(sql).unwrap_or_else(|| panic!("{sql}"));
+        assert!(copies("reindex index concurrently Édition_IDX").contains("o.indexrelid in (select to_regclass('Édition_IDX') union"));
+        // Concurrently as an option, whose quoted values may hold a `)`, and not when it is off.
+        assert!(copies("reindex (concurrently) index users_n").contains("to_regclass('users_n')"));
+        assert!(copies("reindex (tablespace \"a)b\", concurrently true) table users").contains("o.indrelid in (select to_regclass('users') union"));
+        assert_eq!(f("reindex (concurrently false) index users_n"), None);
+        assert_eq!(f("reindex index users_n"), None);
+        assert!(copies("reindex schema concurrently app").contains("to_regnamespace('app')"));
+        assert!(copies("reindex database concurrently").contains("and true and"));
+        // A copy's name ends in the suffix, whatever the name holds before it.
+        assert!(copies("reindex table concurrently events").starts_with(r"c.relname ~ '_cc(new|old)[0-9]*$'"));
+    }
+
+    #[test]
+    fn line_endings_and_trailing_spacing_read_as_the_shared_cases_say() {
+        for c in crate::lock::tests::shared_cases()["normalized"].as_array().unwrap() {
+            assert_eq!(super::normalized(c["sql"].as_str().unwrap()), c["normalized"].as_str().unwrap(), "{c}");
+        }
     }
 
     #[cfg(feature = "cli")]
