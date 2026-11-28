@@ -1,0 +1,15 @@
+aggregated.sql: one (n: varchar) -> { m: unknown?, n: varchar? }
+branches.sql: many (n: varchar) -> { i: unknown?, c: unknown?, n: varchar? }
+cast.sql: many (n: varchar) -> { v: unknown?, n: varchar? }
+coalesce.sql: many (n: varchar) -> { v: unknown?, n: varchar? }
+derived.sql: many (n: varchar) -> { v: unknown?, n: varchar? }
+document.sql: many (n: varchar) -> { o: json { v: smallint?, t: tinyint? }, n: varchar? }
+greatest.sql: many (n: varchar) -> { g: unknown?, l: unknown?, n: varchar? }
+ifnull.sql: many (n: varchar) -> { v: unknown?, n: varchar? }
+kept.sql: many (n: varchar) -> { a: tinyint?, s: smallint?, z: bigint | int?, l: bigint | int, n: varchar? }
+kept_aggregate.sql: one (n: varchar) -> { m: tinyint?, n: varchar? }
+subquery.sql: one (n: varchar) -> { v: unknown?, n: varchar? }
+union.sql: many () -> { v: unknown? }
+unsigned.sql: many (n: varchar) -> { u: unknown?, b: unknown?, n: varchar? }
+view.sql: many (n: varchar) -> { v: unknown?, n: varchar? }
+with_query.sql: many (n: varchar) -> { v: unknown?, n: varchar? }

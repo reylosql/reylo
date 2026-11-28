@@ -1031,7 +1031,9 @@ pub(crate) fn literal_contradiction(ty: &Type, text: &str) -> Option<String> {
 /// Why a value breaks what a CHECK holds it to, if it does: a number's bounds and divisor, a UUID's
 /// version, and a `like` or `ilike` pattern. A regular expression's dialect is the server's own, so it is left to
 /// the CHECK itself, which refused any row it does not match. A bound the type holds of itself, as
-/// MySQL's `YEAR`, is read the same way.
+/// MySQL's `YEAR`, is read the same way, and so is an integer's width: a value its bits and
+/// signedness can't hold is one the type was narrower than, as where a server prepares a column
+/// as a narrower type than the value it computes.
 pub(crate) fn fact_contradiction(ty: &Type, text: &str) -> Option<String> {
     let breaks = |bounds: &reylo_engine_core::types::Bounds| -> Option<String> {
         use std::cmp::Ordering::{Equal, Greater, Less};
@@ -1060,7 +1062,7 @@ pub(crate) fn fact_contradiction(ty: &Type, text: &str) -> Option<String> {
     };
     let divides = |divisor: &Option<String>| divisor.as_deref().filter(|d| !is_multiple(text, d).unwrap_or(true)).map(|d| format!("typed as a multiple of {d} holds {text}"));
     match &ty.kind {
-        Kind::Integer(i) => breaks(&i.bounds).or_else(|| divides(&i.multiple_of)),
+        Kind::Integer(i) => width_contradiction(i, text).or_else(|| breaks(&i.bounds)).or_else(|| divides(&i.multiple_of)),
         Kind::Float(f) => breaks(&f.bounds),
         Kind::Decimal(d) => breaks(&d.bounds).or_else(|| divides(&d.multiple_of)),
         // RFC 9562's text form: the version is the 13th hex digit, and the variant the 17th, from
@@ -1077,6 +1079,23 @@ pub(crate) fn fact_contradiction(ty: &Type, text: &str) -> Option<String> {
         }
         _ => None,
     }
+}
+
+/// Why an integer's text is out of what its bits and signedness hold, if it is: from 0 to
+/// 2^bits − 1 unsigned, from −2^(bits−1) to 2^(bits−1) − 1 signed. A width past 128 bits, or none,
+/// holds anything.
+fn width_contradiction(i: &reylo_engine_core::types::IntegerType, text: &str) -> Option<String> {
+    use std::cmp::Ordering::{Greater, Less};
+    if i.bits == 0 || i.bits > 128 {
+        return None;
+    }
+    let (min, max) = if i.unsigned {
+        ("0".to_string(), (u128::MAX >> (128 - i.bits)).to_string())
+    } else {
+        ((i128::MIN >> (128 - i.bits)).to_string(), (i128::MAX >> (128 - i.bits)).to_string())
+    };
+    let signed = if i.unsigned { "an unsigned" } else { "a signed" };
+    (decimal_cmp(text, &min) == Some(Less) || decimal_cmp(text, &max) == Some(Greater)).then(|| format!("typed as {signed} {}-bit integer holds {text}", i.bits))
 }
 
 /// Two plain decimals in text compared exactly; `None` where either is not one, as a non-finite
@@ -1760,6 +1779,9 @@ pub fn check_sqlite<D: SqliteDb + ?Sized>(db: &D, statements: &[(String, String,
                                         found.push(format!("{file}: column {name} {why} with ({shown})"));
                                     }
                                 }
+                                // Integer arithmetic past 64 bits, which SQLite returns as a REAL,
+                                // is a limit the docs name, held to no integer's width.
+                                Some(rusqlite::types::Value::Real(f)) if col["type"]["kind"] == "integer" && f.abs() >= 9.223372036854775808e18 => {}
                                 // A number a literal or a list of literals types, as its text.
                                 Some(value @ (rusqlite::types::Value::Integer(_) | rusqlite::types::Value::Real(_))) => {
                                     let number = match value {
@@ -2222,6 +2244,23 @@ mod tests {
 
     fn column(category: &str, base: &str) -> Column {
         Column { name: "c".into(), ty: base.into(), category: category.into(), kind: "b".into(), base: base.into(), is_array: false, delimiter: ",".into(), labels: Vec::new(), generated: false }
+    }
+
+    #[test]
+    fn an_integer_is_held_to_its_width() {
+        let integer = |ty: Value| serde_json::from_value::<Type>(ty).unwrap();
+        let tiny = integer(json!({"kind": "integer", "bits": 8}));
+        let unsigned = integer(json!({"kind": "integer", "bits": 8, "unsigned": true}));
+        let huge = integer(json!({"kind": "integer", "bits": 128}));
+        assert_eq!(fact_contradiction(&tiny, "-128"), None);
+        assert_eq!(fact_contradiction(&tiny, "127"), None);
+        assert_eq!(fact_contradiction(&tiny, "2026").as_deref(), Some("typed as a signed 8-bit integer holds 2026"));
+        assert!(fact_contradiction(&tiny, "-129").is_some());
+        assert_eq!(fact_contradiction(&unsigned, "255"), None);
+        assert!(fact_contradiction(&unsigned, "256").is_some());
+        assert!(fact_contradiction(&unsigned, "-1").is_some());
+        assert_eq!(fact_contradiction(&huge, "-170141183460469231731687303715884105728"), None);
+        assert!(fact_contradiction(&huge, "170141183460469231731687303715884105728").is_some());
     }
 
     #[test]
