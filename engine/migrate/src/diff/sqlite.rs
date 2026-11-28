@@ -729,7 +729,8 @@ impl Alterer for SqliteAlterer {
     /// run first and be undone. A table it references whose change runs in place makes nothing
     /// again, and waiting for it could close a circle where none was. A rebuild that takes others
     /// of tables that reference each other to the target waits for what each of those needs there
-    /// too: a table one comes to reference, which a copied row looks its key up in.
+    /// too: a table one comes to reference by a key it has yet to have, which a copied row looks
+    /// up with foreign keys on.
     fn waits_for(&self, from: &Object, to: &Object) -> Vec<String> {
         if to.kind != Some(Kind::Table) {
             return Vec::new();
@@ -743,10 +744,10 @@ impl Alterer for SqliteAlterer {
             for m in circling.iter().filter(|m| **m != from.id && self.makes_again(&from.id, m)) {
                 let Some(target) = t.objects.get(m) else { continue };
                 let carried = f.objects.get(m).is_some_and(|x| m.strip_prefix("table ").and_then(|name| shape(x, target, decided(name))).is_some_and(|s| s.rebuild));
-                // But for one that references them itself, whose change already waits for theirs.
-                let theirs = |d: &str| t.objects.get(d).is_some_and(|o| o.deps.iter().any(|x| circling.contains(x)));
+                let text = target.create.first().map_or("", String::as_str);
+                let wanted = |d: &str| t.objects.get(d).is_some_and(|o| o.kind == Some(Kind::Table) && new_key(text, f, o));
                 if carried {
-                    out.extend(target.deps.iter().filter(|d| !circling.contains(*d) && !out.contains(*d) && !theirs(d)).cloned().collect::<Vec<_>>());
+                    out.extend(target.deps.iter().filter(|d| !circling.contains(*d) && !out.contains(*d) && wanted(d)).cloned().collect::<Vec<_>>());
                 }
             }
         }
@@ -1425,6 +1426,66 @@ fn whole_columns(list: &[Token], columns: &BTreeSet<String>) -> bool {
         k += 1;
     }
     true
+}
+
+/// The names in the parenthesized list `tokens` opens with, folded, but for each one's collation and
+/// order: None where it holds anything but names.
+fn listed(tokens: &[Token]) -> Option<(BTreeSet<String>, usize)> {
+    if tokens.first()?.text != "(" {
+        return None;
+    }
+    let close = tokens.iter().position(|t| t.text == ")")?;
+    let (mut out, mut k) = (BTreeSet::new(), 1);
+    while k < close {
+        let t = &tokens[k];
+        if t.upper() == "COLLATE" {
+            k += 2;
+            continue;
+        }
+        if t.text != "," && !matches!(t.upper().as_str(), "ASC" | "DESC") {
+            out.insert(name_of(t)?);
+        }
+        k += 1;
+    }
+    Some((out, close))
+}
+
+/// The keys a foreign key can name in table `table` of `schema`, each as its columns, folded: its
+/// primary key, each UNIQUE, and each unique index on whole columns over every row.
+fn keys_of(schema: &Schema, table: &Object) -> Vec<BTreeSet<String>> {
+    let mut out = Vec::new();
+    for p in table.create.first().map(|sql| parts(sql)).unwrap_or_default() {
+        let words = p.words();
+        let keyed = words.iter().any(|w| w == "UNIQUE") || words.windows(2).any(|w| w[0] == "PRIMARY" && w[1] == "KEY");
+        match &p.column {
+            Some(c) if keyed => out.push(BTreeSet::from([c.clone()])),
+            None if keyed => {
+                let at = p.tokens.iter().position(|t| t.text == "(");
+                out.extend(at.and_then(|at| listed(&p.tokens[at..])).map(|(cols, _)| cols));
+            }
+            _ => {}
+        }
+    }
+    for index in schema.objects.values().filter(|o| o.kind == Some(Kind::Index) && o.deps.contains(&table.id)) {
+        let tokens = tokenize(index.create.first().map_or("", String::as_str), Dialect::Sqlite);
+        if let Some((_, on)) = unique_index(&tokens) {
+            let list = &tokens[on + 1..];
+            out.extend(listed(list).filter(|(_, close)| close + 1 == list.len()).map(|(cols, _)| cols));
+        }
+    }
+    out
+}
+
+/// Whether `text`, a table's, references table `parent` (as the target has it) by a key it has yet
+/// to have: a table `from` lacks, or columns no key of `from`'s covers. A reference that names no
+/// columns names the primary key, there before as after.
+fn new_key(text: &str, from: &Schema, parent: &Object) -> bool {
+    let Some(old) = from.objects.get(&parent.id) else { return true };
+    let (keys, name) = (keys_of(from, old), fold(&Info::of(parent).name));
+    let tokens = tokenize(text, Dialect::Sqlite);
+    (0..tokens.len())
+        .filter(|&k| tokens[k].upper() == "REFERENCES" && tokens.get(k + 1).and_then(qualifier).as_deref() == Some(name.as_str()))
+        .any(|k| tokens.get(k + 2).and_then(|_| listed(&tokens[k + 2..])).is_some_and(|(cols, _)| !keys.contains(&cols)))
 }
 
 /// Whether a table's text names a column by the table's own name, as `"users"."age"`.
