@@ -431,7 +431,7 @@ function withCodecs(query: QueryModule, rows: unknown[] | Promise<unknown[]>): u
 /** `js.codecs` at run time (src/codecs.ts): every build step passes it where the statement holds a value a codec gives another type. */
 export function codecsOf(query: QueryModule): CodecRuntime {
   if (query.codecRuntime) return query.codecRuntime;
-  throw new TypeError(`${query.source ? `${query.source}: ` : ""}This statement holds a value js.codecs gives another type, which the run time converts with Reylo's codecRuntime, which a module a build step writes passes: build a module an earlier reylo wrote again (reylo generate typescript writes the files it wrote). A query defined by hand with its dialect's define function passes it too: define${query.dialect[0]!.toUpperCase()}${query.dialect.slice(1)}Query({ …, codecRuntime }) with codecRuntime from "reylo".`);
+  throw new TypeError(`${query.source ? `${query.source}: ` : ""}This statement holds a value js.codecs gives another type, which the run time converts with Reylo's codecRuntime, which a module a build step writes passes: build a module an earlier reylo wrote again (reylo generate typescript writes the files it wrote). A query defined by hand has it with defineQuery({ dialect: "${query.dialect}", … }).`);
 }
 
 /**

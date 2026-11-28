@@ -187,19 +187,37 @@ export function installPostgresCatalog(c: typeof postgresCatalog): void {
  * or by what the catalog said.
  */
 async function fieldDecoders(fields: Field[], columns: Columns | undefined, key: object, load: Load): Promise<Decoder[]> {
-  const byColumn = columns && columns.length === fields.length ? columns : undefined;
-  const created = fields.filter((f) => f.oid >= FIRST_USER_OID);
+  const declared = declaredColumn(fields, columns);
+  const created = fields.map((f, i) => [f, i] as const).filter(([f]) => f.oid >= FIRST_USER_OID);
   const known = learnedOf(key);
-  if (byColumn) created.forEach((f) => known.has(f.oid) || known.set(f.oid, { kind: byColumn[fields.indexOf(f)]![1], delim: byColumn[fields.indexOf(f)]![2] ?? "," }));
-  else if (created.length) await catalog?.(key, created.map((f) => f.oid), load);
+  for (const [f, i] of created) {
+    const column = declared(f, i);
+    if (column && !known.has(f.oid)) known.set(f.oid, { kind: column[1], delim: column[2] ?? "," });
+  }
+  // A created type no column of the module's declares (one a migration added under `select *`), or
+  // any for a query defined by hand with no columns: the catalog says, where `defineQuery` installed it.
+  const unmet = created.filter(([f]) => !known.has(f.oid)).map(([f]) => f.oid);
+  if (unmet.length) await catalog?.(key, unmet, load);
   return fields.map((f, i) => {
-    const column = byColumn?.[i];
+    const column = declared(f, i);
     if (column && byModule(column[1])) return textDecoder(column[1], column[2]);
     const b = builtinDecoder(f.oid);
     if (b) return b;
     const k = known.get(f.oid) ?? { kind: "text", delim: "," };
     return textDecoder(k.kind, k.delim);
   });
+}
+
+/**
+ * The module's column a result's field is: by position where the result has the module's count of
+ * columns, else, after a migration under `select *` added or dropped one, by name, the last column of
+ * each name, as a row holds it.
+ */
+function declaredColumn(fields: readonly { name: string }[], columns: Columns | undefined): (f: { name: string }, i: number) => Columns[number] | undefined {
+  if (!columns?.length) return () => undefined;
+  if (columns.length === fields.length) return (_f, i) => columns[i];
+  const byName = new Map(lastOfEach(columns).map((c) => [c[0], c] as const));
+  return (f) => byName.get(f.name);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -280,15 +298,31 @@ async function pgFamily(key: object, run: (types: object) => Promise<PgResult>, 
   if (!types.sawPending()) return rows;
   // Learned from the module's columns where the result has their fields, else from the catalog.
   if (result.fields && !Array.isArray(result)) await fieldDecoders(result.fields.map((f) => ({ name: f.name, oid: f.dataTypeID })), columns, key, load);
-  const oids = new Set<number>();
-  for (const row of rows) for (const v of Object.values(row)) if (v instanceof Pending) oids.add(v.oid);
-  await catalog?.(key, oids, load);
   const known = learnedOf(key);
-  const decoders = new Map([...oids].map((oid) => [oid, textDecoder(known.get(oid)?.kind ?? "text", known.get(oid)?.delim)]));
+  // A result with no fields (a pg-promise object's query() hands back the rows alone): each value
+  // by the module's column of its name.
+  const byName = new Map(lastOfEach(columns ?? []).map((c) => [c[0], c] as const));
+  const oids = new Set<number>();
   for (const row of rows) {
     for (const name in row) {
       const v = row[name];
-      if (v instanceof Pending) row[name] = decoders.get(v.oid)!(v.text);
+      if (!(v instanceof Pending) || known.has(v.oid)) continue;
+      const column = byName.get(name);
+      if (column) known.set(v.oid, { kind: column[1], delim: column[2] ?? "," });
+      else oids.add(v.oid);
+    }
+  }
+  if (oids.size) await catalog?.(key, oids, load);
+  const decoders = new Map<number, Decoder>();
+  const decoderOf = (oid: number) => {
+    let d = decoders.get(oid);
+    if (d === undefined) decoders.set(oid, (d = textDecoder(known.get(oid)?.kind ?? "text", known.get(oid)?.delim)));
+    return d;
+  };
+  for (const row of rows) {
+    for (const name in row) {
+      const v = row[name];
+      if (v instanceof Pending) row[name] = decoderOf(v.oid)(v.text);
     }
   }
   return rows;

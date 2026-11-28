@@ -1236,7 +1236,8 @@ const readers: Record<Kind, Decoder> = {};
 
 /** A query's readers, for every query of the process (src/index.ts, `define`). */
 export function installReaders(r: Readers): void {
-  Object.assign(readers, r);
+  // Each kind has one reader for the process: the first query's, which every module's is.
+  for (const [kind, reader] of Object.entries(r)) if (reader && !(kind in readers)) readers[kind] = reader;
 }
 
 /** The kinds a kind holds a scalar of: itself, an array's or a whole array's elements, a row value's fields, a range's bounds, and an either's members. */
@@ -1546,7 +1547,7 @@ export function installPostgresTypes(types: PostgresTypes): void {
 export function postgresTypesFor(kind: Kind, source?: string): PostgresTypes {
   if (installed) return installed;
   const base = kind.replace(/(?:\[\])+$/, "");
-  throw new TypeError(`${source ? `${source}: ` : ""}Reylo reads and writes a Postgres ${isRowKind(base) ? "row value" : isRangeKind(base) ? "range" : isMultirangeKind(base) ? "multirange" : base} with Reylo's postgresTypes, which a module a build step writes passes where its statement holds one: build a module an earlier reylo wrote again (reylo generate typescript writes the files it wrote). A query defined by definePostgresQuery by hand passes it too: definePostgresQuery({ …, postgresTypes }) with postgresTypes from "reylo".`);
+  throw new TypeError(`${source ? `${source}: ` : ""}Reylo reads and writes a Postgres ${isRowKind(base) ? "row value" : isRangeKind(base) ? "range" : isMultirangeKind(base) ? "multirange" : base} with Reylo's postgresTypes, which a module a build step writes passes where its statement holds one: build a module an earlier reylo wrote again (reylo generate typescript writes the files it wrote). A query defined by hand has them with defineQuery({ dialect: "postgres", … }).`);
 }
 
 // ---------------------------------------------------------------------------------------------
