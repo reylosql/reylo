@@ -17,6 +17,7 @@ Turso Cloud runs libSQL, a fork of SQLite, so everything on the [SQLite](/docs/s
 | SQLite versions | Reylo's 3.53, and the SQLite of each driver your `package.json` lists: 3.45.1 for `@libsql/client` |
 | libSQL's own SQL | Vector columns and indexes, the vector functions, `vector_top_k` and `alter table … alter column` ([Vectors](#vectors)) |
 | Extensions | The functions of the sqlean extensions Turso Cloud loads ([Extensions](#extensions)) |
+| Turso's own engine's SQL | Full-text search, string UUIDs and time functions ([Turso's own engine](#turso-engine)) |
 <Rust>
 | Rust | Types against the same local file; sqlx has no libSQL client, so its queries can't run on Turso Cloud |
 </Rust>
@@ -129,6 +130,7 @@ Migrations on Turso:
 
 - Every `reylo migrate` and `reylo db` command runs on Turso Cloud and on any libSQL server. It takes the same URLs as `@libsql/client`. Add `?tls=0` to a `libsql://` URL for a server without TLS.
 - From code, pass the same URL: `migrate({ url })` ([API](/docs/migrate/usage#api)).
+- On Turso's own engine, pass the connection: `migrate(db)` ([below](#turso-engine)).
 - Shadow databases are in memory, on libSQL's own engine as Turso Cloud runs it. That includes Turso Cloud's extra functions, such as `uuid4` and `regexp_like`.
 - Migrations can use libSQL's own SQL, such as a vector index or `alter table … alter column`. Then every command opens your local file on libSQL's engine too.
 - Tables named `__turso_internal_…` belong to Turso's engine. Reylo leaves them out of `schema.sql` and every plan, and keeps them in step when a table changes.
@@ -250,3 +252,34 @@ About the compat driver:
 - With `@tursodatabase/database` in your `package.json`, the type check also runs each query on Turso's engine. It skips a schema with an FTS5 table or a vector index, which the engine can't open.
 - From 0.8 on, its errors carry no code. With [`.try()`](/docs/typescript#try), `code` is `undefined` and only `message` names the failure.
 - An integer past 2^53 comes back exact.
+
+Run your migrations on the app's own connection, before it serves requests:
+
+```ts title="main.ts"
+import { connect } from "@tursodatabase/database";
+import { migrate } from "reylo";
+
+const db = await connect("app.db");
+const ran = await migrate(db);
+```
+
+Each locked migration the database hasn't run runs in a transaction with its row in `__reylo_migrations`. It rejects, running nothing, on a draft or on an edit to a migration the database ran.
+
+Reylo types the SQL of Turso's own engine too, with `@tursodatabase/database` in your `package.json`. Index a table with `using fts`, and search it with `fts_match`:
+
+```sql
+create index docs_fts on docs using fts (title, body);
+
+select id, title, fts_score(title, body, :q) as score
+from docs
+where fts_match(title, body, :q)
+order by score desc
+```
+
+About its SQL:
+
+- The type check reads a file that has a full-text index, which SQLite can't make.
+- On Turso's engine, `uuid4()` and `uuid7()` return a `Uint8Array`. On Turso Cloud they return a string, so with both drivers in your `package.json` they're `unknown`. For a string on Turso's engine, call `uuid4_str()` or `uuid7_str()`.
+- A time from the time functions, as `time_now()`, is a `Uint8Array`. A duration is a number of nanoseconds.
+- Turso's engine returns `NULL` from `regexp` for a pattern it can't compile, so a match there is `boolean | null`.
+- Another driver in your `package.json`, such as `better-sqlite3`, refuses these functions in the type check.

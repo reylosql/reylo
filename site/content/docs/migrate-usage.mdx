@@ -757,6 +757,13 @@ It resolves to the names of the migrations it ran, and rejects with the deploy's
 await migrate({ url: process.env.PRODUCTION_URL });
 ```
 
+Where your app holds its SQLite file, as on [Turso's own engine](/docs/turso#turso-engine), pass the connection. The migrations run on it, without the command line:
+
+```ts
+const db = await connect("app.db");
+await migrate(db);
+```
+
 <Rust>
 In Rust, `.run()` returns the same names, or an error with the deploy's problems. Its `.applied()` lists the migrations that ran before one failed. The macro compiles your migrations into the crate, so the app runs the migrations it was built with. To check the database without changing it, call `.status()`:
 

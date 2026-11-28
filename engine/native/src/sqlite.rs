@@ -24,6 +24,9 @@ struct Connection {
     file: File,
     /// The engine's answers, kept between statements as the loader's session keeps them.
     answers: AnswerCache<Describe>,
+    /// What the host lists beside the functions of the SQLite here, as rows of `FUNCTIONS_QUERY`:
+    /// the app's own engines, by a function each has alone ([`engine_functions`]).
+    functions: Vec<Vec<Value>>,
 }
 
 /// A database file as a connection reads it (`File::open`).
@@ -47,11 +50,12 @@ pub struct Session {
 }
 
 impl Session {
-    /// The database file at `path`, resolved as the project names it (`sqlitePath` in src/project.ts).
-    pub fn open(path: &str) -> Result<Session, crate::Failure> {
+    /// The database file at `path`, resolved as the project names it (`sqlitePath` in src/project.ts),
+    /// for the app of the project at or above `project`.
+    pub fn open(path: &str, project: &std::path::Path) -> Result<Session, crate::Failure> {
         let file = File::new(path);
         file.open().map_err(|e| crate::Failure::Unreachable(e.to_string()))?;
-        Ok(Session { connection: Connection { file, answers: AnswerCache::until_cleared() }, version: crate::engines::sqlite::sqlite_tree::version().to_string() })
+        Ok(Session { connection: Connection { file, answers: AnswerCache::until_cleared(), functions: engine_functions(project) }, version: crate::engines::sqlite::sqlite_tree::version().to_string() })
     }
 
     /// Drops the answers kept from earlier statements, for a caller that outlives a schema change.
@@ -61,7 +65,7 @@ impl Session {
 
     pub fn analyze(&mut self, sql: &str) -> Result<reylo_engine_core::api::Analysis, crate::Failure> {
         let db = self.connection.file.open().map_err(|e| crate::Failure::Unreachable(e.to_string()))?;
-        answers::analyze(&db, sql, &mut self.connection.answers).map_err(|e| crate::Failure::Error(e.to_string()))
+        answers::analyze_with(&db, sql, &mut self.connection.answers, &self.connection.functions).map_err(|e| crate::Failure::Error(e.to_string()))
     }
 }
 
@@ -125,7 +129,9 @@ impl Program for Sqlite {
                 match file.open() {
                     Ok(_) => {
                         self.next += 1;
-                        self.connections.insert(self.next, Connection { file, answers: AnswerCache::until_cleared() });
+                        // The project's directory, where the host names it (src/analyze.ts).
+                        let functions = request["project"].as_str().map(|dir| engine_functions(std::path::Path::new(dir))).unwrap_or_default();
+                        self.connections.insert(self.next, Connection { file, answers: AnswerCache::until_cleared(), functions });
                         json!({ "status": "opened", "conn": self.next, "version": crate::engines::sqlite::sqlite_tree::version() })
                     }
                     // A file that cannot be opened is a database that cannot be reached: a build runs on `reylo/.cache/`.
@@ -136,7 +142,7 @@ impl Program for Sqlite {
                 None => closed(id),
                 Some(c) => match c.file.open() {
                     Err(e) => json!({ "status": "unreachable", "message": e.to_string() }),
-                    Ok(db) => match answers::analyze(&db, sql, &mut c.answers) {
+                    Ok(db) => match answers::analyze_with(&db, sql, &mut c.answers, &c.functions) {
                         Ok(analysis) => json!({ "status": "analysis", "analysis": analysis }),
                         Err(e) => json!({ "status": "error", "message": e.to_string() }),
                     },
@@ -161,8 +167,10 @@ impl Program for Sqlite {
                 None => closed(id),
                 Some(c) => match c.file.open() {
                     Err(e) => json!({ "status": "unreachable", "message": e.to_string() }),
+                    // The functions listed beside the file's are read by every analysis, so they name its entries too.
                     Ok(db) => match schema(&db) {
-                        Ok(schema) => schema.answer(),
+                        Ok(schema) if c.functions.is_empty() => schema.answer(),
+                        Ok(schema) => crate::Schema::of(&[vec![json!(schema.fingerprint)], vec![Value::from(c.functions.iter().map(|row| Value::from(row.clone())).collect::<Vec<_>>())]], schema.stamp).answer(),
                         Err(e) => json!({ "status": "error", "message": e.to_string() }),
                     },
                 },
@@ -224,7 +232,10 @@ impl File {
         // app's own connections; a native build keeps SQLite's usual locking, which would. The mode also
         // trusts that nothing else writes the file, so the connection lives for one request.
         #[cfg(target_family = "wasm")]
-        db.pragma_update(None, "locking_mode", "EXCLUSIVE")?;
+        {
+            db.pragma_update(None, "locking_mode", "EXCLUSIVE")?;
+            tolerate_turso(&db)?;
+        }
         // Natively the locks are real, and an engine that keeps the file locked for as long as its
         // connection is open (Turso's) leaves a reader waiting forever: after a short wait the program
         // reads a copy of the file and its write-ahead log, as they stand, which sees every committed
@@ -236,6 +247,10 @@ impl File {
                 Err(rusqlite::Error::SqliteFailure(e, _)) if matches!(e.code, rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked) => {
                     self.held.set(true);
                     return self.open_copy();
+                }
+                Err(e) if turso_schema(&e) => {
+                    allow_unreadable_rows(&db)?;
+                    self.held.set(false);
                 }
                 Err(e) => return Err(e),
                 Ok(()) => self.held.set(false),
@@ -254,7 +269,11 @@ impl File {
     #[cfg(not(target_family = "wasm"))]
     fn open_copy(&self) -> rusqlite::Result<Db> {
         let failed = |e: std::io::Error| rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CANTOPEN), Some(format!("cannot copy the database the app holds: {e}")));
-        let open = |copy: &std::path::Path| Db::open_with_flags(copy, OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX);
+        let open = |copy: &std::path::Path| {
+            let db = Db::open_with_flags(copy, OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
+            tolerate_turso(&db)?;
+            Ok(db)
+        };
         let mut copies = self.copies.borrow_mut();
         if copies.is_none() {
             *copies = Some(Copies::create().map_err(failed)?);
@@ -294,6 +313,63 @@ impl File {
             }
         }
         Err(failed(std::io::Error::other("its logs were restarted under every copy")))
+    }
+}
+
+/// The functions the host lists for the SQLite engines the app of the project at or above
+/// `project` runs on ([`project::sqlite_engines`](crate::project::sqlite_engines)), one each that
+/// only that engine has: Turso's own engine's `uuid4_str`, and beside it libSQL's
+/// `libsql_vector_idx`. They change what Turso's engine answers is typed as (`uuid4()`, `regexp`),
+/// so an app that runs none lists nothing, and keeps the analyses it had. Each is a function the
+/// engine already knows, so listing it changes nothing else.
+fn engine_functions(project: &std::path::Path) -> Vec<Vec<Value>> {
+    let env: HashMap<String, String> = std::env::vars_os().map(|(name, value)| (name.to_string_lossy().into_owned(), value.to_string_lossy().into_owned())).collect();
+    let engines = crate::project::sqlite_engines(project, &env);
+    if !engines.turso {
+        return Vec::new();
+    }
+    let mut rows = vec![vec![json!("uuid4_str"), json!(0), json!("s")]];
+    if engines.libsql {
+        rows.push(vec![json!("libsql_vector_idx"), json!(-1), json!("s")]);
+    }
+    rows
+}
+
+/// Whether SQLite refused the file's schema over a row only Turso's own engine writes: an index of
+/// an access method SQLite doesn't have, as `CREATE INDEX docs_fts ON docs USING fts (body)` and the
+/// `USING backing_btree` index of the table that holds its data. A schema refused for anything else
+/// (a row that is corrupt, a materialized view) is refused as it was.
+fn turso_schema(e: &rusqlite::Error) -> bool {
+    matches!(e, rusqlite::Error::SqliteFailure(_, Some(m)) if m.starts_with("malformed database schema (") && m.ends_with("near \"USING\": syntax error"))
+}
+
+/// The tables, views and indexes `sqlite_schema` lists that SQLite didn't read, as it skips a row it
+/// can't parse once the schema is writable: each one's name and DDL. (A trigger has no list to hold
+/// it to; one that didn't parse is reported by the replay, if a statement it fires on fails.)
+const UNREAD_QUERY: &str = "select name, sql from sqlite_schema s where sql is not null and ((type in ('table', 'view') and name not in (select name from pragma_table_list where schema = 'main')) or (type = 'index' and not exists (select 1 from pragma_index_list(s.tbl_name) i where i.name = s.name)))";
+
+/// Reads the schema past Turso's own rows: with the schema writable, SQLite keeps every row it can
+/// parse, and the engine's catalog query still lists each row's DDL
+/// ([`DDL_QUERY`](crate::engines::sqlite::sqlite::DDL_QUERY)), whose replay leaves such an index out.
+/// Every other row it can't parse is refused as SQLite refuses it, so a schema broken some other way
+/// stays refused. The connection never writes: the file is opened read-only, and a held file's copy
+/// is only read.
+fn allow_unreadable_rows(db: &Db) -> rusqlite::Result<()> {
+    db.set_db_config(rusqlite::config::DbConfig::SQLITE_DBCONFIG_WRITABLE_SCHEMA, true)?;
+    let mut stmt = db.prepare(UNREAD_QUERY)?;
+    let unread = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    match unread.into_iter().find(|(_, sql)| !crate::engines::sqlite::sqlite_tree::method_index(sql)) {
+        Some((name, _)) => Err(rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CORRUPT), Some(format!("malformed database schema ({name})")))),
+        None => Ok(()),
+    }
+}
+
+/// Reads `db`'s schema, past Turso's own rows where SQLite refuses it over them ([`turso_schema`]).
+/// Any other failure is left for the first statement to meet.
+fn tolerate_turso(db: &Db) -> rusqlite::Result<()> {
+    match db.query_row("select count(*) from sqlite_schema", [], |_| Ok(())) {
+        Err(e) if turso_schema(&e) => allow_unreadable_rows(db),
+        _ => Ok(()),
     }
 }
 
@@ -360,6 +436,31 @@ mod tests {
     static TURNS: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
+    fn a_schema_is_read_past_turso_s_own_index_rows_and_no_other_row_sqlite_cannot_parse() {
+        let _turn = TURNS.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("reylo-sqlite-turso-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // The rows Turso's own engine writes for a full-text index, and `more` after them.
+        let file = |name: &str, more: &[&str]| {
+            let path = dir.join(format!("{name}.db"));
+            let _ = std::fs::remove_file(&path);
+            let db = Db::open(&path).unwrap();
+            db.execute_batch("create table docs (id integer primary key, body text not null)").unwrap();
+            db.set_db_config(rusqlite::config::DbConfig::SQLITE_DBCONFIG_WRITABLE_SCHEMA, true).unwrap();
+            for sql in ["CREATE INDEX docs_fts ON docs USING fts (body)"].iter().chain(more) {
+                db.execute("insert into sqlite_schema values ('index', ?1, 'docs', 0, ?2)", [sql.split_whitespace().nth(2).unwrap(), sql]).unwrap();
+            }
+            path.to_str().unwrap().to_string()
+        };
+        let analysis = Session::open(&file("fts", &[]), &dir).unwrap().analyze("select id, body from docs").unwrap();
+        assert!(analysis.diagnostics.is_empty(), "{:?}", analysis.diagnostics);
+        // A row SQLite can't parse for any other reason is still a schema it refuses.
+        let Err(e) = Session::open(&file("broken", &["CREATE INDEX docs_broken ON docs (body"]), &dir) else { panic!("a broken index read") };
+        assert!(e.to_string().contains("malformed database schema (docs_broken)"), "{e}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn an_insert_into_a_table_declaring_on_conflict_replace_reaches_what_its_delete_cascades_to() {
         let _turn = TURNS.lock().unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("reylo-sqlite-replace-test-{}", std::process::id()));
@@ -368,7 +469,7 @@ mod tests {
             let path = dir.join(format!("{name}.db"));
             let _ = std::fs::remove_file(&path);
             Db::open(&path).unwrap().execute_batch(&format!("create table p (id integer primary key, email text {clause}); create table c (id integer primary key, pid integer not null references p (id) on delete cascade);")).unwrap();
-            let analysis = Session::open(path.to_str().unwrap()).unwrap().analyze("insert into p (email) values (:e)").unwrap();
+            let analysis = Session::open(path.to_str().unwrap(), &std::env::temp_dir()).unwrap().analyze("insert into p (email) values (:e)").unwrap();
             let Some(reylo_engine_core::types::Capabilities { tables: reylo_engine_core::types::CapabilityTables::Named(tables), .. }) = analysis.capabilities else { panic!("{clause}: {:?}", analysis.capabilities) };
             // The errors it may raise name the tables it reaches too: `c`'s NOT NULL.
             let errors = serde_json::to_value(&analysis.errors).unwrap();

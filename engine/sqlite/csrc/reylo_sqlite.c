@@ -15,7 +15,8 @@
 ** there. A host that lists the functions of its own SQLite (pragma_function_list) decides which
 ** functions exist: one it has and this build lacks gets a stub too, and one this build has and it
 ** lacks is refused. libSQL's vector functions and its vector_top_k, and the functions of the sqlean
-** extensions Turso Cloud loads, are on every replay, whatever the host lists (openLibsql).
+** extensions Turso Cloud loads, are on every replay, whatever the host lists, and Turso's own
+** engine's where the host lists it among the app's (openLibsql).
 */
 #include <stdio.h>
 #include <string.h>
@@ -873,7 +874,10 @@ static void hostFinalStub(sqlite3_context *ctx){ sqlite3_result_null(ctx); }
 ** prepares each statement on the application's own drivers (src/sqlite-drivers.ts), and one whose
 ** SQLite lacks them refuses it. The analysis only prepares, so a stand-in under the same name,
 ** argument count, kind and flags resolves as libSQL's own does. A name this build has already, as
-** sqlean's math functions, `concat` and `median`, keeps this build's function. */
+** sqlean's math functions, `concat` and `median`, keeps this build's function. Turso's own engine,
+** a rewrite of SQLite rather than a fork, carries vectors and sqlean's regexp too, and adds full-text
+** search, string UUIDs and sqlean's time functions, which follow: the same rule holds for them, and
+** its driver is one of the application's drivers that prepare each statement. */
 #define D (SQLITE_UTF8|SQLITE_DETERMINISTIC)
 #define I (SQLITE_UTF8|SQLITE_INNOCUOUS)
 #define DI (SQLITE_UTF8|SQLITE_DETERMINISTIC|SQLITE_INNOCUOUS)
@@ -939,6 +943,38 @@ static const struct TursoFunction { const char *zName; int nArg; char cKind; int
   {"regexp", 2, 's', D}, {"regexp_capture", 2, 's', D}, {"regexp_capture", 3, 's', D},
   {"regexp_like", 2, 's', D}, {"regexp_replace", 3, 's', D}, {"regexp_substr", 2, 's', D},
 };
+
+/* Turso's own engine (@tursodatabase/database, 0.8.4), its in-tree extensions, at the argument
+** counts each takes, which Turso checks only as a statement runs: -1 for any count (its UUID
+** functions ignore what they don't read), and a count below -1 a minimum, -2 for two or more, as a
+** full-text call reads any number of text columns. Registered only where the
+** host lists Turso's engine among the app's (its `uuid4_str`, which engine/native's SQLite program
+** lists from the project's package.json), since no other SQLite runs them, and `uuid7(seconds)`
+** would otherwise pass for sqlean's `uuid7()`. */
+static const struct TursoFunction aTursoEngine[] = {
+  {"uuid4_str", -1, 's', I}, {"uuid7", -1, 's', I}, {"uuid7_str", -1, 's', I},
+  {"fts_match", -2, 's', DI}, {"fts_score", -1, 's', DI}, {"fts_highlight", -4, 's', DI},
+  {"vector32_sparse", 1, 's', DI}, {"vector_concat", 2, 's', DI}, {"vector_slice", 3, 's', DI},
+  {"vector_distance_dot", 2, 's', DI}, {"vector_distance_jaccard", 2, 's', DI},
+  {"time_now", 0, 's', I}, {"time_date", 3, 's', DI}, {"time_date", 6, 's', DI}, {"time_date", 7, 's', DI},
+  {"time_date", 8, 's', DI}, {"time_get", 2, 's', DI},
+  {"time_get_year", 1, 's', DI}, {"time_get_month", 1, 's', DI}, {"time_get_day", 1, 's', DI},
+  {"time_get_hour", 1, 's', DI}, {"time_get_minute", 1, 's', DI}, {"time_get_second", 1, 's', DI},
+  {"time_get_nano", 1, 's', DI}, {"time_get_weekday", 1, 's', DI}, {"time_get_yearday", 1, 's', DI},
+  {"time_get_isoyear", 1, 's', DI}, {"time_get_isoweek", 1, 's', DI},
+  {"time_unix", 1, 's', DI}, {"time_unix", 2, 's', DI}, {"time_milli", 1, 's', DI}, {"time_micro", 1, 's', DI},
+  {"time_nano", 1, 's', DI}, {"time_to_unix", 1, 's', DI}, {"time_to_milli", 1, 's', DI},
+  {"time_to_micro", 1, 's', DI}, {"time_to_nano", 1, 's', DI},
+  {"time_after", 2, 's', DI}, {"time_before", 2, 's', DI}, {"time_compare", 2, 's', DI}, {"time_equal", 2, 's', DI},
+  {"time_add", 2, 's', DI}, {"time_add_date", 2, 's', DI}, {"time_add_date", 3, 's', DI},
+  {"time_add_date", 4, 's', DI}, {"time_sub", 2, 's', DI}, {"time_since", 1, 's', I}, {"time_until", 1, 's', I},
+  {"time_trunc", 2, 's', DI}, {"time_round", 2, 's', DI},
+  {"time_fmt_iso", 1, 's', DI}, {"time_fmt_iso", 2, 's', DI}, {"time_fmt_datetime", 1, 's', DI},
+  {"time_fmt_datetime", 2, 's', DI}, {"time_fmt_date", 1, 's', DI}, {"time_fmt_date", 2, 's', DI},
+  {"time_fmt_time", 1, 's', DI}, {"time_fmt_time", 2, 's', DI}, {"time_parse", 1, 's', DI},
+  {"dur_ns", 0, 's', DI}, {"dur_us", 0, 's', DI}, {"dur_ms", 0, 's', DI}, {"dur_s", 0, 's', DI},
+  {"dur_m", 0, 's', DI}, {"dur_h", 0, 's', DI},
+};
 #undef D
 #undef I
 #undef DI
@@ -946,6 +982,7 @@ static const struct TursoFunction { const char *zName; int nArg; char cKind; int
 static int isTursoFunction(const char *zName){
   int i;
   for(i=0; i<(int)(sizeof(aTurso)/sizeof(aTurso[0])); i++) if( sqlite3StrICmp(aTurso[i].zName, zName)==0 ) return 1;
+  for(i=0; i<(int)(sizeof(aTursoEngine)/sizeof(aTursoEngine[0])); i++) if( sqlite3StrICmp(aTursoEngine[i].zName, zName)==0 ) return 1;
   return 0;
 }
 
@@ -1049,8 +1086,9 @@ static sqlite3_module seriesModule = {
 };
 
 /* libSQL's functions and sqlean's, vector_top_k, generate_series and stats_seq on the replay, but a
-** name this build has its own function of: a scalar function or an aggregate, by its kind. */
-static void openLibsql(sqlite3_str *errors){
+** name this build has its own function of: a scalar function or an aggregate, by its kind; and
+** Turso's own engine's where the app runs it (`turso`). */
+static void openLibsql(sqlite3_str *errors, int turso){
   enum { N = sizeof(aTurso)/sizeof(aTurso[0]) };
   char aHas[N];
   int i, rc;
@@ -1063,6 +1101,19 @@ static void openLibsql(sqlite3_str *errors){
     if( f->cKind=='a' ) rc = sqlite3_create_function_v2(gDb, f->zName, f->nArg, f->flags, 0, 0, hostFunctionStub, hostFinalStub, 0);
     else rc = sqlite3_create_function_v2(gDb, f->zName, f->nArg, f->flags, 0, hostFunctionStub, 0, 0, 0);
     if( rc!=SQLITE_OK ) functionError(errors, f->zName);
+  }
+  /* This build has none of Turso's own, which are all scalar. One with a minimum count takes any
+  ** count, and each count below the minimum is registered and deleted: SQLite resolves a call to
+  ** the definition of its exact count before one of any count, and reports a deleted one as the
+  ** wrong number of arguments. */
+  for(i=0; turso && i<(int)(sizeof(aTursoEngine)/sizeof(aTursoEngine[0])); i++){
+    const struct TursoFunction *f = &aTursoEngine[i];
+    int n;
+    if( sqlite3_create_function_v2(gDb, f->zName, f->nArg < -1 ? -1 : f->nArg, f->flags, 0, hostFunctionStub, 0, 0, 0)!=SQLITE_OK ){ functionError(errors, f->zName); continue; }
+    for(n=0; n<-f->nArg && f->nArg<-1; n++){
+      if( sqlite3_create_function_v2(gDb, f->zName, n, f->flags, 0, hostFunctionStub, 0, 0, 0)!=SQLITE_OK
+       || sqlite3_create_function_v2(gDb, f->zName, n, f->flags, 0, 0, 0, 0, 0)!=SQLITE_OK ){ functionError(errors, f->zName); break; }
+    }
   }
   if( sqlite3_create_module(gDb, "vector_top_k", &vectorTopKModule, 0)!=SQLITE_OK ) functionError(errors, "vector_top_k");
   if( sqlite3_create_module(gDb, "generate_series", &seriesModule, 0)!=SQLITE_OK ) functionError(errors, "generate_series");
@@ -1141,6 +1192,35 @@ static int replayAuth(void *pArg, int code, const char *z1, const char *z2, cons
   return SQLITE_OK;
 }
 
+/* Whether a replay step is an index of an access method SQLite does not have, as Turso's own
+** engine writes them into sqlite_schema: `CREATE INDEX docs_fts ON docs USING fts (body)`, and the
+** `USING backing_btree` index of the table that holds its data. An index decides no statement's
+** types, so the replay leaves it out without a word, where it would otherwise report it whenever a
+** statement fails. SQLite's own tokenizer reads it, so quoting and comments are read as SQLite
+** reads them. */
+static int methodIndex(const char *zDdl){
+  const unsigned char *z = (const unsigned char*)zDdl;
+  int aTk[4] = {0, 0, 0, 0}; /* the first tokens: CREATE [UNIQUE] INDEX */
+  int nTk = 0, on = 0, named = 0;
+  while( *z ){
+    int tk = 0;
+    int n = (int)sqlite3GetToken(z, &tk);
+    if( n<=0 ) return 0;
+    z += n;
+    if( tk==TK_SPACE || tk==TK_COMMENT ) continue;
+    if( nTk<4 ) aTk[nTk++] = tk;
+    if( nTk==2 && !(aTk[0]==TK_CREATE && (tk==TK_INDEX || tk==TK_UNIQUE)) ) return 0;
+    if( nTk==3 && aTk[1]==TK_UNIQUE && tk!=TK_INDEX ) return 0;
+    if( !on ){ on = tk==TK_ON; continue; }
+    /* After ON: the table's name, as a name or a schema-qualified one, then USING. */
+    if( tk==TK_USING ) return named;
+    if( tk==TK_DOT ){ named = 0; continue; }
+    if( tk==TK_ID || tk==TK_STRING || (tk<TK_SPACE && sqlite3ParserFallback(tk)==TK_ID) ){ if( named ) return 0; named = 1; continue; }
+    return 0;
+  }
+  return 0;
+}
+
 /* Replays the DDL into a fresh in-memory database; errors are reported, not fatal. The host's
 ** functions are registered first, so a view, an index or a CHECK that calls one replays too: the
 ** ones it registers on its connection (azFn), and of the ones its SQLite lists (azHost, with the
@@ -1181,7 +1261,8 @@ static int openSchema(
   ** reported in errors as any failed step is ("not authorized"). */
   sqlite3_limit(gDb, SQLITE_LIMIT_ATTACHED, 0);
   installHooks(0);
-  openLibsql(errors);
+  for(i=0; i<nHost && sqlite3StrICmp(azHost[i], "uuid4_str")!=0; i++){}
+  openLibsql(errors, i<nHost);
   for(i=0; i<nFn; i++){
     /* Deterministic and innocuous: whatever the host's own flags, the replay accepts every place
     ** the host's schema could already call it from. */
@@ -1219,7 +1300,7 @@ static int openSchema(
        || sqlite3_create_function_v2(gDb, &zErr[sizeof(zNoFunction)-1], -1, flags, 0, hostFunctionStub, 0, 0, 0)!=SQLITE_OK ) break;
       sqlite3_free(zErr); zErr = 0;
     }
-    if( rcExec!=SQLITE_OK && !internalTable(azDdl[i], zErr) ){
+    if( rcExec!=SQLITE_OK && !internalTable(azDdl[i], zErr) && !methodIndex(azDdl[i]) ){
       sqlite3_str_appendchar(errors, 1, '{');
       kv_int(errors, "index", i);
       kv_str(errors, "message", zErr);
@@ -1431,6 +1512,10 @@ void reylo_sqlite_free(char *p){ sqlite3_free(p); }
 
 /* The version of this SQLite, as "3.53.4": the one that prepares every statement the engine types. */
 const char *reylo_sqlite_version(void){ return sqlite3_libversion(); }
+
+/* Whether `zDdl` is an index of an access method SQLite doesn't have (methodIndex), for a host that
+** reads a file whose schema holds one. */
+int reylo_sqlite_method_index(const char *zDdl){ return methodIndex(zDdl); }
 
 #ifdef REYLO_SQLITE_MAIN
 /* reylo_sqlite_check <database file> <statements file>: the DDL of the file, one JSON line per statement. */

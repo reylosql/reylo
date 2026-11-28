@@ -5,6 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFil
 import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { Session } from "../src/analyze.ts";
 import { placeRefusal, projectDrivers, SQLEAN_AGGREGATES, SQLEAN_FUNCTIONS, withoutSqlean } from "../src/sqlite-drivers.ts";
 import { DRIVERS } from "./helpers.ts";
@@ -299,11 +300,106 @@ test("the check reads a call of a sqlean function as one of char, outside string
 test("the sqlean functions the driver check lets through are the ones the engine knows", () => {
   const walker = readFileSync(new URL("../engine/sqlite/csrc/reylo_sqlite.c", import.meta.url), "utf8");
   const table = walker.slice(walker.indexOf("aTurso[] = {"), walker.indexOf("};", walker.indexOf("aTurso[] = {")));
-  const sqlean = [...table.slice(table.indexOf("/* sqlean's")).matchAll(/\{"([a-z0-9_]+)",/g)].map((m) => m[1]!);
+  const sqleans = table.slice(table.indexOf("/* sqlean's"));
+  const sqlean = [...sqleans.matchAll(/\{"([a-z0-9_]+)",/g)].map((m) => m[1]!);
   assert.ok(sqlean.length > 100, `${sqlean.length}`);
   assert.deepEqual(sqlean.filter((name) => !SQLEAN_FUNCTIONS.has(name)), []);
   // Each aggregate, with its argument count, but `median` and `percentile`, which the engine's own SQLite has.
-  const aggregates = [...table.slice(table.indexOf("/* sqlean's")).matchAll(/\{"([a-z0-9_]+)", (-?\d+), 'a'/g)].map((m) => [m[1]!, Number(m[2])] as const);
+  const aggregates = [...sqleans.matchAll(/\{"([a-z0-9_]+)", (-?\d+), 'a'/g)].map((m) => [m[1]!, Number(m[2])] as const);
   assert.deepEqual(new Map(aggregates), new Map([...SQLEAN_AGGREGATES].filter(([name]) => name !== "median" && name !== "percentile")));
   for (const vtab of ["generate_series", "stats_seq"]) assert.ok(SQLEAN_FUNCTIONS.has(vtab));
+});
+
+const turso = skip || (!existsSync(join(DRIVERS, "@tursodatabase", "database")) && "lab/drivers has no @tursodatabase/database installed");
+
+/** A project on a file Turso's own engine made, with a full-text index, and defaults that call its functions; each of `drivers` is listed, and installed unless `unlinked` names it. */
+async function tursoProject(drivers: string[], unlinked: string[] = []): Promise<{ root: string; env: Record<string, string> }> {
+  const root = mkdtempSync(join(tmpdir(), "reylo-turso-"));
+  writeFileSync(join(root, "package.json"), JSON.stringify({ dependencies: Object.fromEntries(drivers.map((d) => [d, "*"])) }));
+  for (const d of drivers) if (!unlinked.includes(d)) link(root, d);
+  const db = await tursoConnect(join(root, "app.db"));
+  await db.exec("create table docs (id integer primary key, title text, body text not null)");
+  await db.exec("create index docs_fts on docs using fts (title, body)");
+  await db.exec("create table users (id integer primary key, name text not null, public_id text not null unique default (uuid4_str()), stamp blob not null default (time_now()))");
+  await db.exec("insert into docs (title, body) values ('kiwi', 'apple pie'), (null, 'kiwi and banana')");
+  await db.exec("insert into users (name) values ('Ada')");
+  await db.close();
+  return { root, env: { DATABASE_URL: "file:./app.db" } };
+}
+
+type TursoDb = { exec(sql: string): Promise<void>; prepare(sql: string): { all(...params: unknown[]): Promise<Record<string, unknown>[]> }; close(): Promise<void> };
+async function tursoConnect(path: string): Promise<TursoDb> {
+  const { connect } = (await import(pathToFileURL(join(DRIVERS, "@tursodatabase", "database", "dist", "promise.js")).href)) as { connect(path: string, options?: object): Promise<TursoDb> };
+  return connect(path, { experimental: ["index_method"] });
+}
+
+// Each of Turso's functions the engine knows, over the rows of `docs` and `users`, with the
+// parameters it takes. Every value Turso's engine answers must be of the type the type check infers.
+const TURSO_CALLS: [string, Record<string, unknown>?][] = [
+  ["uuid4()"], ["uuid7()"], ["uuid4_str()"], ["uuid7_str()"], ["uuid7_str(:at)", { at: 1700000000 }], ["uuid7(:at)", { at: 1700000000 }], ["gen_random_uuid()"],
+  ["fts_match(title, body, :q)", { q: "kiwi" }], ["fts_score(title, body, :q)", { q: "kiwi" }], ["fts_highlight(title, body, '<b>', '</b>', :q)", { q: "kiwi" }], ["fts_highlight(title, '<b>', '</b>', 'kiwi')"], ["fts_highlight(body, title, '</b>', 'kiwi')"],
+  ["vector32_sparse(:v)", { v: "[1,0,2]" }], ["vector_concat(vector(:v), vector(:w))", { v: "[1,2]", w: "[3]" }], ["vector_slice(vector(:v), :from, 2)", { v: "[1,2,3]", from: 0 }],
+  ["vector_distance_dot(vector(:v), vector(:w))", { v: "[1,2]", w: "[3,4]" }], ["vector_distance_jaccard(vector(:v), vector(:w))", { v: "[1,2]", w: "[3,4]" }],
+  ["time_now()"], ["time_date(2024, 1, 2, 3, 4, 5)"], ["time_date(:year, 1, 1)", { year: 300000 }], ["body regexp :re", { re: "(" }], ["time_get(time_now(), :field)", { field: "second" }], ["time_get(time_now(), :field)", { field: "year" }], ["time_get(time_now(), 'second')"], ["time_get(time_now(), 'epoch')"], ["time_get(time_now(), 'year')"],
+  ...["year", "month", "day", "hour", "minute", "second", "nano", "weekday", "yearday", "isoyear", "isoweek"].map((f) => [`time_get_${f}(time_now())`] as [string]),
+  ["time_unix(:s)", { s: 1700000000 }], ["time_milli(1700000000000)"], ["time_micro(1)"], ["time_nano(1)"],
+  ...["unix", "milli", "micro", "nano"].map((u) => [`time_to_${u}(time_unix(1700000000))`] as [string]),
+  ...["after", "before", "compare", "equal", "sub"].map((f) => [`time_${f}(time_now(), time_unix(1700000000))`] as [string]),
+  ["time_add(time_now(), dur_h())"], ["time_add_date(time_now(), 1, 2, 3)"], ["time_since(time_unix(1700000000))"], ["time_until(time_unix(1700000000))"],
+  ["time_trunc(time_now(), 'day')"], ["time_round(time_now(), dur_h())"], ["time_parse(:text)", { text: "2024-01-02T03:04:05Z" }],
+  ...["iso", "datetime", "date", "time"].map((f) => [`time_fmt_${f}(time_now(), :offset)`, { offset: 3600 }] as [string, Record<string, unknown>]),
+  ...["ns", "us", "ms", "s", "m", "h"].map((u) => [`dur_${u}()`] as [string]),
+];
+
+/** The storage classes a value of a type of the descriptor may have, as SQLite's `typeof` names them. */
+const STORED: Record<string, string[]> = { integer: ["integer"], boolean: ["integer"], float: ["real"], text: ["text"], bytes: ["blob"], union: ["integer", "real"] };
+
+test("a file Turso's own engine made is read, full-text index and all, and its functions are typed as it answers them", { skip: turso, timeout: 60_000 }, async () => {
+  const { root, env } = await tursoProject(["@tursodatabase/database"]);
+  const session = await Session.open(root, env);
+  const db = await tursoConnect(join(root, "app.db"));
+  try {
+    const typed = async (sql: string) => {
+      const outcome = await session.analyze(sql);
+      assert.ok(outcome.ok, !outcome.ok ? outcome.message : "");
+      assert.deepEqual(outcome.analysis.diagnostics, [], sql);
+      return outcome.analysis;
+    };
+    await typed("select id, body from docs where id = :id");
+    // `match` prepares on a column the full-text index covers, and an insert runs the defaults.
+    await typed("select id from docs where body match :q");
+    await typed("insert into users (name) values (:name) returning id, public_id, stamp");
+    for (const [call, params = {}] of TURSO_CALLS) {
+      const column = (await typed(`select ${call} as v from docs`)).columns[0]!;
+      const stored = await db.prepare(`select typeof(${call}) as t from docs`).all(params);
+      for (const { t } of stored) {
+        const allowed = [...(STORED[column.type.kind] ?? [String(t)]), ...(column.nullable ? ["null"] : [])];
+        assert.ok(allowed.includes(String(t)), `${call}: typed ${column.type.kind}${column.nullable ? " or null" : ""}, Turso answers ${t}`);
+      }
+    }
+    // A highlight marks the match, in each text column, the query last.
+    assert.deepEqual((await db.prepare("select fts_highlight(title, body, '[', ']', :q) as h from docs order by id").all({ q: "kiwi" })).map((r) => r.h), ["[kiwi] apple pie", "[kiwi] and banana"]);
+    // `uuid4()` and `uuid7()` are bytes on Turso's own engine.
+    for (const call of ["uuid4()", "uuid7()"]) assert.equal((await typed(`select ${call} as v`)).columns[0]!.type.kind, "bytes");
+  } finally {
+    await db.close();
+    await session.close();
+  }
+  // Every function of Turso's the engine knows is held to Turso's answers above.
+  const walker = readFileSync(new URL("../engine/sqlite/csrc/reylo_sqlite.c", import.meta.url), "utf8");
+  const table = walker.slice(walker.indexOf("aTursoEngine[] = {"), walker.indexOf("};", walker.indexOf("aTursoEngine[] = {")));
+  const known = new Set([...table.matchAll(/\{"([a-z0-9_]+)",/g)].map((m) => m[1]!));
+  assert.ok(known.size > 40, `${known.size}`);
+  assert.deepEqual([...known].filter((name) => !TURSO_CALLS.some(([call]) => call.includes(`${name}(`))), []);
+});
+
+test("uuid4() follows the SQLite engines package.json names, installed or not", { skip: turso, timeout: 60_000 }, async () => {
+  const uuid = async (drivers: string[], unlinked: string[] = []) => {
+    const { root, env } = await tursoProject(drivers, unlinked);
+    return (await analyze(root, env, "select uuid4() as v")).analysis.columns[0]!.type.kind;
+  };
+  // Beside libSQL, whose SQLite can't even open this file, it's either's value.
+  assert.equal(await uuid(["@tursodatabase/database", "@libsql/client"]), "unknown");
+  assert.equal(await uuid(["@tursodatabase/database"], ["@tursodatabase/database"]), "bytes");
+  assert.equal(await uuid(["@libsql/client"], ["@libsql/client"]), "text");
 });

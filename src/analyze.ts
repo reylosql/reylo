@@ -636,8 +636,9 @@ export class Session {
     // The engine opens the database itself: on SQLite the file the project names, and the statement
     // is prepared on the app's own SQLite drivers too, which are the app's, not the engine's.
     const target = dialect === "sqlite" ? sqlitePath(url, root) : url;
-    // libpq's variables as the session started, which name its entries, set and unset alike.
-    const c = await this.#engine.open(target, Object.fromEntries(ENVIRONMENT.map((name) => [name, this.#libpq[name]])));
+    // libpq's variables as the session started, which name its entries, set and unset alike. On
+    // SQLite the project's directory too, whose package.json names the SQLite engines the app runs.
+    const c = await this.#engine.open(target, Object.fromEntries(ENVIRONMENT.map((name) => [name, this.#libpq[name]])), dialect === "sqlite" ? { project: packageDir(root) } : {});
     let drivers: SqliteDriver[] | undefined;
     try {
       drivers = dialect === "sqlite" ? await openProjectDrivers(root, target) : undefined;
