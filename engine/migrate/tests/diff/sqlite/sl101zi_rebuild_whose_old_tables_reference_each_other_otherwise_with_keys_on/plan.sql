@@ -1,0 +1,12 @@
+create table new_p (id integer primary key, code int unique);
+create table new_a (id integer primary key, pid int references new_p (id), zid int);
+create table new_z (id integer primary key, pid int references new_p (id));
+insert into new_p (id, code) select id, code from p;
+insert into new_a (id, pid, zid) select id, pid, zid from a;
+insert into new_z (id, pid) select id, pid from z;
+drop table a;
+drop table z;
+drop table p;
+alter table new_p rename to p;
+alter table new_a rename to a;
+alter table new_z rename to z;
