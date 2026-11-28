@@ -86,7 +86,7 @@ impl Session {
             "postgres" => Session::Postgres(reylo_engine::postgres::Session::open(url).await?),
             "mysql" => Session::Mysql(reylo_engine::mysql::Session::open(url).await?),
             "clickhouse" => Session::Clickhouse(reylo_engine::clickhouse::Session::open(url)?),
-            _ => Session::Sqlite(reylo_engine::sqlite::Session::open(&project::sqlite_path(url, base).map_err(|why| Failure::Error(format!("Cannot read the SQLite URL {url}: {why}.")))?)?),
+            _ => Session::Sqlite(reylo_engine::sqlite::Session::open(&project::sqlite_path(url, base).map_err(|why| Failure::Error(format!("Cannot read the SQLite URL {url}: {why}.")))?, base)?),
         })
     }
 

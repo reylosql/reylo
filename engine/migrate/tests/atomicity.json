@@ -1,0 +1,133 @@
+{
+  "about": "SQLite migrations, and the first statement of each that controls the transaction, which a migration can't hold of its own: null where it has none. engine/migrate/src/sql.rs (atomicity_problem) and src/migration-text.ts (transactionControl) are both held to it. A trigger ends at the ; after an end that itself follows a ;, as sqlite3_complete reads one.",
+  "cases": [
+    {
+      "sql": "update a set b = 1; commit; insert into c values (1);",
+      "control": "commit"
+    },
+    {
+      "sql": "BEGIN; create table x (a);",
+      "control": "begin"
+    },
+    {
+      "sql": "create table x (a); Commit Transaction;",
+      "control": "commit"
+    },
+    {
+      "sql": "create table \"end\" (a); savepoint s;",
+      "control": "savepoint"
+    },
+    {
+      "sql": "create table x (a); release s;",
+      "control": "release"
+    },
+    {
+      "sql": "create table x (a); rollback;",
+      "control": "rollback"
+    },
+    {
+      "sql": "create table x (a); end;",
+      "control": "end"
+    },
+    {
+      "sql": "create trigger t after insert on x begin update y set a = case when 1 then 2 end; end; create table z (a);",
+      "control": null
+    },
+    {
+      "sql": "create temp trigger t after insert on x begin select raise(rollback, 'no'); end;",
+      "control": null
+    },
+    {
+      "sql": "create trigger if not exists t after insert on x when new.a > 0 begin select 1; end;",
+      "control": null
+    },
+    {
+      "sql": "-- commit\ncreate table x (a);",
+      "control": null
+    },
+    {
+      "sql": "create table users (id integer primary key);\n--Rollback: drop table users;\n",
+      "control": null
+    },
+    {
+      "sql": "/* rollback */ create table x (a);",
+      "control": null
+    },
+    {
+      "sql": "insert into t values ('; commit;'), ('it''s; end');",
+      "control": null
+    },
+    {
+      "sql": "select [begin; end] from t;",
+      "control": null
+    },
+    {
+      "sql": "create table a (b int); -- don't\ncommit;",
+      "control": "commit"
+    },
+    {
+      "sql": "create table a (b int); -- don't\ncreate table c (d int);",
+      "control": null
+    },
+    {
+      "sql": "create trigger t after update on s begin update s set total = total + new.end - new.start; end; create table x (a);",
+      "control": null
+    },
+    {
+      "sql": "create trigger t after update on s when new.begin > 0 begin select 1; end; commit;",
+      "control": "commit"
+    },
+    {
+      "sql": "create trigger t after insert on a begin update b set n = case when 1 then 1. end; end; commit;",
+      "control": "commit"
+    },
+    {
+      "sql": "create trigger t after insert on a begin update b set n = new.éend; end;",
+      "control": null
+    },
+    {
+      "sql": "create trigger t after insert on a begin update b set n = new.écase; end; commit;",
+      "control": "commit"
+    },
+    {
+      "sql": "create trigger t after insert on x begin select 1; end; end;",
+      "control": "end"
+    },
+    {
+      "sql": "create trigger t after insert on x begin select 1; end /* closed */ ; commit;",
+      "control": "commit"
+    },
+    {
+      "sql": "create table trigger (x int); commit;",
+      "control": "commit"
+    },
+    {
+      "sql": "create table cal (event text, begin text); commit;",
+      "control": "commit"
+    },
+    {
+      "sql": "﻿begin; create table x (a);",
+      "control": "begin"
+    },
+    {
+      "sql": "create table a (x); ﻿commit;",
+      "control": "commit"
+    },
+    {
+      "sql": "create trigger t after insert on a begin select 0xE-case when 1 then 2 end; end; create table z (a);",
+      "control": null
+    },
+    {
+      "sql": "create trigger t after insert on b begin update b set x = end; end; create table z (a);",
+      "control": null
+    },
+    {
+      "sql": "create trigger t after insert on b begin update b set x = end; end; commit;",
+      "control": "commit"
+    },
+    {
+      "sql": "create trigger t after insert on b when (select end from b) begin select 1; end; rollback;",
+      "control": "rollback"
+    }
+  ]
+}

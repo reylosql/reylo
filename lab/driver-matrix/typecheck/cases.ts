@@ -38,8 +38,6 @@ import type * as tu07 from "turso-07";
 import type * as tu07c from "turso-07/compat";
 import type * as tu06 from "turso-06";
 import type * as tu06c from "turso-06/compat";
-import type * as tu04 from "turso-04";
-import type * as tu04c from "turso-04/compat";
 import type * as s3v5 from "sqlite3-5";
 import type * as s3v6 from "sqlite3-6";
 import type { Database as SqliteDatabase } from "sqlite";
@@ -918,80 +916,66 @@ declare const c121: tu06c.Database; // @tursodatabase/database@0.6.1 compat Data
 /*@717*/ { const k: "promise" = kind(sqQ.run(c121, { id: 1 })); void k; }
 /*@718*/ { const k: "promise" = kind(sqQ.with(c121)({ id: 1 })); void k; }
 /*@719*/ { const k: "value" = kind(sqQ.runSync(c121, { id: 1 })); void k; }
-declare const c122: tu04.Database; // @tursodatabase/database@0.4.4 Database (connect())
+declare const c122: s3v5.Database; // sqlite3@5.1.7 Database
 /*@720*/ pgQ.run(c122, { id: 1 });
 /*@721*/ myQ.run(c122, { id: 1 });
 /*@722*/ sqQ.run(c122, { id: 1 });
 /*@723*/ { const k: "promise" = kind(sqQ.run(c122, { id: 1 })); void k; }
 /*@724*/ { const k: "promise" = kind(sqQ.with(c122)({ id: 1 })); void k; }
 /*@725*/ sqQ.runSync(c122, { id: 1 });
-declare const c123: tu04c.Database; // @tursodatabase/database@0.4.4 compat Database
+declare const c123: s3v6.Database; // sqlite3@6.0.1 Database
 /*@726*/ pgQ.run(c123, { id: 1 });
 /*@727*/ myQ.run(c123, { id: 1 });
 /*@728*/ sqQ.run(c123, { id: 1 });
 /*@729*/ { const k: "promise" = kind(sqQ.run(c123, { id: 1 })); void k; }
 /*@730*/ { const k: "promise" = kind(sqQ.with(c123)({ id: 1 })); void k; }
-/*@731*/ { const k: "value" = kind(sqQ.runSync(c123, { id: 1 })); void k; }
-declare const c124: s3v5.Database; // sqlite3@5.1.7 Database
+/*@731*/ sqQ.runSync(c123, { id: 1 });
+declare const c124: SqliteDatabase; // sqlite@5.1.1 Database (open())
 /*@732*/ pgQ.run(c124, { id: 1 });
 /*@733*/ myQ.run(c124, { id: 1 });
 /*@734*/ sqQ.run(c124, { id: 1 });
 /*@735*/ { const k: "promise" = kind(sqQ.run(c124, { id: 1 })); void k; }
 /*@736*/ { const k: "promise" = kind(sqQ.with(c124)({ id: 1 })); void k; }
 /*@737*/ sqQ.runSync(c124, { id: 1 });
-declare const c125: s3v6.Database; // sqlite3@6.0.1 Database
+declare const c125: D1Database; // D1 (@cloudflare/workers-types 5.20260929.1) D1Database
 /*@738*/ pgQ.run(c125, { id: 1 });
 /*@739*/ myQ.run(c125, { id: 1 });
 /*@740*/ sqQ.run(c125, { id: 1 });
 /*@741*/ { const k: "promise" = kind(sqQ.run(c125, { id: 1 })); void k; }
 /*@742*/ { const k: "promise" = kind(sqQ.with(c125)({ id: 1 })); void k; }
 /*@743*/ sqQ.runSync(c125, { id: 1 });
-declare const c126: SqliteDatabase; // sqlite@5.1.1 Database (open())
+declare const c126: D1DatabaseSession; // D1 (@cloudflare/workers-types 5.20260929.1) D1DatabaseSession (withSession())
 /*@744*/ pgQ.run(c126, { id: 1 });
 /*@745*/ myQ.run(c126, { id: 1 });
 /*@746*/ sqQ.run(c126, { id: 1 });
 /*@747*/ { const k: "promise" = kind(sqQ.run(c126, { id: 1 })); void k; }
 /*@748*/ { const k: "promise" = kind(sqQ.with(c126)({ id: 1 })); void k; }
 /*@749*/ sqQ.runSync(c126, { id: 1 });
-declare const c127: D1Database; // D1 (@cloudflare/workers-types 5.20260929.1) D1Database
+declare const c127: SqliteWasmDb; // @sqlite.org/sqlite-wasm@3.54.1-build1 oo1.DB
 /*@750*/ pgQ.run(c127, { id: 1 });
 /*@751*/ myQ.run(c127, { id: 1 });
 /*@752*/ sqQ.run(c127, { id: 1 });
 /*@753*/ { const k: "promise" = kind(sqQ.run(c127, { id: 1 })); void k; }
 /*@754*/ { const k: "promise" = kind(sqQ.with(c127)({ id: 1 })); void k; }
-/*@755*/ sqQ.runSync(c127, { id: 1 });
-declare const c128: D1DatabaseSession; // D1 (@cloudflare/workers-types 5.20260929.1) D1DatabaseSession (withSession())
+/*@755*/ { const k: "value" = kind(sqQ.runSync(c127, { id: 1 })); void k; }
+declare const c128: OpfsDatabase; // @sqlite.org/sqlite-wasm@3.54.1-build1 oo1.OpfsDb
 /*@756*/ pgQ.run(c128, { id: 1 });
 /*@757*/ myQ.run(c128, { id: 1 });
 /*@758*/ sqQ.run(c128, { id: 1 });
 /*@759*/ { const k: "promise" = kind(sqQ.run(c128, { id: 1 })); void k; }
 /*@760*/ { const k: "promise" = kind(sqQ.with(c128)({ id: 1 })); void k; }
-/*@761*/ sqQ.runSync(c128, { id: 1 });
-declare const c129: SqliteWasmDb; // @sqlite.org/sqlite-wasm@3.54.1-build1 oo1.DB
+/*@761*/ { const k: "value" = kind(sqQ.runSync(c128, { id: 1 })); void k; }
+declare const c129: OpfsSAHPoolDatabase; // @sqlite.org/sqlite-wasm@3.54.1-build1 OpfsSAHPoolDb (installOpfsSAHPoolVfs())
 /*@762*/ pgQ.run(c129, { id: 1 });
 /*@763*/ myQ.run(c129, { id: 1 });
 /*@764*/ sqQ.run(c129, { id: 1 });
 /*@765*/ { const k: "promise" = kind(sqQ.run(c129, { id: 1 })); void k; }
 /*@766*/ { const k: "promise" = kind(sqQ.with(c129)({ id: 1 })); void k; }
 /*@767*/ { const k: "value" = kind(sqQ.runSync(c129, { id: 1 })); void k; }
-declare const c130: OpfsDatabase; // @sqlite.org/sqlite-wasm@3.54.1-build1 oo1.OpfsDb
+declare const c130: SqlJs.Database; // sql.js (@types/sql.js 1.4.11) Database
 /*@768*/ pgQ.run(c130, { id: 1 });
 /*@769*/ myQ.run(c130, { id: 1 });
 /*@770*/ sqQ.run(c130, { id: 1 });
 /*@771*/ { const k: "promise" = kind(sqQ.run(c130, { id: 1 })); void k; }
 /*@772*/ { const k: "promise" = kind(sqQ.with(c130)({ id: 1 })); void k; }
 /*@773*/ { const k: "value" = kind(sqQ.runSync(c130, { id: 1 })); void k; }
-declare const c131: OpfsSAHPoolDatabase; // @sqlite.org/sqlite-wasm@3.54.1-build1 OpfsSAHPoolDb (installOpfsSAHPoolVfs())
-/*@774*/ pgQ.run(c131, { id: 1 });
-/*@775*/ myQ.run(c131, { id: 1 });
-/*@776*/ sqQ.run(c131, { id: 1 });
-/*@777*/ { const k: "promise" = kind(sqQ.run(c131, { id: 1 })); void k; }
-/*@778*/ { const k: "promise" = kind(sqQ.with(c131)({ id: 1 })); void k; }
-/*@779*/ { const k: "value" = kind(sqQ.runSync(c131, { id: 1 })); void k; }
-declare const c132: SqlJs.Database; // sql.js (@types/sql.js 1.4.11) Database
-/*@780*/ pgQ.run(c132, { id: 1 });
-/*@781*/ myQ.run(c132, { id: 1 });
-/*@782*/ sqQ.run(c132, { id: 1 });
-/*@783*/ { const k: "promise" = kind(sqQ.run(c132, { id: 1 })); void k; }
-/*@784*/ { const k: "promise" = kind(sqQ.with(c132)({ id: 1 })); void k; }
-/*@785*/ { const k: "value" = kind(sqQ.runSync(c132, { id: 1 })); void k; }

@@ -1,0 +1,1 @@
+create table p (id int primary key); create table a (id int primary key, seq int not null auto_increment, body text, unique key (seq), fulltext key body_ft (body), constraint a_p foreign key (seq) references p (id)); create table z (id int primary key, a_seq int not null auto_increment, constraint z_a foreign key (a_seq) references a (seq));

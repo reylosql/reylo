@@ -4474,6 +4474,7 @@ on!(
     init_writes_the_event_triggers_it_compares,
     init_writes_the_publications_it_compares,
     a_project_begun_on_supabase_runs_on_a_new_supabase_database,
+    supabases_grants_on_its_extensions_are_supabases,
     a_supabase_projects_change_to_its_data_api_grants_is_its_own,
     a_supabase_database_whose_one_change_is_a_default_grant_is_not_empty,
     a_new_supabase_database_starts_an_empty_project_either_way,
@@ -5089,6 +5090,61 @@ async fn a_dry_run_checks_composite_keys_and_waits_on_a_parent_filled_first() {
         assert_has!(&out, r"_holders_code\.sql\n(      ! [^\n]*\n)*      ! It holds rows to holders_code, which can't be checked here: a pending migration adds a column it references\n");
         assert_has!(&out, r"_members_team\.sql\n(      ! [^\n]*\n)*      ! It holds rows to members_team, which can't be checked here: \d+_team_9\.sql changes those rows first; 1 row breaks it as they stand\n");
     }
+}
+
+/// On MySQL: a foreign key added back after its columns move to another collation compares the
+/// target's values under the new one, and so does a unique key whose column does, so the dry run
+/// reads them so: a row that met its parent only under the old collation fails it, in the migration
+/// that adds the key back alone, as do values that repeat only under the new one, and once none does,
+/// neither key says anything. A change of character set, or of a generated column's expression,
+/// changes the values, which no read can follow: that key can't be checked.
+#[tokio::test(flavor = "current_thread")]
+async fn a_dry_run_reads_a_mysql_key_under_its_columns_new_collation() {
+    let Some(mut p) = P::new(Dialect::Mysql).await else { return };
+    // MySQL commits each DDL statement on its own, so each migration holds one.
+    p.file("20261128100000_p.sql", "create table p (code varchar(10) not null, primary key (code));");
+    p.file("20261128100001_c.sql", "create table c (id int primary key, code varchar(10), constraint c_code foreign key (code) references p (code));");
+    p.file("20261128100002_tags.sql", "create table tags (name varchar(10) collate utf8mb4_bin, unique key tags_name (name));");
+    p.file("20261128100003_names.sql", "create table names (n varchar(10) collate utf8mb4_bin, unique key names_n (n));");
+    p.file("20261128100004_gens.sql", "create table gens (id int primary key, raw varchar(10), g varchar(20) collate utf8mb4_bin generated always as (raw) stored, unique key gens_g (g));");
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    p.exec("insert into p values ('a'), ('b'); insert into c values (10, 'A'), (11, 'b'); insert into tags values ('a'), ('A'); insert into names values ('a😀'), ('b😀'); insert into gens (id, raw) values (1, 'a'), (2, 'A')").await;
+    p.file("20261128110000_bin.sql", "alter table c drop foreign key c_code;");
+    p.file("20261128110001_bin_2.sql", "alter table c modify column code varchar(10) collate utf8mb4_bin;");
+    p.file("20261128110002_bin_3.sql", "alter table p modify column code varchar(10) collate utf8mb4_bin not null;");
+    p.file("20261128110003_bin_4.sql", "alter table c add constraint c_code foreign key (code) references p (code);");
+    p.file("20261128110004_tags_ci.sql", "alter table tags modify column name varchar(10) collate utf8mb4_0900_ai_ci;");
+    p.file("20261128110005_names_latin1.sql", "alter table names modify column n varchar(10) collate latin1_bin;");
+    p.file("20261128110006_gens_ci.sql", "alter table gens modify column g varchar(20) collate utf8mb4_0900_ai_ci generated always as (concat(raw, id)) stored;");
+    p.schema("create table p (code varchar(10) collate utf8mb4_bin not null, primary key (code));\ncreate table c (id int primary key, code varchar(10) collate utf8mb4_bin, constraint c_code foreign key (code) references p (code));\ncreate table tags (name varchar(10) collate utf8mb4_0900_ai_ci, unique key tags_name (name));\ncreate table names (n varchar(10) collate latin1_bin, unique key names_n (n));\ncreate table gens (id int primary key, raw varchar(10), g varchar(20) collate utf8mb4_0900_ai_ci generated always as (concat(raw, id)) stored, unique key gens_g (g));\n");
+    p.output();
+    assert_eq!(p.dry_run().await, 1, "{}", p.peek());
+    let out = p.output();
+    assert_has!(&out, r"_bin_4\.sql\n(      ! [^\n]*\n)*      ✗ It fails on this database: 1 row breaks c_code under its columns' new collation\n");
+    assert_has!(&out, r"_tags_ci\.sql\n(      ! [^\n]*\n)*      ✗ It fails on this database: 1 value repeats in tags_name under its columns' new collation\n");
+    assert_eq!(out.matches("breaks c_code").count(), 1, "the key is read where it is added back alone: {out}");
+    assert_has!(&out, r"_names_latin1\.sql\n(      ! [^\n]*\n)*      ! It holds rows to names_n, which can't be checked here: it converts their values\n");
+    assert_has!(&out, r"_gens_ci\.sql\n(      ! [^\n]*\n)*      ! It holds rows to gens_g, which can't be checked here: it converts their values\n");
+    p.exec("update c set code = 'a' where id = 10; delete from tags where name = 'A'").await;
+    assert_eq!(p.dry_run().await, 0, "{}", p.peek());
+    let out = p.output();
+    assert!(!out.contains("c_code") && !out.contains("tags_name"), "every row meets both keys under their new collation: {out}");
+}
+
+/// On MySQL: a foreign key dropped and added again in one file, under `lock tables`, around its
+/// columns' new collation, is read under the new one, as one in files of their own is.
+#[tokio::test(flavor = "current_thread")]
+async fn a_dry_run_reads_a_mysql_key_added_back_under_a_lock() {
+    let Some(mut p) = P::new(Dialect::Mysql).await else { return };
+    p.file("20261128100000_p.sql", "create table p (code varchar(10) not null, primary key (code));");
+    p.file("20261128100001_c.sql", "create table c (id int primary key, code varchar(10), constraint c_code foreign key (code) references p (code));");
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    p.exec("insert into p values ('a'); insert into c values (10, 'A')").await;
+    p.file("20261128110000_bin.sql", "lock tables c write, p write;\nalter table c drop foreign key c_code;\nalter table c modify column code varchar(10) collate utf8mb4_bin;\nalter table p modify column code varchar(10) collate utf8mb4_bin not null;\nalter table c add constraint c_code foreign key (code) references p (code);\nunlock tables;\n");
+    p.schema("create table p (code varchar(10) collate utf8mb4_bin not null, primary key (code));\ncreate table c (id int primary key, code varchar(10) collate utf8mb4_bin, constraint c_code foreign key (code) references p (code));\n");
+    p.output();
+    assert_eq!(p.dry_run().await, 1, "{}", p.peek());
+    assert_has!(&p.output(), r"_bin\.sql\n(      ! [^\n]*\n)*      ✗ It fails on this database: 1 row breaks c_code under its columns' new collation\n");
 }
 
 /// On Postgres: a check whose function writes is read in a read-only transaction, which refuses the
@@ -9193,6 +9249,9 @@ create trigger kids_note after insert on kids begin update parents set name = na
         }
         p.exec(&format!("alter database {} set reylo.platform_schemas = 'on'", p.name)).await;
         p.exec("create schema extensions; create extension \"uuid-ossp\" with schema extensions; create extension pgcrypto with schema extensions; create extension pg_stat_statements with schema extensions").await;
+        // Supabase's dashboard gets everything in `extensions`.
+        p.exec("do $$ begin create role dashboard_user nologin; exception when duplicate_object or unique_violation then null; end $$").await;
+        p.exec("grant all on all tables in schema extensions to dashboard_user; grant all on all sequences in schema extensions to dashboard_user; grant all on all routines in schema extensions to dashboard_user").await;
         p.exec("grant usage on schema public to postgres, anon, authenticated, service_role").await;
         for objects in ["tables", "sequences", "functions"] {
             p.exec(&format!("alter default privileges for role postgres in schema public grant all on {objects} to postgres, anon, authenticated, service_role")).await;
@@ -9202,6 +9261,33 @@ create trigger kids_note after insert on kids begin update parents set name = na
             p.exec("alter default privileges for role postgres in schema public revoke usage, select on sequences from anon, authenticated, service_role").await;
         }
         p.exec("create publication supabase_realtime").await;
+    }
+
+    /// What Supabase grants its own `dashboard_user` on its extensions as it makes a project is its
+    /// own: init writes none of it, while a grant the project made on them to another role, or to that
+    /// role on an extension of its own, is the project's, and written. On a server of no platform, a
+    /// grant to a role of that name is the project's too.
+    pub async fn supabases_grants_on_its_extensions_are_supabases(mut p: P) {
+        as_supabase_makes_it(&p, true).await;
+        p.exec("grant execute on function extensions.gen_random_bytes(integer) to authenticated; create table tokens (id int primary key)").await;
+        // An extension the project made, whose grant to the dashboard's role is the project's.
+        p.exec("create schema app; create extension hstore with schema app; revoke execute on function app.hstore(text, text) from public; grant execute on function app.hstore(text, text) to dashboard_user").await;
+        assert_eq!(p.run(async |o, log| reylo_migrate::init(o, &[], log).await).await, 0, "{}", p.peek());
+        let init = std::fs::read_to_string(p.dir.join("migrations/init.sql")).unwrap();
+        assert!(!has(&init, r"(?i)extensions\.\S+ to dashboard_user"), "{init}");
+        assert_has!(init.clone(), r"(?i)grant execute on routine app\.hstore\([^)]*\) to dashboard_user");
+        assert_has!(init, r"(?i)grant execute on (function|routine) extensions\.gen_random_bytes\(integer\) to authenticated");
+        p.strict = true;
+        assert_eq!(p.status().await, 0, "{}", p.peek());
+        p.exec("revoke execute on function extensions.gen_random_bytes(integer) from dashboard_user").await;
+        assert_eq!(p.status().await, 0, "Supabase's own grants are no drift:\n{}", p.peek());
+        let mut q = P::new(p.d).await.unwrap();
+        q.exec(&format!("alter database {} set reylo.platform_schemas = 'off'", q.name)).await;
+        q.exec("do $$ begin create role dashboard_user nologin; exception when duplicate_object or unique_violation then null; end $$").await;
+        q.exec("create schema extensions; create extension pgcrypto with schema extensions; grant execute on function extensions.gen_random_bytes(integer) to dashboard_user; create table tokens (id int primary key)").await;
+        assert_eq!(q.run(async |o, log| reylo_migrate::init(o, &[], log).await).await, 0, "{}", q.peek());
+        let init = std::fs::read_to_string(q.dir.join("migrations/init.sql")).unwrap_or_else(|e| panic!("{e}: {}", q.peek()));
+        assert!(init.contains("dashboard_user"), "a server of no platform writes it:\n{init}");
     }
 
     /// How many of `privilege` on the table `table` `role` holds on the database `q`.

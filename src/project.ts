@@ -368,6 +368,84 @@ function commandOutput(command: string, cwd: string, env: Record<string, string>
   return outcome;
 }
 
+/** A variable of `env`, on Windows in any case of its name, as Windows reads one: a worker thread's copy of the environment, as the preload's, matches names exactly. Of two spellings, the first in order, as Node passes a child. */
+export function environmentValue(env: Record<string, string | undefined>, name: string, platform: NodeJS.Platform = process.platform): string | undefined {
+  return platform === "win32" ? env[Object.keys(env).filter((key) => key.toUpperCase() === name).sort()[0] ?? name] : env[name];
+}
+
+/** libpq's variables the engine reads for a part of a Postgres URL the URL leaves out (engine/native/src/postgres.rs), each with the URL's parameter that names the part. */
+const LIBPQ_VARIABLES = [
+  ["PGHOST", "host"],
+  ["PGPORT", "port"],
+  ["PGUSER", "user"],
+  ["PGPASSWORD", "password"],
+  ["PGDATABASE", "dbname"],
+  ["PGOPTIONS", "options"],
+  ["PGSSLMODE", "sslmode"],
+  ["PGSSLROOTCERT", "sslrootcert"],
+  ["PGSSLCERT", "sslcert"],
+  ["PGSSLKEY", "sslkey"],
+] as const;
+
+/** libpq's variables that name a file. */
+const CERTIFICATE_VARIABLES = new Set(["PGSSLROOTCERT", "PGSSLCERT", "PGSSLKEY"]);
+
+/**
+ * A Postgres URL with libpq's variables that `set` gives (the env files', where the environment
+ * sets none) for the parts it leaves out, each as the URL's own parameter, and the names of those
+ * it took. An app that loads its env files into its environment connects with them, and libpq
+ * reads a variable only for a part the URL does not name: a host where the URL names none, a port
+ * where it names one host or none and no port, a user, a password and a database it leaves out,
+ * and options, a TLS mode or a certificate file its parameters do not name. Written into the URL,
+ * the engine, the bridge to a Unix socket and the cache's names all read them, as
+ * `with_env_files` in engine/native/src/project.rs writes them (both are held to
+ * url-env-file-cases.json).
+ */
+export function withEnvFiles(url: string, set: (name: string) => string | undefined): { url: string; names: string[] } {
+  const q = url.indexOf("?");
+  const [base, query] = q < 0 ? [url, ""] : [url.slice(0, q), url.slice(q + 1)];
+  const s = base.indexOf("://");
+  const rest = s < 0 ? base : base.slice(s + 3);
+  const p = rest.indexOf("/");
+  const [authority, path] = p < 0 ? [rest, ""] : [rest.slice(0, p), rest.slice(p)];
+  const a = authority.lastIndexOf("@");
+  const [login, list] = a < 0 ? ["", authority] : [authority.slice(0, a), authority.slice(a + 1)];
+  const [user, password = ""] = login.split(/:(.*)/s);
+  // The authority's hosts, each with its port where it writes one: an IPv6 address in brackets.
+  const hosts = list.split(",").filter(Boolean).map((chunk) => /^\[[^\]]*\](?::(.*))?$/.exec(chunk)?.[1] ?? (chunk.startsWith("[") ? undefined : chunk.split(":")[1]));
+  const named = new Set(query.split("&").filter(Boolean).map((pair) => {
+    const name = pair.split("=")[0]!;
+    try {
+      return decodeURIComponent(name);
+    } catch {
+      return name;
+    }
+  }));
+  const leftOut: Record<(typeof LIBPQ_VARIABLES)[number][1], boolean> = {
+    host: hosts.length === 0 && !named.has("host") && !named.has("hostaddr"),
+    // Several hosts with no port take 5432 each, as libpq reads them.
+    port: hosts.length <= 1 && !hosts.some((port) => port) && !named.has("port"),
+    user: !user && !named.has("user"),
+    password: !password && !named.has("password"),
+    dbname: (path === "" || path === "/") && !named.has("dbname"),
+    options: !named.has("options"),
+    sslmode: !named.has("sslmode") && !named.has("ssl"),
+    sslrootcert: !named.has("sslrootcert"),
+    sslcert: !named.has("sslcert"),
+    sslkey: !named.has("sslkey"),
+  };
+  const pairs: string[] = [];
+  const names: string[] = [];
+  for (const [name, parameter] of LIBPQ_VARIABLES) {
+    const value = set(name);
+    if (!value || !leftOut[parameter]) continue;
+    pairs.push(`${parameter}=${encodeURIComponent(value)}`);
+    names.push(name);
+  }
+  if (!pairs.length) return { url, names };
+  return { url: `${url}${q < 0 ? "?" : query ? "&" : ""}${pairs.join("&")}`, names };
+}
+
 /** The variable `reylo migrate deploy --dry-run -- <command>` names its shadow database in, for the command's analyses alone. */
 export const ANALYSIS_URL = "REYLO_ANALYSIS_URL";
 
@@ -495,6 +573,40 @@ export function resolveProject(engine: Engine | MissingEngine, projectDir: strin
     const hit = lookup("DATABASE_URL");
     url = hit?.value;
     if (hit) urlSource = hit.source;
+  }
+  // libpq's variables for what DATABASE_URL leaves out (`withEnvFiles`), the environment's, else the
+  // env files': the URL the app connects with, with the files loaded into its environment, however
+  // the type check names it (`direct_url: ${DATABASE_URL}` too). Written into the URL whichever
+  // source each comes from, so that one connection is one URL. A variable the environment sets, even
+  // empty, the files leave alone, as dotenv does; an empty one is none, as the engine reads it. Any
+  // other `direct_url` is Reylo's alone.
+  if (url && !shadow && url === lookup("DATABASE_URL")?.value && dialectOf(url) === "postgres") {
+    const files = envFiles.map((path) => ({ path, vars: readEnvFile(path) }));
+    const hits = new Map<string, { value: string; path?: string }>();
+    for (const [name] of LIBPQ_VARIABLES) {
+      const set = environmentValue(env, name);
+      // A certificate file is named from where it was set: the working directory for the environment's, as libpq reads it, and the project's root, where its env files are, for theirs.
+      const certificate = (value: string, from: string) => (CERTIFICATE_VARIABLES.has(name) && value && value !== "system" ? resolve(from, value) : value);
+      if (set !== undefined) {
+        if (set) hits.set(name, { value: certificate(set, process.cwd()) });
+        continue;
+      }
+      const file = files.find((f) => f.vars[name] !== undefined);
+      if (file) hits.set(name, { value: certificate(file.vars[name]!, root), path: file.path });
+    }
+    const app = url;
+    const fold = (fresh: string) => (fresh === app ? withEnvFiles(fresh, (name) => hits.get(name)?.value) : { url: fresh, names: [] });
+    const folded = fold(url);
+    url = folded.url;
+    if (folded.names.length) urlSource += `, ${folded.names.map((name) => `${name} in ${hits.get(name)!.path ? shown(hits.get(name)!.path!) : "the environment"}`).join(", ")}`;
+    // A command's URL run again after a refused login is folded again, as the first was.
+    if (refreshUrl) {
+      const refresh = refreshUrl;
+      refreshUrl = () => {
+        const again = refresh();
+        return again === undefined ? undefined : fold(again).url;
+      };
+    }
   }
   let dialect = url ? dialectOf(url) : "postgres";
   if (url && !dialect) error ??= `Cannot tell the database from the URL (${urlSource}): reylo reads postgres://, postgresql://, mysql://, file: and sqlite: URLs, and for ClickHouse clickhouse+http:// or clickhouse+https://, the URL of its HTTP interface.`;

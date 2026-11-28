@@ -612,6 +612,16 @@ extern "C" {
     fn reylo_sqlite_analyze(ddl: *const *const c_char, n: c_int, sql: *const c_char, sent: *const c_char, functions: *const *const c_char, arities: *const c_int, n_functions: c_int, host: *const *const c_char, host_arities: *const c_int, host_kinds: *const c_char, n_host: c_int) -> *mut c_char;
     fn reylo_sqlite_free(p: *mut c_char);
     fn reylo_sqlite_version() -> *const c_char;
+    fn reylo_sqlite_method_index(ddl: *const c_char) -> c_int;
+}
+
+/// Whether `ddl` is an index of an access method SQLite doesn't have, as Turso's own engine writes
+/// them (`CREATE INDEX docs_fts ON docs USING fts (body)`), read by SQLite's own tokenizer: the rows
+/// the replay leaves out without a word, and the only ones a host may read a schema past.
+pub fn method_index(ddl: &str) -> bool {
+    let Ok(ddl) = CString::new(ddl) else { return false };
+    // The tokenizer only reads the text, which outlives the call.
+    unsafe { reylo_sqlite_method_index(ddl.as_ptr()) != 0 }
 }
 
 /// The version of the embedded SQLite, as `3.53.4`: the one that prepares every statement the
