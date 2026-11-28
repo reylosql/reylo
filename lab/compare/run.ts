@@ -108,6 +108,10 @@ const CLEAREST: Record<string, string[]> = {
   enums: ["check-union", "literal-union", "derived", "column"],
 };
 const rank = (row: string, probe: string) => { const at = CLEAREST[row]?.indexOf(probe) ?? -1; return at < 0 ? CLEAREST[row]?.length ?? 0 : at; };
+// The type Reylo's shown object gives a field: `p1` in `{ p1: number | bigint | string }`.
+const shownField = (shown: string | undefined, name: string) => new RegExp(`(?:^|[{;,]\\s*)${name.replace(/\$/g, "\\$")}\\??:\\s*([^;}]+)`).exec(shown ?? "")?.[1]?.trim();
+// A wrong type that is one member of the right union, beside members other than null, reads as right on a card: `string` beside `number | bigint | string`. A missing `| null` reads as wrong, so it is not one.
+const readsAsRight = (type: string, right: string | undefined) => { const parts = right?.split("|").map((p) => p.trim()) ?? []; return parts.includes(type) && parts.some((p) => p !== type && p !== "null" && p !== "undefined"); };
 // A mistake only the schema shows carries the statements that define what the query names.
 const NEEDS_SCHEMA = new Set(["enums:column", "enums:derived", "enums:check-union", "json-schema:column", "json-schema:parameter", "from-the-database:function", "parameter-types:uuid", "parameter-types:timestamp", "parameter-types:insert"]);
 const schemaStatements = readFileSync(resolve(here, "schema/postgres.sql"), "utf8").split(/;\n/).map((s) => s.trim()).filter((s) => /^create (table|function|type)/.test(s));
@@ -126,9 +130,8 @@ for (const i of ids) {
     const overBroadNull = (r: any) => r.problems.length > 0 && r.problems.every((p: string) => p.includes("it is never null"));
     const severity = (r: any) => (!r.answer.code ? 0 : (r.answer.untyped || r.answer.error || vague(r) || r.answer.raw) ? 0 : overBroadNull(r) ? 2 : 1);
     const reyloFor = (r: any) => results.tools.reylo?.cells[row]?.results.find((x: any) => x.db === r.db && x.probe === r.probe)?.answer;
-    // Of one query's runs, a card shows one whose right answer does not hold the wrong type as a member of a union: `string` against `number | bigint | string` reads as right.
-    const member = (type: string, shown: string) => !!type && new RegExp(`(^|[:|]\\s*)${type.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(\\s*[|;}]|$)`).test(shown);
-    const blurred = (r: any) => { const shown = reyloFor(r)?.shown; return Number(r.at.some((at: any) => (at.param && !r.answer.params?.[at.param - 1]?.checksValues && member(r.answer.params?.[at.param - 1]?.type ?? "", shown?.params ?? "")) || (at.column && member(r.answer.columns?.find((c: any) => c.name.toLowerCase() === String(at.column).toLowerCase())?.type ?? "", shown?.row ?? "")))); };
+    // Of one query's runs, a card shows one whose wrong type does not read as right beside Reylo's, before one that needs a sentence for it.
+    const blurred = (r: any) => { const shown = reyloFor(r)?.shown; return Number(r.at.some((at: any) => (at.param && !r.answer.params?.[at.param - 1]?.checksValues && readsAsRight(r.answer.params?.[at.param - 1]?.type, shownField(shown?.params, `p${at.param}`))) || (at.column && readsAsRight(r.answer.columns?.find((c: any) => c.name.toLowerCase() === String(at.column).toLowerCase())?.type, shownField(shown?.row, at.column))))); };
     const first = [...wrong].filter((r: any) => !!reyloFor(r)?.shown).sort((x: any, y: any) => Number(drawn(y)) - Number(drawn(x)) || severity(x) - severity(y) || rank(row, x.probe) - rank(row, y.probe) || blurred(x) - blurred(y))[0];
     let example: any;
     if (first) {
@@ -147,9 +150,13 @@ for (const i of ids) {
         ...(a.code ? { code: a.code } : {}),
         ...(a.code && (a.error || a.untyped) ? { error: ORM_WORDS(a) } : a.error ? { error: ERROR_WORDS(first.problems[0]) } : {}),
         // A tool that checks each value instead of typing the parameter is wrong in what it lets through: "A null passes for $1".
+        // A parameter typed as one member of the union Reylo takes is wrong in what it refuses, which its type beside Reylo's would not show: "A number is refused for $1".
         params: (a.params ?? []).map((v: any, k: number) => {
-          const passes = first.problems.filter((_: string, j: number) => first.at[j].param === k + 1).map((p: string) => /^(an? \w+|any) value (passes|is refused) for parameter/.exec(p)).find(Boolean);
-          const says = passes ? `${passes[1] === "any" ? "Any value" : `${passes[1][0].toUpperCase()}${passes[1].slice(1)}`} ${passes[2]} for $${k + 1}` : undefined;
+          const problems = first.problems.filter((_: string, j: number) => first.at[j].param === k + 1);
+          const narrow = readsAsRight(v.type, shownField(reylo?.shown?.params, `p${k + 1}`)) ? problems.map((p: string) => /^parameter \d+ is typed `[^`]*`, but it takes (an? \w+|text)$/.exec(p)).find(Boolean) : undefined;
+          const found = problems.map((p: string) => /^(an? \w+|any) value (passes|is refused) for parameter/.exec(p)).find(Boolean);
+          const passes = found ? { value: found[1], verb: found[2] } : narrow ? { value: narrow[1], verb: "is refused" } : undefined;
+          const says = passes ? `${passes.value === "any" ? "Any value" : `${passes.value[0].toUpperCase()}${passes.value.slice(1)}`} ${passes.verb} for $${k + 1}` : undefined;
           return { type: v.type, ...marked((at: any) => at.param === k + 1), ...(says ? { says } : {}) };
         }),
         columns: (a.columns ?? []).map((v: any, k: number) => ({ name: names[k], type: v.type, ...marked((at: any) => at.column?.toLowerCase() === String(names[k]).toLowerCase()) })),
@@ -157,6 +164,8 @@ for (const i of ids) {
         reylo: { ...reylo.shown, cardinality: reylo.cardinality, rows: CARD[reylo.cardinality as "one"] },
         ...(dbs.length < dbsRun ? { on: dbs.join(", ") } : {}),
       };
+      const unclear = [...example.params.map((p: any, k: number) => [p, shownField(reylo.shown.params, `p${k + 1}`)]), ...example.columns.map((c: any) => [c, shownField(reylo.shown.row, c.name)])].find(([m, right]: any) => m.wrong && !m.says && readsAsRight(m.type, right));
+      if (unclear) throw new Error(`${t.name}'s card for ${row} marks \`${unclear[0].type}\` wrong beside \`${unclear[1]}\`, which holds it: give the card a sentence for it, as a refused parameter has`);
     }
     cells[row] = { state: c.state, ...(example ? { example } : c.note ? { note: String(c.note).replace(/\n/g, " ").slice(0, 300) } : {}) };
   }

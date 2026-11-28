@@ -3,6 +3,7 @@
 
 pub use reylo_engine_core::types::*;
 use serde::{Deserialize, Serialize};
+use std::cmp::Ordering;
 
 /// One described result column: the server's type and its nullability as the engine settled it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -129,16 +130,15 @@ impl CheckFacts {
     /// stands; either is true of every value, and two versions leave no value but NULL.
     pub fn and(self, other: CheckFacts) -> CheckFacts {
         let tighter = |a: Option<(String, bool)>, b: Option<(String, bool)>, above: bool| match (a, b) {
-            (Some(a), Some(b)) => {
-                let (x, y) = (a.0.parse::<f64>().unwrap_or(f64::NAN), b.0.parse::<f64>().unwrap_or(f64::NAN));
-                Some(if x == y {
+            // Compared digit by digit, as rule 7 orders them: as doubles, two bounds past 2^53 or of
+            // many digits read as one.
+            (Some(a), Some(b)) => Some(match number_order(&a.0, &b.0) {
+                Some(Ordering::Equal) => {
                     if a.1 { a } else { b }
-                } else if (x > y) == above {
-                    a
-                } else {
-                    b
-                })
-            }
+                }
+                Some(order) if order.is_gt() == above => a,
+                _ => b,
+            }),
             (a, b) => a.or(b),
         };
         CheckFacts {
@@ -155,10 +155,15 @@ impl CheckFacts {
     /// precision already implies is left out, as the format asks, and a CHECK no value can meet says
     /// nothing a reader could use.
     pub fn apply(&self, ty: Type) -> Type {
-        let low = self.min.as_ref().map(|(v, _)| v.parse::<f64>().unwrap_or(f64::NEG_INFINITY));
-        let high = self.max.as_ref().map(|(v, _)| v.parse::<f64>().unwrap_or(f64::INFINITY));
-        let exclusive = self.min.as_ref().is_some_and(|(_, e)| *e) || self.max.as_ref().is_some_and(|(_, e)| *e);
-        if low.zip(high).is_some_and(|(l, h)| l > h || (l == h && exclusive)) {
+        let met_by_none = match (&self.min, &self.max) {
+            (Some((low, low_exclusive)), Some((high, high_exclusive))) => match number_order(low, high) {
+                Some(Ordering::Greater) => true,
+                Some(Ordering::Equal) => *low_exclusive || *high_exclusive,
+                _ => false,
+            },
+            _ => false,
+        };
+        if met_by_none {
             return ty;
         }
         let Type { kind, label, comment, title } = ty;

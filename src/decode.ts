@@ -26,7 +26,7 @@
 // those oids are arrays, cached in a WeakMap keyed by the app's object. A row value the module knows
 // the fields of has the kind of its column whatever its oid: `record` is one oid for every shape of
 // row, and a built-in catalog table's row type is below 10000 too.
-import { civilFromDays, coerce, coercePostgres, columnKind, DecodeError, describe, elementKind, holdsRareKind, instantOfDate, isLevel, isRareKind, isRowKind, numbersInJson, ParameterError, postgresInterval, postgresTypesFor, postgresYear, scalarKind, textDecoder, utf8, wholeArrayKind, withFraction, withinDimensions, type Columns, type Decoder, type JsonNumbers, type Kind } from "./values.ts";
+import { civilFromDays, coerce, coercePostgres, columnKind, DecodeError, describe, elementKind, holdsArray, holdsJsonArray, holdsRareKind, instantOfDate, isLevel, isRareKind, isRowKind, numbersInJson, ParameterError, postgresInterval, postgresTypesFor, postgresYear, scalarKind, textDecoder, utf8, wholeArrayKind, withFraction, withinDimensions, type Columns, type Decoder, type JsonElements, type JsonNumbers, type Kind } from "./values.ts";
 import { bareName, holdsWholeArrays, type EngineType } from "./engine-type.ts";
 import { lastOfEach, namesInResult, rowOf, type RowBuilder } from "./row.ts";
 import { arrayLiteral, asByteaHex, EFFECT_SQL, isJsonValue, isTime, jsonElements, takesFloat, jsonText, postgresText, vectorParameter, wrappers, type AnyClient as Client, type Bound, type EffectSql, type Marks, type QueryModule, type Runtime } from "./execute.ts";
@@ -388,6 +388,10 @@ const isPglite = (c: AnyClient) => typeof c.query === "function" && typeof c.exe
 
 /** The oids each statement's result had on its earlier runs, by the statement's text: PGlite's per-query table names only those. */
 const pgliteOids = new Map<string, Set<number>>();
+/** The parsers each statement's oids name, built once for each set of them. */
+const pgliteParsers = new WeakMap<Set<number>, Record<number, Decoder>>();
+/** json[] and jsonb[], which every PGlite statement names. */
+const JSON_ARRAY_OIDS = [199, 3807];
 const PGLITE_STATEMENTS = 2000;
 // Listed on PGlite's first statement, so that a bundle of another database's queries holds neither table.
 let builtinOids: number[] | undefined;
@@ -409,14 +413,28 @@ function hexOnToString(v: unknown): unknown {
   return view;
 }
 
+/**
+ * How PGlite's own parser for an array's oid holds a JSON element, where Reylo named no parser of
+ * its own for it: an oid Reylo names none for is a created type's, and the parser PGlite learned
+ * for it by refreshArrayTypes() keeps each element's text, as the element's type has none.
+ */
+const PGLITE_JSON_ELEMENTS: JsonElements = "text";
+
 async function pglite(db: AnyClient, text: string, values: unknown[], columns: Columns | undefined): Promise<unknown[]> {
   // A statement met for the first time names every built-in type Reylo decodes, and every oid the
-  // instance has a parser for (its arrays, and the app's); a transaction has no table to read.
+  // instance has a parser for (its arrays, and the app's); a later one names those its results had,
+  // and json[] and jsonb[] always, whose elements the instance's parser would decode itself, leaving
+  // their dimensions unknown, where another search_path makes a warmed statement's result one. A
+  // transaction has no table to read.
   let named = pgliteOids.get(text);
   builtinOids ??= [...Object.keys(SCALAR_OIDS).map(Number), ...ARRAY_OIDS.keys()];
-  const oids = named ?? new Set([...builtinOids, ...Object.keys(db.parsers ?? {}).map(Number)]);
-  const parsers: Record<number, Decoder> = {};
-  for (const oid of oids) parsers[oid] = builtinDecoder(oid) ?? keepText;
+  let parsers = named && pgliteParsers.get(named);
+  if (parsers === undefined) {
+    const oids = named ? new Set([...named, ...JSON_ARRAY_OIDS]) : new Set([...builtinOids, ...Object.keys(db.parsers ?? {}).map(Number)]);
+    parsers = {};
+    for (const oid of oids) parsers[oid] = builtinDecoder(oid) ?? keepText;
+    if (named) pgliteParsers.set(named, parsers);
+  }
   const result = await db.query(text, values.map(hexOnToString), { rowMode: "object", parsers });
   const rows: Record<string, unknown>[] = result.rows;
   const fields: Field[] = (result.fields ?? []).map((f: { name: string; dataTypeID: number }) => ({ name: f.name, oid: f.dataTypeID }));
@@ -425,7 +443,7 @@ async function pglite(db: AnyClient, text: string, values: unknown[], columns: C
   const byColumn = columns && columns.length === fields.length ? columns : undefined;
   // A row holds the last column of each name, which only that column's kind decodes.
   const last = new Map(fields.map((f, i) => [f.name, i]));
-  const after = fields.map((f, i) => [f, i] as const).filter(([f, i]) => last.get(f.name) === i && (f.oid >= FIRST_USER_OID || !oids.has(f.oid) || (byColumn !== undefined && isRowKind(byColumn[i]![1]))));
+  const after = fields.map((f, i) => [f, i] as const).filter(([f, i]) => last.get(f.name) === i && (f.oid >= FIRST_USER_OID || !(f.oid in parsers) || (byColumn !== undefined && isRowKind(byColumn[i]![1]))));
   if (after.length) {
     const load: Load = async (sql) => (await db.query(sql, [], { rowMode: "array", parsers: { 25: keepText } })).rows;
     const decoders = await fieldDecoders(fields, columns, db, load);
@@ -434,7 +452,7 @@ async function pglite(db: AnyClient, text: string, values: unknown[], columns: C
       const decode = decoders[i]!;
       for (const row of rows) {
         const v = row[f.name];
-        if (v !== null && v !== undefined) row[f.name] = typeof v === "string" ? decode(v) : coercePostgres(kinds[i]!, v, f.name);
+        if (v !== null && v !== undefined) row[f.name] = typeof v === "string" ? decode(v) : coercePostgres(kinds[i]!, v, f.name, ",", Array.isArray(v) && holdsJsonArray(kinds[i]!) ? PGLITE_JSON_ELEMENTS : undefined);
       }
     }
   }
@@ -748,7 +766,8 @@ type BunDatabase = { readonly value: (kind: Kind, v: unknown, name: string, deli
 /** MySQL's values on Bun.sql (src/decode-mysql.ts). */
 export const BUN_MYSQL: BunDatabase = { value: (kind, v, name) => coerce(kind, v, name) };
 /** Postgres's values on Bun.sql. */
-export const BUN_POSTGRES: BunDatabase = { value: coercePostgres, oid: (oid) => builtin(oid) };
+/** Postgres's values on Bun.sql, whose own decoder reads each JSON value of an array itself. */
+export const BUN_POSTGRES: BunDatabase = { value: (kind, v, name, delim) => coercePostgres(kind, v, name, delim, "decoded"), oid: (oid) => builtin(oid) };
 
 export function bunRows(rows: unknown[], columns: Columns | undefined, db: BunDatabase): unknown[] {
   if (!Array.isArray(rows) || !rows.length) return Array.isArray(rows) ? rows : [];
@@ -966,7 +985,8 @@ function slonikValue(kind: Kind, v: unknown, name: string, delim?: string): unkn
   if (typeof v === "string") return textDecoder(kind, delim)(v);
   // pg parses an array's text into an array, each element by the element type's parser, which
   // Reylo's tag passes through for the types it names.
-  if (Array.isArray(v) && wholeArrayKind(elementKind(kind)) !== undefined) return coercePostgres(kind, v, name, delim);
+  // An array of whole arrays, or of JSON, whose elements Reylo's tag leaves as their text, so that its levels are the array's.
+  if (Array.isArray(v) && (wholeArrayKind(elementKind(kind)) !== undefined || elementKind(kind) === "json")) return coercePostgres(kind, v, name, delim, "text");
   if (Array.isArray(v) && kind.endsWith("[]")) return v.map((e) => (Array.isArray(e) ? slonikValue(kind, e, name, delim) : slonikValue(elementKind(kind), e, name, delim)));
   if (SLONIK_STRICT.test(kind)) {
     throw new DecodeError(`Column "${name}" reached Reylo already converted by Slonik's driver (${v instanceof Date ? "a Date" : typeof v}), which ignored the query's type parsers, as a custom driverFactory may: Reylo refuses it rather than return a value that may have been rounded.`);
@@ -1074,10 +1094,12 @@ async function runPostgres(c: Client, query: QueryModule<"postgres">, { text, va
 }
 
 /** A Postgres column's text as its kind, with the non-finite numbers inside its JSON as numbers and an array held to its dimensions, as `.run()` gives them (`postgresRows`). */
-function postgresDecoder(name: string, kind: Kind, delim: string | undefined, nonFinite: JsonNumbers | undefined, nestedArrays: boolean | undefined): (v: string) => unknown {
+function postgresDecoder(name: string, kind: Kind, delim: string | undefined, nonFinite: JsonNumbers | undefined, nestedArrays: boolean | undefined, dropped?: boolean): (v: string) => unknown {
   const decode = textDecoder(kind, delim);
   const numbers = nonFinite === undefined ? decode : (v: string) => numbersInJson(decode(v), nonFinite, name);
-  return kind.endsWith("[]") && !nestedArrays ? (v) => withinDimensions(numbers(v), kind, name) : numbers;
+  // A column a later one of its name replaces is never returned; an array of JSON has one dimension under allow_nested_arrays too.
+  if (dropped || !(nestedArrays ? holdsJsonArray(kind) : holdsArray(kind))) return numbers;
+  return (v) => withinDimensions(numbers(v), kind, name, undefined, nestedArrays === true);
 }
 
 /** The statements that take a Postgres `money` parameter, anywhere in its value: the first such parameter's name, else null. */
@@ -1141,8 +1163,10 @@ function postgresValue(type: EngineType, v: unknown, name: string): unknown {
 
 /** The rows as `.run()` returns them: an array column holds the dimensions its type declares and no more (src/values.ts, `withinDimensions`), unless the project lets it nest. */
 function postgresRows(query: QueryModule<"postgres">, rows: unknown[]): unknown[] {
-  const arrays = query.nestedArrays ? [] : (query.columns ?? []).filter(([, kind]) => kind.endsWith("[]"));
-  for (const row of arrays.length ? (rows as Record<string, unknown>[]) : []) for (const [name, kind] of arrays) withinDimensions(row[name], kind, name);
+  // The last column of each name, whose value the row holds; under allow_nested_arrays an array of
+  // JSON alone, whose value can't tell a level from a JSON array.
+  const arrays = lastOfEach(query.columns ?? []).filter(([, kind]) => (query.nestedArrays ? holdsJsonArray(kind) : holdsArray(kind)));
+  for (const row of arrays.length ? (rows as Record<string, unknown>[]) : []) for (const [name, kind] of arrays) withinDimensions(row[name], kind, name, undefined, query.nestedArrays === true);
   return rows;
 }
 

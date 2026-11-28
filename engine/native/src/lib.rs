@@ -262,7 +262,6 @@ fn core_answer<P: Program>(program: &P, request: &Value, line: &str) -> String {
 }
 
 /// A URL parameter's value, percent-decoded.
-#[cfg(any(feature = "postgres", feature = "mysql"))]
 pub(crate) fn decode(value: &str) -> String {
     let bytes = value.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());

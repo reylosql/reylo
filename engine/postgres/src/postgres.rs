@@ -5691,6 +5691,12 @@ mod tests {
             K::Decimal(d) => assert_eq!(d.bounds, Bounds { exclusive_min: Some("0".into()), exclusive_max: Some("1.5".into()), ..Bounds::default() }),
             _ => panic!(),
         }
+        // Bounds a double reads as one compare digit by digit: the tighter is the larger, and a
+        // minimum above its maximum is a CHECK no value meets.
+        assert_eq!(facts("n >= 9007199254740992::numeric AND n >= 9007199254740993::numeric", "n", oid::NUMERIC).min, bound("9007199254740993", false));
+        let none = facts("n >= 0.10000000000000000001 AND n <= 0.1", "n", oid::NUMERIC);
+        none.apply(Type::decimal(DecimalType::default())).check().unwrap();
+        assert_eq!(none.apply(Type::decimal(DecimalType::default())), Type::decimal(DecimalType::default()));
         // The tighter of two bounds, and NULL let through beside one.
         assert_eq!(facts("x > 1 AND x >= 5", "x", oid::INT4).min, bound("5", false));
         assert_eq!(facts("x IS NULL OR x > 10", "x", oid::INT4).min, bound("10", true));

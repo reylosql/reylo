@@ -1,4 +1,5 @@
 compared.sql: many (age: int4, slug: text(¬NUL)) -> { id: int4 } key (id)
+crossed.sql: many () -> { fraction: numeric?, whole: numeric?, tight: numeric(9007199254740993..)? }
 expressions.sql: many () -> { plus: int4?, doubled: int4, half_price: numeric?, loud: text(¬NUL)? }
 numbers.sql: many () -> { age: int4(0..150)?, qty: int4(×5), pos: int4(1..)?, small: int2?, price: numeric(10,2, 0..)?, rate: numeric(>0..<1)?, half: numeric(6,1, ×0.5)?, ratio: float8(0..1)? }
 rounding.sql: many () -> { to_int: numeric?, to_scale: numeric?, past_float: float8?, through_real: float8?, single: float4?, below_single: float4?, kept_int: numeric(..2)?, kept_float: float8(0.3..)?, kept_single: float4(0.5..)?, kept_real: float4(0.1..)?, no_whole: int4? }

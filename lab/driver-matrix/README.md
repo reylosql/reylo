@@ -30,7 +30,7 @@ Each job runs in its own process: Node 26.7.0 by default, Node 24.19.0 for the s
 | node:sqlite | Node 26.7.0, Node 24.19.0 | SQLite file | DatabaseSync, DatabaseSync inside BEGIN/COMMIT, `db.createTagStore()`, `db.createTagStore().db` |
 | bun:sqlite | Bun 1.4.4 | SQLite file | Database, `db.transaction(fn)` |
 | @libsql/client | 0.17.4, 0.18.0, 0.15.15, 0.14.0 | SQLite file (`file:` URL) | Client, `client.transaction("write")` |
-| @tursodatabase/database | 0.8.3, 0.7.2, 0.6.1, 0.4.4 | SQLite file, opened by Turso's engine | Database from `connect()`, Database inside BEGIN/COMMIT (exec), the Transaction `db.transactionAsync(fn)` hands its callback (0.7 and later); the synchronous Database of `@tursodatabase/database/compat` and its `db.transaction(fn)` |
+| @tursodatabase/database | 0.8.3, 0.7.2, 0.6.1 | SQLite file, opened by Turso's engine | Database from `connect()`, Database inside BEGIN/COMMIT (exec), the Transaction `db.transactionAsync(fn)` hands its callback (0.7 and later); the synchronous Database of `@tursodatabase/database/compat` and its `db.transaction(fn)` |
 | sqlite3 | 5.1.7, 6.0.1 | SQLite file | Database, BEGIN/COMMIT inside `db.serialize()` |
 | sqlite | 5.1.1 over sqlite3 5.1.7 and 6.0.1 | SQLite file | Database from `open()`, Database inside BEGIN/COMMIT |
 | @sqlite.org/sqlite-wasm | 3.54.1-build1 | SQLite file, copied into memory (in Node it opens no file) | `oo1.DB`, `oo1.DB` inside BEGIN/COMMIT (its own `db.transaction(fn)` calls the function at once, so the `db.transaction(fn)` scenarios do not apply) |

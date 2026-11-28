@@ -986,12 +986,30 @@ impl Type {
         Kind::Text(TextType::default()).into()
     }
 
-    /// One of `values`, each a value of `ty`; an empty list is no enum, and `ty` itself.
+    /// One of `values` that `ty` holds, each once, as rule 7 reads an enum's values: a value its type
+    /// cannot hold (a CHECK's `'abcd'` in a `varchar(3)`) is never one its column holds, and one
+    /// listed twice is the same value. With none left, or both booleans, no enum, and `ty` itself.
     pub fn one_of(ty: Type, values: Vec<String>) -> Type {
-        if values.is_empty() {
+        let mut seen = Vec::new();
+        let mut kept = Vec::new();
+        for v in values {
+            let Ok(value) = enum_value(&ty.kind, &v) else { continue };
+            let value = value.ok_or_else(|| v.clone());
+            if !seen.contains(&value) {
+                seen.push(value);
+                kept.push(v);
+            }
+        }
+        if kept.is_empty() || (matches!(ty.kind, Kind::Boolean(_)) && kept.len() == 2) {
             return ty;
         }
-        Kind::Enum(EnumType { ty: Box::new(ty), values: values.into_iter().map(EnumValue::from).collect() }).into()
+        Kind::Enum(EnumType { ty: Box::new(ty), values: kept.into_iter().map(EnumValue::from).collect() }).into()
+    }
+
+    /// Whether `value` is one of this type's values as rule 7 reads an enum's: a value it does not
+    /// read, as a date written in another form of ISO 8601, is taken as one.
+    pub(crate) fn holds(&self, value: &str) -> bool {
+        enum_value(&self.kind, value).is_ok()
     }
 
     /// Text that is one of `values`.
@@ -1495,7 +1513,8 @@ impl Type {
                 if i.bounds.exclusive_min.is_some() || i.bounds.exclusive_max.is_some() {
                     return fail("a whole-number kind writes its bounds inclusive".into());
                 }
-                check_order(&i.bounds, decimal_order).or_else(fail)?;
+                numbers(&i.bounds).or_else(fail)?;
+                check_order(&i.bounds, number_order).or_else(fail)?;
             }
             Kind::Uuid(u) => {
                 if let Some(versions) = &u.versions {
@@ -1511,10 +1530,12 @@ impl Type {
                 if f.exponent_bits == 0 || f.mantissa_bits == 0 {
                     return fail("a float's widths are positive".into());
                 }
-                check_bounds(&f.bounds, decimal_order).or_else(fail)?;
+                numbers(&f.bounds).or_else(fail)?;
+                check_bounds(&f.bounds, number_order).or_else(fail)?;
             }
             Kind::Decimal(d) => {
-                check_bounds(&d.bounds, decimal_order).or_else(fail)?;
+                numbers(&d.bounds).or_else(fail)?;
+                check_bounds(&d.bounds, number_order).or_else(fail)?;
                 if let (Some(min), Some(max)) = (d.min_scale, d.max_scale) {
                     if min > max {
                         return fail(format!("min_scale {min} is above max_scale {max}"));
@@ -1530,19 +1551,23 @@ impl Type {
                 if e.values.is_empty() {
                     return fail("an enum lists at least one value".into());
                 }
-                let texts: Vec<&str> = e.texts().collect();
-                if let Some((i, v)) = texts.iter().enumerate().find(|(i, v)| texts[..*i].contains(v)) {
-                    return fail(format!("value {v:?} is listed twice, at {i}"));
-                }
-                if matches!(e.ty.kind, Kind::Boolean(_)) {
-                    if texts.iter().any(|v| *v != "true" && *v != "false") {
-                        return fail(format!("a boolean's values are true and false, not {texts:?}"));
-                    }
-                    if e.values.len() == 2 {
-                        return fail("an enum of both booleans is a boolean".into());
-                    }
-                }
+                // Reading a value relies on its type's own rules (a UUID's versions, an integer's bits).
                 e.ty.check_at(&format!("{at}<enum>"))?;
+                let mut values = Vec::new();
+                for (i, v) in e.texts().enumerate() {
+                    // A value the check reads is told apart by what it is, and one it does not by its text.
+                    let value = enum_value(&e.ty.kind, v).map_err(|why| format!("{here}: value {v:?} is {why}"))?.ok_or(v);
+                    if values.contains(&value) {
+                        return fail(format!("value {v:?} is listed twice, at {i}"));
+                    }
+                    values.push(value);
+                }
+                if matches!(e.ty.kind, Kind::Boolean(_)) && values.len() == 2 {
+                    return fail("an enum of both booleans is a boolean".into());
+                }
+                if !tick_spaced(&e.ty.kind, &e.texts().collect::<Vec<_>>()) {
+                    return fail("two values are not a whole number of ticks apart".into());
+                }
             }
             Kind::Array(a) => {
                 unsized_(&a.size)?;
@@ -1581,22 +1606,22 @@ impl Type {
                     slot(content, "<json>")?;
                 }
             }
-            Kind::Date(d) => check_bounds(&d.bounds, text_order).or_else(fail)?,
+            Kind::Date(d) => check_bounds(&d.bounds, |a, b| moment_order(&self.kind, a, b).or_else(|| text_order(a, b))).or_else(fail)?,
             Kind::Time(t) => {
                 check_tick(&t.tick).or_else(fail)?;
-                check_bounds(&t.bounds, text_order).or_else(fail)?;
+                check_bounds(&t.bounds, |a, b| time_order(t, a, b).or_else(|| text_order(a, b))).or_else(fail)?;
             }
             Kind::DateTime(t) => {
                 check_tick(&t.tick).or_else(fail)?;
-                check_bounds(&t.bounds, text_order).or_else(fail)?;
+                check_bounds(&t.bounds, |a, b| moment_order(&self.kind, a, b).or_else(|| text_order(a, b))).or_else(fail)?;
             }
             Kind::Instant(t) => {
                 check_tick(&t.tick).or_else(fail)?;
-                check_bounds(&t.bounds, text_order).or_else(fail)?;
+                check_bounds(&t.bounds, |a, b| moment_order(&self.kind, a, b).or_else(|| text_order(a, b))).or_else(fail)?;
             }
             Kind::ZonedDateTime(t) => {
                 check_tick(&t.tick).or_else(fail)?;
-                check_bounds(&t.bounds, text_order).or_else(fail)?;
+                check_bounds(&t.bounds, |a, b| moment_order(&self.kind, a, b).or_else(|| text_order(a, b))).or_else(fail)?;
             }
             Kind::Duration(d) => match (duration_has_time(&d.max).map_err(|why| format!("{here}: {why}"))?, &d.tick) {
                 (true, Some(tick)) => check_tick(tick).or_else(fail)?,
@@ -1643,7 +1668,249 @@ impl Type {
     }
 }
 
-fn check_bounds(b: &Bounds, order: fn(&str, &str) -> Option<std::cmp::Ordering>) -> Result<(), String> {
+/// Rule 7 on an enum's value: one of its type's values, in the canonical text rule 5 gives its
+/// kind, as what tells it from the others, which two texts of one value share (a UUID's in either
+/// case); `None` for one the check does not read; or why it is none. A date or a time is read in
+/// ISO 8601's extended form, as the format's examples write its kind, and refused in any other.
+/// Only what the format settles refuses a value: its characters in a character set other than
+/// Unicode's, US-ASCII and ISO-8859-1, a pattern, a duration, a float wider than a double's
+/// precision, a tick no decimal fraction writes, and how times with different offsets order are
+/// not read.
+fn enum_value(kind: &Kind, text: &str) -> Result<Option<String>, &'static str> {
+    let bounded = |bounds: &Bounds| if within(text, bounds, number_order) { Ok(Some(text.to_string())) } else { Err("outside its type's bounds") };
+    const FIELDS: &str = "a date or a time with a field out of its range";
+    const FORM: &str = "not written in ISO 8601's extended form, as the format writes its kind";
+    const TICK: &str = "between two of its type's ticks";
+    match kind {
+        Kind::Boolean(_) => ["true", "false"].contains(&text).then(|| Some(text.to_string())).ok_or("not true or false"),
+        // -0 writes 0, and a float's -0 equals it.
+        Kind::Integer(_) | Kind::Float(_) | Kind::Decimal(_) if text == "-0" => enum_value(kind, "0"),
+        Kind::Integer(_) if !is_canonical_number(text) || text.contains('.') => Err("no whole number in canonical text"),
+        Kind::Integer(i) if !holds_bits(text, i) => Err("past its type's width"),
+        Kind::Integer(i) => bounded(&i.bounds),
+        Kind::Float(f) if is_canonical_number(text) => {
+            let value = float_value(text, f)?;
+            bounded(&f.bounds).map(|_| Some(value))
+        }
+        Kind::Decimal(d) if is_canonical_number(text) && !holds_scale(text, d) => Err("more digits than its type's precision and scales hold"),
+        Kind::Decimal(d) if is_canonical_number(text) => bounded(&d.bounds),
+        Kind::Float(_) | Kind::Decimal(_) => Err("no number in canonical text"),
+        Kind::Text(t) => text_value(text, t).map(|()| Some(text.to_string())),
+        Kind::Bytes(b) => match base64_length(text) {
+            None => Err("no base64 in canonical text"),
+            Some(length) if b.size.as_ref().is_some_and(|size| !sized(length, size)) => Err("longer or shorter than its type's size"),
+            Some(_) => Ok(Some(text.to_string())),
+        },
+        Kind::Uuid(u) => {
+            let form = text.len() == 36 && text.bytes().enumerate().all(|(i, c)| if matches!(i, 8 | 13 | 18 | 23) { c == b'-' } else { c.is_ascii_hexdigit() });
+            if !form {
+                return Err("no UUID in RFC 9562's text form");
+            }
+            let digits = text.replace('-', "").to_ascii_lowercase();
+            let (version, variant) = (digits.as_bytes()[12], digits.as_bytes()[16]);
+            let versioned = |versions: &Vec<u8>| matches!(variant, b'8' | b'9' | b'a' | b'b') && versions.iter().any(|v| version == b'0' + v);
+            if u.versions.as_ref().is_some_and(|versions| !versioned(versions)) {
+                return Err("of none of its type's versions");
+            }
+            Ok(Some(digits))
+        }
+        Kind::Date(DateType { bounds, .. }) | Kind::DateTime(DateTimeType { bounds, .. }) | Kind::Instant(InstantType { bounds, .. }) => {
+            let (at, fraction, _) = moment(kind, text).ok_or(FORM)?;
+            let at = at.ok_or(FIELDS)?;
+            if let Kind::DateTime(DateTimeType { tick, .. }) | Kind::Instant(InstantType { tick, .. }) = kind {
+                if !on_tick(tick, at, fraction) {
+                    return Err(TICK);
+                }
+            }
+            // A side no bound limits runs from 0001-01-01 up to 9999-12-31.
+            let midnight = |day: &str| date(day).and_then(|(days, _)| days).map_or(0, |days| days * 86_400);
+            let low = bounds.min.is_some() || bounds.exclusive_min.is_some() || at >= midnight("0001-01-01");
+            let high = bounds.max.is_some() || bounds.exclusive_max.is_some() || at < midnight("+10000-01-01");
+            if !(low && high && within(text, bounds, |a, b| moment_order(kind, a, b))) {
+                return Err("outside its type's range");
+            }
+            Ok(Some(format!("{at}.{fraction}")))
+        }
+        Kind::ZonedDateTime(z) => {
+            let (at, fraction, zone) = moment(kind, text).ok_or(FORM)?;
+            let at = at.ok_or(FIELDS)?;
+            let (named, zone) = suffix(zone).ok_or(FORM)?;
+            if z.offset_only && !matches!(offset(named), Some((Some(_), ""))) {
+                return Err("in a zone that is no UTC offset");
+            }
+            if !on_tick(&z.tick, at, fraction) {
+                return Err(TICK);
+            }
+            if !within(text, &z.bounds, |a, b| moment_order(kind, a, b)) {
+                return Err("outside its type's bounds");
+            }
+            Ok(Some(format!("{at}.{fraction}{zone}")))
+        }
+        Kind::Time(t) => {
+            let Clock { seconds: at, fields: (hours, minutes, seconds), fraction, rest } = clock(text).ok_or(FORM)?;
+            // A time of day is told apart as `time_order` orders it, by its fields and its
+            // fraction, so that a leap second's `23:59:60` is not `24:00:00`, and `12:00` is `12:00:00`.
+            let time = format!("{hours:02}:{minutes:02}:{seconds:02}");
+            if t.offset {
+                // Each value keeps its offset; a bound in the same offset limits it.
+                let (east, "") = offset(rest).ok_or(FORM)? else { return Err(FORM) };
+                let (Some(at), Some(east)) = (at, east) else { return Err(FIELDS) };
+                if !on_tick(&t.tick, at, fraction) {
+                    return Err(TICK);
+                }
+                if !within(text, &t.bounds, |a, b| time_order(t, a, b)) {
+                    return Err("outside its type's bounds");
+                }
+                return Ok(Some(format!("{time}.{fraction}{east:+}")));
+            }
+            if !rest.is_empty() {
+                return Err(FORM);
+            }
+            let Some(seconds) = at else { return Err(FIELDS) };
+            if !on_tick(&t.tick, seconds, fraction) {
+                return Err(TICK);
+            }
+            // Up to 24:00:00, which only a bound reaches.
+            let mut range = t.bounds.clone();
+            if range.max.is_none() && range.exclusive_max.is_none() {
+                range.exclusive_max = Some("24:00:00".into());
+            }
+            if !within(text, &range, |a, b| time_order(t, a, b)) {
+                return Err("outside its type's range");
+            }
+            Ok(Some(format!("{time}.{fraction}")))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// Whether a number is written in its canonical text (rule 5): in decimal, with no exponent and no
+/// zero it needs not (`-0.25`, never `01`, `1.50` or `1e2`).
+fn is_canonical_number(text: &str) -> bool {
+    let body = text.strip_prefix('-').unwrap_or(text);
+    let (whole, fraction) = body.split_once('.').map_or((body, None), |(whole, fraction)| (whole, Some(fraction)));
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    digits(whole) && (whole == "0" || !whole.starts_with('0')) && fraction.is_none_or(|f| digits(f) && !f.ends_with('0'))
+}
+
+/// Whether an integer type's width holds a whole number's canonical text: its magnitude's bits,
+/// counted in base 2^32 so that no width is too wide, against two's complement's -2^(bits-1) to
+/// 2^(bits-1) - 1, or 0 to 2^bits - 1 where it is unsigned.
+fn holds_bits(text: &str, i: &IntegerType) -> bool {
+    let (below, magnitude) = text.strip_prefix('-').map_or((false, text), |magnitude| (true, magnitude));
+    let mut limbs: Vec<u32> = Vec::new();
+    for digit in magnitude.bytes() {
+        let mut carry = u64::from(digit - b'0');
+        for limb in &mut limbs {
+            let next = u64::from(*limb) * 10 + carry;
+            (*limb, carry) = (next as u32, next >> 32);
+        }
+        if carry > 0 {
+            limbs.push(carry as u32);
+        }
+    }
+    let length = limbs.last().map_or(0, |top| 32 * (limbs.len() as u64 - 1) + u64::from(32 - top.leading_zeros()));
+    let power_of_two = limbs.iter().map(|limb| limb.count_ones()).sum::<u32>() == 1;
+    let bits = u64::from(i.bits);
+    if i.unsigned {
+        !below && length <= bits
+    } else {
+        length < bits || (below && length == bits && power_of_two)
+    }
+}
+
+/// Whether a decimal type holds a number's canonical text: some scale from `min_scale` to
+/// `max_scale` writes it with a coefficient of at most `precision` digits (`1200` is 12 × 10^2,
+/// of scale -2, or 120 × 10^1, of scale -1).
+fn holds_scale(text: &str, d: &DecimalType) -> bool {
+    let Some((_, point, digits)) = number(text) else { return false };
+    if digits.is_empty() {
+        return true;
+    }
+    // The least scale that writes it, and the least the type keeps it at.
+    let least = digits.len() as i64 - point;
+    let scale = d.min_scale.map_or(least, |min| least.max(i64::from(min)));
+    d.max_scale.is_none_or(|max| scale <= i64::from(max)) && d.precision.is_none_or(|precision| digits.len() as i64 + scale - least <= i64::from(precision))
+}
+
+/// Whether text's value is one its type holds: every character within its code points and its
+/// encoding, and as long as its size says, in the size's unit. Only a character's code point is
+/// read, so another character set than Unicode's, US-ASCII and ISO-8859-1 holds any, and a size
+/// in another encoding's units any length.
+fn text_value(text: &str, t: &TextType) -> Result<(), &'static str> {
+    if t.code_points.as_ref().is_some_and(|ranges| text.chars().any(|c| !ranges.iter().any(|[lo, hi]| (*lo..=*hi).contains(&u32::from(c))))) {
+        return Err("a character outside its type's code points");
+    }
+    let encoding = t.encoding.as_deref().map(str::to_ascii_uppercase);
+    let widest = match encoding.as_deref() {
+        Some("US-ASCII") => 0x7F,
+        Some("ISO-8859-1") => 0xFF,
+        _ => MAX_CODE_POINT,
+    };
+    if text.chars().any(|c| u32::from(c) > widest) {
+        return Err("a character its type's encoding does not hold");
+    }
+    let Some(size) = &t.size else { return Ok(()) };
+    let length = match (size.unit, encoding.as_deref()) {
+        (None, _) | (Some(_), Some("US-ASCII" | "ISO-8859-1")) | (Some(SizeUnit::CodeUnit), Some("UTF-32")) => text.chars().count(),
+        (Some(_), Some("UTF-8")) => text.len(),
+        (Some(SizeUnit::CodeUnit), Some("UTF-16")) => text.encode_utf16().count(),
+        (Some(SizeUnit::Byte), Some("UTF-16")) => 2 * text.encode_utf16().count(),
+        (Some(SizeUnit::Byte), Some("UTF-32")) => 4 * text.chars().count(),
+        _ => return Ok(()),
+    };
+    if sized(length as u64, size) {
+        Ok(())
+    } else {
+        Err("longer or shorter than its type's size")
+    }
+}
+
+/// The length of the bytes base64's canonical text writes (RFC 4648: its alphabet, padded to
+/// groups of four, no bit set past the last byte), or `None` for any other text.
+fn base64_length(text: &str) -> Option<u64> {
+    let body = text.trim_end_matches('=');
+    let padding = text.len() - body.len();
+    if text.len() % 4 != 0 || padding > 2 {
+        return None;
+    }
+    let mut last = 0;
+    for c in body.bytes() {
+        last = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => return None,
+        };
+    }
+    // Padded once, the last character's two low bits are past the last byte; twice, its four.
+    (last & ((1 << (2 * padding)) - 1) == 0).then_some((text.len() / 4 * 3 - padding) as u64)
+}
+
+/// Whether a length is one a size allows.
+fn sized(length: u64, size: &Size) -> bool {
+    size.exact.is_none_or(|n| length == n) && size.min.is_none_or(|n| length >= n) && size.max.is_none_or(|n| length <= n)
+}
+
+/// Whether a value is within bounds by `order`, a bound it cannot read limiting nothing.
+fn within(value: &str, bounds: &Bounds, order: impl Fn(&str, &str) -> Option<std::cmp::Ordering>) -> bool {
+    use std::cmp::Ordering;
+    let keeps = |bound: &Option<String>, outside: fn(Ordering) -> bool| bound.as_deref().and_then(|bound| order(value, bound)).is_none_or(|o| !outside(o));
+    keeps(&bounds.min, Ordering::is_lt) && keeps(&bounds.exclusive_min, Ordering::is_le) && keeps(&bounds.max, Ordering::is_gt) && keeps(&bounds.exclusive_max, Ordering::is_ge)
+}
+
+/// Whether every bound a number kind writes is a number (rule 5), which `inf` and `Infinity` are not
+/// (the `infinity` flag speaks for those), and one whose exponent an i64 counts, so that it orders.
+fn numbers(b: &Bounds) -> Result<(), String> {
+    match [&b.min, &b.exclusive_min, &b.max, &b.exclusive_max].into_iter().flatten().find(|v| number(v).is_none()) {
+        Some(v) => Err(format!("the bound {v:?} is no number")),
+        None => Ok(()),
+    }
+}
+
+fn check_bounds(b: &Bounds, order: impl Fn(&str, &str) -> Option<std::cmp::Ordering>) -> Result<(), String> {
     if b.min.is_some() && b.exclusive_min.is_some() {
         return Err("min beside exclusive_min".into());
     }
@@ -1653,7 +1920,7 @@ fn check_bounds(b: &Bounds, order: fn(&str, &str) -> Option<std::cmp::Ordering>)
     check_order(b, order)
 }
 
-fn check_order(b: &Bounds, order: fn(&str, &str) -> Option<std::cmp::Ordering>) -> Result<(), String> {
+fn check_order(b: &Bounds, order: impl Fn(&str, &str) -> Option<std::cmp::Ordering>) -> Result<(), String> {
     let low = b.min.as_deref().or(b.exclusive_min.as_deref());
     let high = b.max.as_deref().or(b.exclusive_max.as_deref());
     if let (Some(low), Some(high)) = (low, high) {
@@ -1676,18 +1943,334 @@ fn short_bounds(b: &Bounds) -> Option<String> {
     (!low.is_empty() || !high.is_empty()).then(|| format!("{low}..{high}"))
 }
 
-/// Two numbers in canonical decimal text, compared, where both read as `f64` without loss of
-/// order (an exponent such as `1e131072` reads as infinity, which still orders it).
-fn decimal_order(a: &str, b: &str) -> Option<std::cmp::Ordering> {
-    let (x, y) = (a.parse::<f64>().ok()?, b.parse::<f64>().ok()?);
-    x.partial_cmp(&y)
+/// Two numbers in decimal text compared as the numbers they write, digit by digit, so that no
+/// 64-bit bound past 2^53 and no decimal of many digits loses its place, and `numeric`'s reach,
+/// `1e131072`, compares without its digits written out.
+pub fn number_order(a: &str, b: &str) -> Option<std::cmp::Ordering> {
+    use std::cmp::Ordering::{Equal, Greater, Less};
+    let ((a_below, a_point, a_digits), (b_below, b_point, b_digits)) = (number(a)?, number(b)?);
+    let magnitude = match (a_digits.is_empty(), b_digits.is_empty()) {
+        (true, true) => Equal,
+        (true, false) => Less,
+        (false, true) => Greater,
+        (false, false) => a_point.cmp(&b_point).then_with(|| a_digits.cmp(&b_digits)),
+    };
+    Some(match (a_below, b_below) {
+        (false, false) => magnitude,
+        (true, true) => magnitude.reverse(),
+        (true, false) => Less,
+        (false, true) => Greater,
+    })
 }
 
-/// Two dates or times in ISO 8601, compared: by their text where both have four-digit years and
-/// no sign, else not at all.
+/// A number's decimal text, with a sign, a fraction or an exponent where it has them, as what
+/// orders it: whether it is below zero, the power of ten that writes it as `0.` and its
+/// significant digits (4 for `1250`, -1 for `0.05`), and those digits, from the first that is not
+/// zero to the last. `None` for text that writes no number.
+fn number(text: &str) -> Option<(bool, i64, String)> {
+    let (minus, body) = match text.strip_prefix('-') {
+        Some(body) => (true, body),
+        None => (false, text.strip_prefix('+').unwrap_or(text)),
+    };
+    let (mantissa, exponent) = match body.split_once(['e', 'E']) {
+        Some((mantissa, exponent)) => (mantissa, exponent.parse::<i64>().ok()?),
+        None => (body, 0),
+    };
+    let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    if (whole.is_empty() && fraction.is_empty()) || !whole.bytes().chain(fraction.bytes()).all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let digits = format!("{whole}{fraction}");
+    let significant = digits.trim_start_matches('0');
+    let point = (whole.len() as i64 - (digits.len() - significant.len()) as i64).checked_add(exponent)?;
+    let significant = significant.trim_end_matches('0');
+    Some((minus && !significant.is_empty(), point, significant.to_string()))
+}
+
+/// Two times of day compared as the times they write ([`clock`]): their `HH:MM:SS`, whose fixed
+/// width orders as the time does, a leap second's `60` before `24:00:00`, then their fractions.
+/// Where they keep an offset, only two in the same offset compare: the format does not say how
+/// times with different offsets order.
+fn time_order(t: &TimeType, a: &str, b: &str) -> Option<std::cmp::Ordering> {
+    let (a, b) = (clock(a).filter(|c| c.seconds.is_some())?, clock(b).filter(|c| c.seconds.is_some())?);
+    let same_zone = if t.offset { matches!((offset(a.rest), offset(b.rest)), (Some((Some(x), "")), Some((Some(y), ""))) if x == y) } else { a.rest.is_empty() && b.rest.is_empty() };
+    same_zone.then(|| (a.fields, a.fraction).cmp(&(b.fields, b.fraction)))
+}
+
+/// Two dates or times in ISO 8601 compared by their text where both have four-digit years and no
+/// sign, else not at all: the order for a bound in a form the check does not read (`13:00`).
 fn text_order(a: &str, b: &str) -> Option<std::cmp::Ordering> {
     let plain = |s: &str| !s.starts_with(['+', '-']);
     (plain(a) && plain(b)).then(|| a.cmp(b))
+}
+
+/// Whether a moment or a time of day, its whole seconds and the digits of its fraction, falls on a
+/// tick. Only a tick that divides a second is read, which steps from every whole second whatever
+/// its origin, and the format names none; nor one no decimal fraction writes exactly (`1/300`,
+/// whose values a source prints rounded), nor a sum too large to count.
+fn on_tick(tick: &str, seconds: i64, fraction: &str) -> bool {
+    exact(seconds, fraction, fraction.len()).is_none_or(|n| ticks(tick, n, fraction.len(), true))
+}
+
+/// Seconds and the digits of a fraction as a count of 10^-`digits` seconds, where it fits.
+fn exact(seconds: i64, fraction: &str, digits: usize) -> Option<i128> {
+    let scale = 10i128.checked_pow(u32::try_from(digits).ok()?)?;
+    let fraction = if fraction.is_empty() { 0 } else { fraction.parse::<i128>().ok()?.checked_mul(10i128.checked_pow(u32::try_from(digits.checked_sub(fraction.len())?).ok()?)?)? };
+    i128::from(seconds).checked_mul(scale)?.checked_add(fraction)
+}
+
+/// Whether `count` 10^-`digits` seconds is a whole number of ticks: (count · q) a multiple of
+/// (p · 10^digits) for a tick of p/q. `from_a_second` reads only a tick that divides a second, as
+/// an origin of a whole second needs. A tick no decimal fraction writes exactly (`1/300`, whose
+/// values a source prints rounded) is not read, nor a count too large to multiply.
+fn ticks(tick: &str, count: i128, digits: usize, from_a_second: bool) -> bool {
+    let (p, q) = tick.split_once('/').unwrap_or((tick, "1"));
+    let (Ok(p), Ok(q)) = (p.parse::<i128>(), q.parse::<i128>()) else { return true };
+    let mut rest = q;
+    while rest > 0 && rest % 2 == 0 {
+        rest /= 2;
+    }
+    while rest > 0 && rest % 5 == 0 {
+        rest /= 5;
+    }
+    if p <= 0 || rest != 1 || (from_a_second && q % p != 0) || digits > 18 {
+        return true;
+    }
+    let step = p.checked_mul(10i128.pow(digits as u32));
+    count.checked_mul(q).zip(step).is_none_or(|(total, step)| total.rem_euclid(step) == 0)
+}
+
+/// Whether an enum's moments or times of day lie a whole number of ticks apart, as values of one
+/// type do wherever its steps start; a value the check does not read is left out.
+fn tick_spaced(kind: &Kind, values: &[&str]) -> bool {
+    let tick = match kind {
+        Kind::Time(t) => &t.tick,
+        Kind::DateTime(DateTimeType { tick, .. }) | Kind::Instant(InstantType { tick, .. }) | Kind::ZonedDateTime(ZonedDateTimeType { tick, .. }) => tick,
+        _ => return true,
+    };
+    fn point<'a>(kind: &Kind, text: &'a str) -> Option<(i64, &'a str)> {
+        match kind {
+            // A time with an offset steps on its clock, which the offset sits beside.
+            Kind::Time(_) => clock(text).and_then(|c| Some((c.seconds?, c.fraction))),
+            _ => moment(kind, text).and_then(|(at, fraction, _)| Some((at?, fraction))),
+        }
+    }
+    // A fraction past what `ticks` reads is left out before any value is compared with it.
+    let points: Vec<(i64, &str)> = values.iter().filter_map(|v| point(kind, v)).filter(|(_, fraction)| fraction.len() <= 18).collect();
+    let Some(&(first, first_fraction)) = points.first() else { return true };
+    points.iter().all(|&(seconds, fraction)| {
+        let digits = fraction.len().max(first_fraction.len());
+        match (exact(seconds, fraction, digits), exact(first, first_fraction, digits)) {
+            (Some(a), Some(b)) => a.checked_sub(b).is_none_or(|apart| ticks(tick, apart, digits, false)),
+            _ => true,
+        }
+    })
+}
+
+/// The float a number's canonical text writes at a float type's widths, rounded to the nearest, ties
+/// to even, as what tells it from the others (`65504` and `65519` are one binary16), or why there
+/// is none: past the largest finite value. A float wider than a double is told apart by its text.
+fn float_value(text: &str, f: &FloatType) -> Result<String, &'static str> {
+    if f.exponent_bits > 11 || f.mantissa_bits > 52 {
+        return Ok(text.to_string());
+    }
+    let Ok(value) = text.parse::<f64>() else { return Ok(text.to_string()) };
+    let mantissa = f.mantissa_bits as i32;
+    let highest = (1i32 << (f.exponent_bits - 1)) - 1;
+    // The power of two of its leading bit, no lower than the least a normal value has.
+    let leading = ((value.abs().to_bits() >> 52) & 0x7ff) as i32 - 1023;
+    let step = two_to(leading.max(1 - highest) - mantissa);
+    let scaled = value / step;
+    let mut whole = scaled.round_ties_even();
+    // Read as a double, a text just past a midpoint of the narrower float can land on it: the text
+    // against the midpoint's exact digits says which way it rounds.
+    if scaled.fract().abs() == 0.5 {
+        match number_order(text.trim_start_matches('-'), &format!("{:.1100}", value.abs())) {
+            Some(std::cmp::Ordering::Greater) => whole = scaled.trunc() + scaled.signum(),
+            Some(std::cmp::Ordering::Less) => whole = scaled.trunc(),
+            _ => {}
+        }
+    }
+    let rounded = whole * step;
+    let largest = (2.0 - two_to(-mantissa)) * two_to(highest);
+    if !rounded.is_finite() || rounded.abs() > largest {
+        return Err("past its type's finite range");
+    }
+    // -0 equals 0.
+    Ok(format!("{:e}", if rounded == 0.0 { 0.0 } else { rounded }))
+}
+
+/// 2^n as a double, for n from -1074 to 1023, exactly.
+fn two_to(n: i32) -> f64 {
+    if n >= -1022 { f64::from_bits(((n + 1023) as u64) << 52) } else { f64::from_bits(1u64 << (n + 1074)) }
+}
+
+/// Two of a date-bearing kind's values compared as the moments they write ([`moment`]).
+fn moment_order(kind: &Kind, a: &str, b: &str) -> Option<std::cmp::Ordering> {
+    let ((Some(a), a_fraction, _), (Some(b), b_fraction, _)) = (moment(kind, a)?, moment(kind, b)?) else { return None };
+    Some((a, a_fraction).cmp(&(b, b_fraction)))
+}
+
+/// A date-bearing kind's value in ISO 8601's extended form, as the format's examples write the kind
+/// (`-4713-11-24`, `2026-11-14T18:14:00.5`, `2026-11-14T18:14:00Z`,
+/// `2026-11-14T10:14:00-08:00[America/Los_Angeles]`), as what orders it: its seconds from
+/// 1970-01-01T00:00:00 in the proleptic Gregorian calendar, in UTC where it writes an offset, or
+/// `None` where a field is out of its range (`2026-13-01`); the digits of its fraction of a second
+/// without a trailing zero, which order as the fraction does; and the zone a zoned date and time
+/// names. `None` for text in no such form.
+fn moment<'a>(kind: &Kind, text: &'a str) -> Option<(Option<i64>, &'a str, &'a str)> {
+    let (days, rest) = date(text)?;
+    let midnight = days.map(|days| days * 86_400);
+    let (seconds, fraction, rest) = match (kind, rest.strip_prefix('T')) {
+        (Kind::Date(_), None) => return rest.is_empty().then_some((midnight, "", "")),
+        (Kind::DateTime(_) | Kind::Instant(_) | Kind::ZonedDateTime(_), Some(time)) => clock(time).map(|c| (c.seconds, c.fraction, c.rest))?,
+        _ => return None,
+    };
+    let at = midnight.zip(seconds).map(|(midnight, seconds)| midnight + seconds);
+    match kind {
+        Kind::DateTime(_) if rest.is_empty() => Some((at, fraction, "")),
+        Kind::Instant(_) if offset(rest) == Some((Some(0), "")) => Some((at, fraction, "")),
+        Kind::ZonedDateTime(_) => {
+            let (east, zone) = offset(rest)?;
+            suffix(zone)?;
+            Some((at.zip(east).map(|(at, east)| at - east), fraction, zone))
+        }
+        _ => None,
+    }
+}
+
+/// RFC 9557's suffix after a zoned value's offset: its time zone first, a region or an offset in
+/// brackets, then any tags (`[u-ca=iso8601]`), each with or without the critical flag `!`. The zone,
+/// and the suffix without its flags, as what tells one value from another; `None` where no zone
+/// comes first, or the suffix is malformed.
+fn suffix(text: &str) -> Option<(&str, String)> {
+    let (mut zone, mut key, mut rest) = (None, String::new(), text);
+    while !rest.is_empty() {
+        let end = rest.find(']')?;
+        let inner = rest.strip_prefix('[')?.get(..end - 1)?;
+        let inner = inner.strip_prefix('!').unwrap_or(inner);
+        if inner.is_empty() || inner.contains(['[', '!']) {
+            return None;
+        }
+        match (zone, inner.split_once('=')) {
+            (None, None) => zone = Some(inner),
+            (Some(_), Some((key, value))) if tag_key(key) && tag_value(value) => {}
+            _ => return None,
+        }
+        key.push_str(&format!("[{inner}]"));
+        rest = &rest[end + 1..];
+    }
+    Some((zone?, key))
+}
+
+/// RFC 9557's suffix key: a lowercase letter or `_`, then those, digits and `-`.
+fn tag_key(key: &str) -> bool {
+    let mut chars = key.chars();
+    chars.next().is_some_and(|c| c.is_ascii_lowercase() || c == '_') && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+}
+
+/// RFC 9557's suffix value: one or more runs of letters and digits, joined by single `-`.
+fn tag_value(value: &str) -> bool {
+    value.split('-').all(|run| !run.is_empty() && run.bytes().all(|b| b.is_ascii_alphanumeric()))
+}
+
+/// The calendar date an ISO 8601 text starts with in its extended form, its year of four digits,
+/// or more after a sign (`-4713-11-24`, `+5874897-12-31`): its days from 1970-01-01 in the
+/// proleptic Gregorian calendar, or `None` for a month or a day no year has, and the rest of the
+/// text; `None` where the text starts with no date in that form.
+fn date(text: &str) -> Option<(Option<i64>, &str)> {
+    let sign = usize::from(text.starts_with(['+', '-']));
+    let digits = text[sign..].bytes().take_while(u8::is_ascii_digit).count();
+    if digits < 4 || (sign == 0 && digits > 4) || text.as_bytes().get(sign + digits) != Some(&b'-') {
+        return None;
+    }
+    let (year, rest) = text.split_at(sign + digits);
+    let year = i64::from(year.parse::<i32>().ok()?);
+    let (month, day) = (two_digits(rest, 1)?, two_digits(rest, 4)?);
+    if rest.as_bytes()[3] != b'-' {
+        return None;
+    }
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let last = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => 28 + i64::from(leap),
+        // A month no year has holds no day.
+        _ => 0,
+    };
+    // Days from 1970-01-01, each year counted from March, so that a leap day ends it.
+    let year = if month <= 2 { year - 1 } else { year };
+    let of_era = year.rem_euclid(400);
+    let of_year = (153 * ((month + 9) % 12) + 2) / 5 + day - 1;
+    let days = year.div_euclid(400) * 146_097 + of_era * 365 + of_era / 4 - of_era / 100 + of_year - 719_468;
+    Some(((1..=last).contains(&day).then_some(days), &rest[6..]))
+}
+
+/// The time of day an ISO 8601 text starts with in its extended form, `HH:MM:SS` and any fraction
+/// of a second, or `HH:MM`, up to `24:00:00` and with a leap second's `60`, and the rest of the
+/// text. `None` where the text starts with no time in that form.
+fn clock(text: &str) -> Option<Clock<'_>> {
+    let (hours, minutes) = (two_digits(text, 0)?, two_digits(text, 3)?);
+    if text.as_bytes()[2] != b':' {
+        return None;
+    }
+    // `HH:MM`, ISO 8601's extended form at a minute's precision, is `HH:MM:00`.
+    let Some(seconds) = two_digits(text, 6).filter(|_| text.as_bytes()[5] == b':') else {
+        let time = (hours < 24 && minutes < 60) || (hours, minutes) == (24, 0);
+        return Some(Clock { seconds: time.then_some(hours * 3_600 + minutes * 60), fields: (hours, minutes, 0), fraction: "", rest: &text[5..] });
+    };
+    let (fraction, rest) = match text[8..].strip_prefix('.') {
+        Some(after) => match after.bytes().take_while(u8::is_ascii_digit).count() {
+            0 => return None,
+            n => after.split_at(n),
+        },
+        None => ("", &text[8..]),
+    };
+    let fraction = fraction.trim_end_matches('0');
+    let time = (hours < 24 && minutes < 60 && seconds <= 60) || (hours, minutes, seconds, fraction) == (24, 0, 0, "");
+    Some(Clock { seconds: time.then_some(hours * 3_600 + minutes * 60 + seconds), fields: (hours, minutes, seconds), fraction, rest })
+}
+
+/// A time of day as [`clock`] reads it.
+struct Clock<'a> {
+    /// Seconds from midnight, or `None` for a time no day has.
+    seconds: Option<i64>,
+    /// Its hours, minutes and seconds, which order as the time does, a leap second's `60` before
+    /// `24:00:00`.
+    fields: (i64, i64, i64),
+    /// The digits of its fraction of a second without a trailing zero, which order as the fraction does.
+    fraction: &'a str,
+    rest: &'a str,
+}
+
+/// The UTC offset an ISO 8601 text starts with, `Z` or a sign and `HH`, `HH:MM` or `HH:MM:SS`:
+/// its seconds east of UTC, or `None` where a field is out of its range (`+24:00`), and the rest
+/// of the text.
+fn offset(text: &str) -> Option<(Option<i64>, &str)> {
+    if let Some(rest) = text.strip_prefix('Z') {
+        return Some((Some(0), rest));
+    }
+    let east = match text.as_bytes().first()? {
+        b'+' => 1,
+        b'-' => -1,
+        _ => return None,
+    };
+    let hours = two_digits(text, 1)?;
+    let (mut seconds, mut fields, mut rest) = (hours * 3_600, hours < 24, &text[3..]);
+    for unit in [60, 1] {
+        let Some(part) = rest.strip_prefix(':') else { break };
+        let n = two_digits(part, 0)?;
+        (seconds, fields, rest) = (seconds + n * unit, fields && n < 60, &part[2..]);
+    }
+    Some((fields.then_some(east * seconds), rest))
+}
+
+/// The number the two ASCII digits at `at` write.
+fn two_digits(text: &str, at: usize) -> Option<i64> {
+    match *text.as_bytes().get(at..at + 2)? {
+        [a, b] if a.is_ascii_digit() && b.is_ascii_digit() => Some(i64::from(a - b'0') * 10 + i64::from(b - b'0')),
+        _ => None,
+    }
 }
 
 fn check_size(size: &Size) -> Result<(), String> {
@@ -1895,13 +2478,51 @@ mod tests {
     }
 
     #[test]
+    fn an_enum_keeps_the_values_its_type_holds_once() {
+        let varchar = |max| Type::new(Kind::Text(TextType { size: Some(Size { max: Some(max), ..Size::default() }), ..TextType::default() }));
+        let values = |list: &[&str]| list.iter().map(|v| v.to_string()).collect::<Vec<_>>();
+        // A value longer than the type holds, or listed twice, is left out.
+        assert_eq!(Type::one_of(varchar(3), values(&["abcd", "ab", "ab"])), Type::one_of(varchar(3), values(&["ab"])));
+        assert_eq!(Type::one_of(Type::uuid(), values(&["01890a5d-ac96-7ed0-8f4c-c3b8d0a1b2c3", "01890A5D-AC96-7ED0-8F4C-C3B8D0A1B2C3"])), Type::one_of(Type::uuid(), values(&["01890a5d-ac96-7ed0-8f4c-c3b8d0a1b2c3"])));
+        // With none left, or both booleans, the type is its own.
+        assert_eq!(Type::one_of(varchar(3), values(&["abcd"])), varchar(3));
+        assert_eq!(Type::one_of(Type::boolean(), values(&["true", "false"])), Type::boolean());
+        for ty in [Type::one_of(varchar(3), values(&["abcd", "ab", "ab"])), Type::one_of(Type::integer(8), values(&["1", "300", "01", "1"]))] {
+            ty.check().unwrap();
+        }
+    }
+
+    #[test]
     fn rule_7_refuses_what_no_shape_rules_out() {
         let refused = |value: Value| serde_json::from_value::<Type>(value.clone()).unwrap().check().err().unwrap_or_else(|| panic!("{value} passed"));
+        let passes = |value: Value| serde_json::from_value::<Type>(value).unwrap().check().unwrap();
         refused(json!({"kind": "float", "exponent_bits": 11, "mantissa_bits": 52, "min": "0", "exclusive_min": "0"}));
         refused(json!({"kind": "integer", "bits": 32, "exclusive_min": "0"}));
         refused(json!({"kind": "map", "key": {"type": {"kind": "text"}}, "value": {"type": {"kind": "text"}}, "size": {"min": 4, "max": 2}}));
         refused(json!({"kind": "map", "key": {"type": {"kind": "text"}}, "value": {"type": {"kind": "text"}}, "size": {"unit": "byte", "max": 2}}));
         refused(json!({"kind": "integer", "bits": 32, "min": "5", "max": "1"}));
+        // Bounds compare as the values they write: whole numbers past 2^53 and decimals of any
+        // length digit by digit, moments in UTC, whatever offset a bound is written in, and times of
+        // day as the times they write.
+        refused(json!({"kind": "integer", "bits": 64, "min": "9223372036854775807", "max": "9223372036854775806"}));
+        refused(json!({"kind": "decimal", "min": "0.10000000000000000001", "max": "0.1"}));
+        refused(json!({"kind": "date", "min": "+10000-01-01", "max": "-4713-11-24"}));
+        refused(json!({"kind": "instant", "tick": "1/1000000", "min": "2026-01-01T00:00:00.5Z", "max": "2026-01-01T00:00:00Z"}));
+        refused(json!({"kind": "zoned_datetime", "tick": "1", "min": "2026-01-01T20:00:00-08:00[America/Los_Angeles]", "max": "2026-01-02T10:00:00+09:00[Asia/Tokyo]"}));
+        passes(json!({"kind": "decimal", "exclusive_min": "-1e131072", "max": "0.1"}));
+        passes(json!({"kind": "instant", "tick": "1/1000000", "min": "2026-01-01T00:00:00Z", "max": "2026-01-01T00:00:00.5Z"}));
+        passes(json!({"kind": "zoned_datetime", "tick": "1", "min": "2026-01-01T10:00:00+09:00[Asia/Tokyo]", "max": "2026-01-01T05:00:00-08:00[America/Los_Angeles]"}));
+        passes(json!({"kind": "time", "tick": "1/1000000", "min": "12:00:00.500000", "max": "12:00:00.5"}));
+        refused(json!({"kind": "time", "tick": "1", "min": "24:00:00", "max": "23:59:60"}));
+        // A bound in a form the check does not read orders by its text, as before.
+        refused(json!({"kind": "time", "tick": "60", "min": "13:00", "max": "12:00"}));
+        // A number's bounds are numbers, and an exponent past an i64 still orders.
+        refused(json!({"kind": "float", "exponent_bits": 11, "mantissa_bits": 52, "min": "inf", "max": "0"}));
+        refused(json!({"kind": "integer", "bits": 32, "min": "Infinity", "max": "0"}));
+        refused(json!({"kind": "decimal", "min": "1e99999999999999999999", "max": "0"}));
+        refused(json!({"kind": "decimal", "min": "2e99999999999999999998", "max": "1e99999999999999999999"}));
+        refused(json!({"kind": "decimal", "min": "1e99999999999999999999", "max": "2e99999999999999999998"}));
+        refused(json!({"kind": "time", "tick": "1", "offset": true, "min": "13:00:00+00:00", "max": "12:00:00+00:00"}));
         refused(json!({"kind": "uuid", "versions": [9]}));
         refused(json!({"kind": "uuid", "versions": []}));
         refused(json!({"kind": "uuid", "versions": [7, 4]}));
@@ -1934,6 +2555,130 @@ mod tests {
         refused(json!({"kind": "enum", "type": {"kind": "text"}, "values": [{"value": "a", "name": "A"}, {"value": "a", "name": "Alias"}]}));
         refused(json!({"kind": "enum", "type": {"kind": "boolean"}, "values": [{"value": "true"}, {"value": "false"}]}));
         refused(json!({"kind": "enum", "type": {"kind": "boolean"}, "values": [{"value": "yes"}]}));
+        // Its type keeps its own rules before a value is read.
+        refused(json!({"kind": "enum", "type": {"kind": "uuid", "versions": [250]}, "values": [{"value": "01890a5d-ac96-7ed0-8f4c-c3b8d0a1b2c3"}]}));
+        // Each value is one of its type's, in its canonical text, and no two are one value.
+        for (ty, value) in [
+            (json!({"kind": "integer", "bits": 32}), "x"),
+            (json!({"kind": "integer", "bits": 32}), "01"),
+            (json!({"kind": "integer", "bits": 32}), "1.0"),
+            (json!({"kind": "integer", "bits": 8}), "128"),
+            (json!({"kind": "integer", "bits": 8, "unsigned": true}), "-1"),
+            (json!({"kind": "integer", "bits": 32, "min": "0"}), "-5"),
+            (json!({"kind": "decimal"}), "1.50"),
+            (json!({"kind": "decimal"}), "1e2"),
+            (json!({"kind": "decimal", "precision": 4, "min_scale": 2, "max_scale": 2}), "123"),
+            (json!({"kind": "decimal", "max_scale": 2}), "1.234"),
+            (json!({"kind": "float", "exponent_bits": 11, "mantissa_bits": 52, "nan": true}), "NaN"),
+            (json!({"kind": "text", "size": {"max": 1}}), "abc"),
+            (json!({"kind": "text", "code_points": [[1, 1114111]]}), "a\u{0}"),
+            (json!({"kind": "text", "encoding": "US-ASCII"}), "é"),
+            (json!({"kind": "text", "encoding": "UTF-8", "size": {"unit": "byte", "max": 1}}), "é"),
+            (json!({"kind": "bytes"}), "AB=="),
+            (json!({"kind": "bytes"}), "QQ"),
+            (json!({"kind": "bytes", "size": {"exact": 2}}), "QQ=="),
+            (json!({"kind": "uuid"}), "zzz"),
+            (json!({"kind": "uuid", "versions": [7]}), "01890a5d-ac96-4ed0-8f4c-c3b8d0a1b2c3"),
+            (json!({"kind": "date"}), "2026-13-01"),
+            (json!({"kind": "date"}), "2026-02-29"),
+            (json!({"kind": "date"}), "0000-01-01"),
+            (json!({"kind": "datetime", "tick": "1"}), "2026-01-01T25:00:00"),
+            (json!({"kind": "zoned_datetime", "tick": "1"}), "2026-01-01T00:00:00+24:00[+24:00]"),
+            (json!({"kind": "time", "tick": "1"}), "12:60:00"),
+            (json!({"kind": "time", "tick": "1"}), "24:00:00"),
+            (json!({"kind": "time", "tick": "1", "offset": true}), "10:00:00+09:60"),
+            // A date or a time is written in ISO 8601's extended form, as the format writes its kind.
+            (json!({"kind": "date"}), "not-a-date"),
+            (json!({"kind": "date"}), "20260101"),
+            (json!({"kind": "datetime", "tick": "1"}), "2026-01-01 00:00:00"),
+            (json!({"kind": "instant", "tick": "1"}), "2026-01-01T09:00:00+09:00"),
+            (json!({"kind": "zoned_datetime", "tick": "1"}), "2026-01-01T00:00:00Z"),
+            (json!({"kind": "time", "tick": "1", "offset": true}), "10:00:00"),
+            (json!({"kind": "time", "tick": "1"}), "10:00:00+09:00"),
+            // A time with an offset keeps a bound in the same offset.
+            (json!({"kind": "time", "tick": "1", "offset": true, "min": "12:00:00+00:00"}), "10:00:00+00:00"),
+            // An offset-only zone is no region.
+            (json!({"kind": "zoned_datetime", "tick": "1", "offset_only": true}), "2026-01-01T10:00:00+09:00[Asia/Tokyo]"),
+            // A value falls on its type's tick.
+            (json!({"kind": "instant", "tick": "1"}), "2026-01-01T00:00:00.5Z"),
+            (json!({"kind": "time", "tick": "1/1000"}), "10:00:00.0005"),
+            // A zoned value names its zone first, in brackets.
+            (json!({"kind": "zoned_datetime", "tick": "1"}), "2026-01-01T10:00:00+07:00[u-ca=iso8601]"),
+            (json!({"kind": "zoned_datetime", "tick": "1"}), "2026-01-01T10:00:00+09:00[Asia/Tokyo][u-ca"),
+            (json!({"kind": "zoned_datetime", "tick": "1", "offset_only": true}), "2026-01-01T10:00:00+09:00[+09:00][=]"),
+            (json!({"kind": "zoned_datetime", "tick": "1"}), "2026-01-01T10:00:00+09:00[Asia/Tokyo][U-CA=iso8601]"),
+            (json!({"kind": "zoned_datetime", "tick": "1"}), "2026-01-01T10:00:00.5+09:00[Asia/Tokyo]"),
+            // A float's value is inside its finite range.
+            (json!({"kind": "float", "exponent_bits": 5, "mantissa_bits": 10}), "65536"),
+            (json!({"kind": "float", "exponent_bits": 5, "mantissa_bits": 10}), "65520"),
+        ] {
+            refused(json!({"kind": "enum", "type": ty, "values": [{"value": value}]}));
+        }
+        refused(json!({"kind": "enum", "type": {"kind": "integer", "bits": 32}, "values": [{"value": "0"}, {"value": "-0"}]}));
+        refused(json!({"kind": "enum", "type": {"kind": "float", "exponent_bits": 5, "mantissa_bits": 10}, "values": [{"value": "65504"}, {"value": "65519"}]}));
+        // A text just past a midpoint rounds away from it, though the double nearest it is the midpoint.
+        refused(json!({"kind": "enum", "type": {"kind": "float", "exponent_bits": 5, "mantissa_bits": 10}, "values": [{"value": "1.0009765625"}, {"value": "1.0004882812500001"}]}));
+        // And the midpoint itself rounds to even.
+        refused(json!({"kind": "enum", "type": {"kind": "float", "exponent_bits": 5, "mantissa_bits": 10}, "values": [{"value": "1"}, {"value": "1.00048828125"}]}));
+        refused(json!({"kind": "enum", "type": {"kind": "time", "tick": "60"}, "values": [{"value": "12:00"}, {"value": "12:00:00"}]}));
+        refused(json!({"kind": "enum", "type": {"kind": "zoned_datetime", "tick": "1"}, "values": [{"value": "2026-01-01T10:00:00+09:00[Asia/Tokyo]"}, {"value": "2026-01-01T10:00:00+09:00[!Asia/Tokyo]"}]}));
+        // Values of one type lie a whole number of ticks apart, wherever its steps start.
+        for (ty, values) in [
+            (json!({"kind": "instant", "tick": "60"}), vec!["2026-01-01T00:00:00Z", "2026-01-01T00:00:00.5Z"]),
+            (json!({"kind": "time", "tick": "60"}), vec!["00:00:00", "00:00:00.5"]),
+            (json!({"kind": "time", "tick": "60", "offset": true}), vec!["00:00:00+00:00", "00:00:00.5+00:00"]),
+            (json!({"kind": "instant", "tick": "2"}), vec!["2026-01-01T00:00:01Z", "2026-01-01T00:00:02Z"]),
+            (json!({"kind": "time", "tick": "60"}), vec!["00:00:00.0000000000000000001", "00:00:01", "00:00:02"]),
+        ] {
+            refused(json!({"kind": "enum", "type": ty, "values": values.iter().map(|v| json!({"value": v})).collect::<Vec<_>>()}));
+        }
+        refused(json!({"kind": "enum", "type": {"kind": "uuid"}, "values": [{"value": "01890a5d-ac96-7ed0-8f4c-c3b8d0a1b2c3"}, {"value": "01890A5D-AC96-7ED0-8F4C-C3B8D0A1B2C3"}]}));
+        refused(json!({"kind": "enum", "type": {"kind": "instant", "tick": "1/1000"}, "values": [{"value": "2026-01-01T00:00:00.5Z"}, {"value": "2026-01-01T00:00:00.500Z"}]}));
+        for (ty, values) in [
+            (json!({"kind": "integer", "bits": 8}), json!(["-128", "127"])),
+            (json!({"kind": "integer", "bits": 64, "unsigned": true}), json!(["18446744073709551615"])),
+            (json!({"kind": "integer", "bits": 128}), json!(["-170141183460469231731687303715884105728"])),
+            (json!({"kind": "integer", "bits": 8, "unsigned": true}), json!(["-0"])),
+            (json!({"kind": "decimal"}), json!(["-0", "1"])),
+            (json!({"kind": "decimal", "precision": 5, "min_scale": -2, "max_scale": -2}), json!(["1200"])),
+            (json!({"kind": "decimal", "min_scale": 0, "max_scale": 16383, "exclusive_min": "-1e131072", "exclusive_max": "1e131072"}), json!(["-0.25", "0"])),
+            (json!({"kind": "float", "exponent_bits": 11, "mantissa_bits": 52}), json!(["0.1", "-0"])),
+            (json!({"kind": "text", "encoding": "windows-1252", "size": {"exact": 4}}), json!(["café"])),
+            (json!({"kind": "bytes", "size": {"max": 2}}), json!(["", "QQ==", "QUI="])),
+            (json!({"kind": "uuid", "versions": [7]}), json!(["01890A5D-AC96-7ED0-8F4C-C3B8D0A1B2C3"])),
+            (json!({"kind": "date", "min": "-4713-11-24", "max": "+5874897-12-31"}), json!(["-4713-11-24", "2024-02-29", "+5874897-12-31"])),
+            (json!({"kind": "date", "min": "0000-01-01"}), json!(["0000-01-01"])),
+            (json!({"kind": "instant", "tick": "1/1000000"}), json!(["2026-01-01T00:00:00.5Z"])),
+            (json!({"kind": "zoned_datetime", "tick": "1"}), json!(["2026-01-01T10:00:00+09:00[Asia/Tokyo]", "2026-01-01T10:00:00+09:00[+09:00]"])),
+            (json!({"kind": "time", "tick": "1/1000000", "max": "24:00:00"}), json!(["24:00:00", "23:59:60", "00:00:00.5"])),
+            (json!({"kind": "time", "tick": "1"}), json!(["23:59:60"])),
+            (json!({"kind": "time", "tick": "1", "offset": true}), json!(["10:00:00+09:00", "23:59:60+09:00", "24:00:00+09:00"])),
+            (json!({"kind": "time", "tick": "1/1000000", "max": "12:00:00.5"}), json!(["12:00:00.500000"])),
+            (json!({"kind": "time", "tick": "1", "offset": true, "min": "12:00:00+00:00"}), json!(["10:00:00+09:00", "12:00:00+00:00"])),
+            (json!({"kind": "zoned_datetime", "tick": "1", "offset_only": true}), json!(["2026-01-01T10:00:00+09:00[+09:00]"])),
+            (json!({"kind": "datetime", "tick": "60"}), json!(["2026-01-01T10:01:00", "0001-01-01T00:00:00"])),
+            (json!({"kind": "instant", "tick": "1/1000"}), json!(["2026-01-01T00:00:00.125Z"])),
+            // A tick no decimal fraction writes is not read: a source prints its values rounded.
+            (json!({"kind": "datetime", "tick": "1/300"}), json!(["2026-01-01T00:00:00.003"])),
+            (json!({"kind": "float", "exponent_bits": 5, "mantissa_bits": 10}), json!(["65504", "0.1"])),
+            (json!({"kind": "float", "exponent_bits": 5, "mantissa_bits": 10}), json!(["65519"])),
+            (json!({"kind": "float", "exponent_bits": 5, "mantissa_bits": 10}), json!(["1", "1.0004882812500001"])),
+            // A time at a minute's precision is ISO 8601's extended form too.
+            (json!({"kind": "time", "tick": "60"}), json!(["12:00", "12:01"])),
+            (json!({"kind": "instant", "tick": "60"}), json!(["2026-01-01T10:00Z"])),
+            // A tick past a second says nothing of its origin.
+            (json!({"kind": "instant", "tick": "2"}), json!(["2026-01-01T00:00:01Z", "2026-01-01T00:00:03Z"])),
+            // RFC 9557's critical flag and tags after the zone.
+            (json!({"kind": "zoned_datetime", "tick": "1", "offset_only": true}), json!(["2026-01-01T10:00:00+08:00[!+08:00]", "2026-01-01T10:00:00+07:00[+07:00][u-ca=iso8601]"])),
+            (json!({"kind": "zoned_datetime", "tick": "1"}), json!(["2026-01-01T10:00:00+09:00[!Asia/Tokyo][!u-ca=iso8601]"])),
+            // A time with an offset steps on its clock, and a fraction too long to read is left out.
+            (json!({"kind": "time", "tick": "3600", "offset": true}), json!(["10:00:00+05:30", "11:00:00+05:45"])),
+            (json!({"kind": "time", "tick": "60"}), json!(["00:00:01", "00:00:00.0000000000000000001", "00:01:01"])),
+            (json!({"kind": "float", "exponent_bits": 11, "mantissa_bits": 52}), json!(["179769313486231570000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"])),
+        ] {
+            let values: Vec<Value> = values.as_array().unwrap().iter().map(|v| json!({"value": v})).collect();
+            passes(json!({"kind": "enum", "type": ty, "values": values}));
+        }
         // Unions and intersections: two members at least, null never one, and no intersection one struct writes.
         refused(json!({"kind": "union", "members": [{"kind": "text"}]}));
         refused(json!({"kind": "union", "members": [{"kind": "text"}, {"kind": "null"}]}));
@@ -1950,7 +2695,6 @@ mod tests {
             table.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
             table
         };
-        let passes = |value: Value| serde_json::from_value::<Type>(value).unwrap().check().unwrap();
         refused(table(json!({"unique": [["missing"]]})));
         refused(table(json!({"unique": [[]]})));
         refused(table(json!({"cardinality": "at_most_one", "unique": [["id"]]})));

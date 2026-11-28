@@ -499,9 +499,17 @@ fn references(v: &Value, out: &mut Vec<Vec<Option<String>>>) -> bool {
 /// Any other target is a column whose name is not read. A set operation shows its leftmost arm's
 /// columns, and a VALUES list `column1`, `column2` and so on.
 fn shown_by(select: &SelectStmt, withs: &Withs, columns: &Columns) -> Shown {
-    let withs = withs.with(select.with_clause.as_ref(), columns);
+    // A query with no WITH of its own sees the scope around it, which is not copied.
+    let own;
+    let withs = match select.with_clause.as_ref() {
+        Some(clause) => {
+            own = withs.with(Some(clause), columns);
+            &own
+        }
+        None => withs,
+    };
     if let Some(left) = select.larg.as_deref() {
-        return shown_by(left, &withs, columns);
+        return shown_by(left, withs, columns);
     }
     if let Some(row) = select.values_lists.first() {
         let width = match row.node.as_ref() {
@@ -510,7 +518,7 @@ fn shown_by(select: &SelectStmt, withs: &Withs, columns: &Columns) -> Shown {
         };
         return Shown { names: (1..=width).map(|i| Some(format!("column{i}"))).collect(), exact: true };
     }
-    let level = Level::of(&select.from_clause, &withs, columns);
+    let level = Level::of(&select.from_clause, withs, columns);
     let mut shown = Shown { names: Vec::new(), exact: true };
     for target in &select.target_list {
         let Some(NodeEnum::ResTarget(rt)) = target.node.as_ref() else { return Shown::unknown() };
