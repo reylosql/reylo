@@ -9035,15 +9035,18 @@ create trigger kids_note after insert on kids begin update parents set name = na
     }
 
     /// What Supabase grants its own `dashboard_user` on its extensions as it makes a project is its
-    /// own: init writes none of it, while a grant the project made on them to another role is the
-    /// project's, and written. On a server of no platform, a grant to a role of that name is the
-    /// project's too.
+    /// own: init writes none of it, while a grant the project made on them to another role, or to that
+    /// role on an extension of its own, is the project's, and written. On a server of no platform, a
+    /// grant to a role of that name is the project's too.
     pub async fn supabases_grants_on_its_extensions_are_supabases(mut p: P) {
         as_supabase_makes_it(&p, true).await;
         p.exec("grant execute on function extensions.gen_random_bytes(integer) to authenticated; create table tokens (id int primary key)").await;
+        // An extension the project made, whose grant to the dashboard's role is the project's.
+        p.exec("create schema app; create extension hstore with schema app; revoke execute on function app.hstore(text, text) from public; grant execute on function app.hstore(text, text) to dashboard_user").await;
         assert_eq!(p.run(async |o, log| reylo_migrate::init(o, &[], log).await).await, 0, "{}", p.peek());
         let init = std::fs::read_to_string(p.dir.join("migrations/init.sql")).unwrap();
-        assert!(!init.contains("dashboard_user"), "{init}");
+        assert!(!has(&init, r"(?i)extensions\.\S+ to dashboard_user"), "{init}");
+        assert_has!(init.clone(), r"(?i)grant execute on routine app\.hstore\([^)]*\) to dashboard_user");
         assert_has!(init, r"(?i)grant execute on (function|routine) extensions\.gen_random_bytes\(integer\) to authenticated");
         p.strict = true;
         assert_eq!(p.status().await, 0, "{}", p.peek());

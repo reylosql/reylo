@@ -545,7 +545,7 @@ pub const PLATFORM_EXTENSIONS: &[&str] = &["pg_stat_statements", "pgcrypto", "uu
 pub const PLATFORM_API_ROLES: &[&str] = &["anon", "authenticated", "service_role"];
 
 /// The role Supabase's dashboard reads the database as, which it grants every privilege on what its
-/// extensions made as it makes a project: the platform's, which no project grants.
+/// extensions made as it makes a project.
 pub const PLATFORM_DASHBOARD_ROLE: &str = "dashboard_user";
 
 /// The role whose default privileges in `public` grant the API's roles what it makes.
@@ -702,11 +702,12 @@ pub(crate) fn not_extension(catalog: &str, alias: &str) -> String {
 /// granted or revoked on it since. Each row: the extension (`ext`), `pg_identify_object`'s `type`
 /// and `identity`, and its privileges as `json_build_array(have, made with)`, each a list of
 /// `{grantee, privilege, grantable}` without its owner's. The platform's own are left out, and so is
-/// what [`PLATFORM_DASHBOARD_ROLE`] holds on a platform's database: Supabase grants it everything in
-/// `extensions` as it makes a project, which no database made since has, and no shadow may grant,
-/// since an extension `postgres` makes there is Supabase's administrator's.
+/// what [`PLATFORM_DASHBOARD_ROLE`] holds on what a platform's extension made ([`platform_extension`]):
+/// Supabase grants it everything in them as it makes a project, which no database made since has,
+/// and no shadow may grant, since there those extensions are Supabase's administrator's. Its grant
+/// on an extension the project made is the project's.
 pub(crate) fn extension_member_privileges() -> String {
-    let platforms = format!("({} and pg_get_userbyid(a.grantee) = '{PLATFORM_DASHBOARD_ROLE}')", platform_names());
+    let platforms = format!("({} and pg_get_userbyid(a.grantee) = '{PLATFORM_DASHBOARD_ROLE}')", platform_extension("x", "xn"));
     let explode = |of: &str| {
         format!(
             "(select json_agg(json_build_object('grantee', case when a.grantee = 0 then 'public' else quote_ident(pg_get_userbyid(a.grantee)) end, 'privilege', a.privilege_type, 'grantable', a.is_grantable) order by a.grantee, a.privilege_type)
@@ -727,6 +728,7 @@ pub(crate) fn extension_member_privileges() -> String {
         ) m
         join pg_depend d on d.classid = m.cls and d.objid = m.oid and d.objsubid = 0 and d.deptype = 'e' and d.refclassid = 'pg_extension'::regclass
         join pg_extension x on x.oid = d.refobjid
+        join pg_namespace xn on xn.oid = x.extnamespace
         left join pg_init_privs i on i.classoid = m.cls and i.objoid = m.oid and i.objsubid = 0
         , lateral pg_identify_object(m.cls, m.oid, 0) o
         where m.acl is distinct from i.initprivs and {}
