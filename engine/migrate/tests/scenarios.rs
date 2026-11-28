@@ -2620,6 +2620,25 @@ async fn a_mysql_cut_off_run_the_lock_doesnt_list_is_kept() {
     assert_eq!(p.rows("select name from __reylo_migrations where applied_at is null").await.len(), 1);
 }
 
+/// A cut-off run's file renamed to a draft that reads as a migration the lock lists and this database
+/// ran: neither is taken for it, so history push keeps its row.
+#[tokio::test(flavor = "current_thread")]
+async fn a_mysql_cut_off_run_reading_as_a_migration_already_run_is_kept() {
+    let Some(mut p) = P::new(Dialect::Mysql).await else { return };
+    p.strict = true;
+    p.file("20261027100000_t.sql", "create table t (id bigint primary key);");
+    p.file("20261027100001_wipe.sql", "truncate table t;");
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    assert_eq!(p.run(async |o, log| reylo_migrate::lock_from_history(o, log).await).await, 0, "{}", p.peek());
+    p.file("20261027120000_reset.sql", "truncate table t;");
+    p.exec("insert into __reylo_migrations (name, `sql`, applied_at) values ('20261027110000_empty.sql', 'truncate table t;', null)").await;
+    p.output();
+    assert_eq!(p.history_push().await, 1);
+    assert_has!(p.output(), r"No file reads as it did when it started");
+    assert_eq!(p.rows("select name from __reylo_migrations where applied_at is null").await.len(), 1);
+    assert_eq!(p.migrate().await, 1);
+}
+
 /// A cut-off run's file renamed into two that read the same: neither is taken for it, and history
 /// push keeps its row until its text is back under its name.
 #[tokio::test(flavor = "current_thread")]

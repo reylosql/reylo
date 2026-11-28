@@ -6619,11 +6619,14 @@ async fn history_push_on(db: &mut Db, server: &mut Server, opts: &Options, init:
     // no migration this command records reads as isn't taken out, which would let the next deploy
     // run it again. That is a file edited, deleted or renamed into several, or one the lock doesn't
     // list yet.
+    // The file is found among every migration file, so that one an earlier migration reads the same
+    // as is no match, and must be one the lock lists.
+    let listed = |f: &Migration| order.iter().any(|o| o.name == f.name);
     if d == Dialect::Mysql {
-        if let Some(r) = before_rows.iter().find(|r| !r.applied && started_file(r, &order, d).is_none()) {
+        if let Some(r) = before_rows.iter().find(|r| !r.applied && !started_file(r, &files, d).is_some_and(listed)) {
             let problem = match started_file(r, &files, d) {
                 Some(f) => Problem::new("cut-off-unlocked", format!("The lock doesn't list {}, which a deploy cut off here started", f.name)).note("History push records only what the lock lists, so it keeps the run's row until the lock lists that file."),
-                None => cut_off_problem(r, &order, &shown(&opts.dir), false, d),
+                None => cut_off_problem(r, &files, &shown(&opts.dir), false, d),
             };
             return Ok(refuse(&[problem], log));
         }
@@ -6726,7 +6729,7 @@ async fn history_push_on(db: &mut Db, server: &mut Server, opts: &Options, init:
     // One the history says ran, as written, stays recorded, and so does one a cut-off run started,
     // under its name or renamed since: where its change is in place, or the schema can't say, a
     // deploy refused to run it again, and this command is how it is recorded as run.
-    let ran = |m: &Migration| before_rows.iter().any(|r| if r.applied { r.name == m.name && same_statements(&r.sql, &m.sql, d) } else { started_file(r, &order, d).is_some_and(|f| f.name == m.name) });
+    let ran = |m: &Migration| before_rows.iter().any(|r| if r.applied { r.name == m.name && same_statements(&r.sql, &m.sql, d) } else { started_file(r, &files, d).is_some_and(|f| f.name == m.name) });
     let matched = matches.last().copied().map(|mut n| {
         while n > 0 && !data_statements(&order[n - 1].sql, d).is_empty() && matches.contains(&(n - 1)) && !ran(&order[n - 1]) {
             n -= 1;
