@@ -3200,7 +3200,9 @@ impl Analyzer<'_> {
             // integer, or a field's or a date's text.
             "vector_slice" if i > 0 => integer(),
             "vector32_sparse" | "vector_concat" | "vector_slice" | "vector_distance_dot" | "vector_distance_jaccard" | "fts_match" | "fts_score" | "fts_highlight" => text(),
-            "uuid7" | "uuid7_str" => integer(),
+            // A UUID's seconds; Turso reads no argument after them.
+            "uuid7" | "uuid7_str" if i == 0 => integer(),
+            "uuid7" | "uuid7_str" => Ctx::None,
             "time_date" | "time_unix" | "time_milli" | "time_micro" | "time_nano" => integer(),
             "time_parse" => text(),
             "time_get" if i == 1 => text(),
@@ -5173,6 +5175,12 @@ mod tests {
             for sql in ["select fts_highlight('<b>', '</b>', 'kiwi') as h", "select time_date(2024, 1) as d", "select time_now(1) as t", "select fts_match('kiwi') as m"] {
                 assert!(!analyze_ddl(sql, &turso_schema(), &extras).analysis.diagnostics.is_empty(), "{sql}");
             }
+            // Any number of text columns.
+            let columns = vec!["''"; 99].join(", ");
+            a(&format!("select fts_match({columns}, 'kiwi') as m, fts_highlight({columns}, '[', ']', 'kiwi') as h"));
+            // A UUID's seconds come first, and Turso reads nothing after them.
+            let ignored = a("select uuid7_str(1700000000, :ignored) as u");
+            assert_eq!(param(&ignored, "ignored"), "unknown");
             // A NULL query or marker makes the highlight NULL; a NULL text column is skipped.
             let nullable = a("select fts_highlight(body, title, '</b>', 'kiwi') as a from docs");
             assert_eq!(col(&nullable, "a"), ("text".into(), true));

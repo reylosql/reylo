@@ -946,12 +946,11 @@ static const struct TursoFunction { const char *zName; int nArg; char cKind; int
 
 /* Turso's own engine (@tursodatabase/database, 0.8.4), its in-tree extensions, at the argument
 ** counts each takes, which Turso checks only as a statement runs: -1 for any count (its UUID
-** functions ignore what they don't read), and a count below -1 a minimum, -2 for two or more, up
-** to TURSO_COLUMNS more for the text columns a full-text call reads. Registered only where the
+** functions ignore what they don't read), and a count below -1 a minimum, -2 for two or more, as a
+** full-text call reads any number of text columns. Registered only where the
 ** host lists Turso's engine among the app's (its `uuid4_str`, which engine/native's SQLite program
 ** lists from the project's package.json), since no other SQLite runs them, and `uuid7(seconds)`
 ** would otherwise pass for sqlean's `uuid7()`. */
-#define TURSO_COLUMNS 64 /* more than any full-text index holds */
 static const struct TursoFunction aTursoEngine[] = {
   {"uuid4_str", -1, 's', I}, {"uuid7", -1, 's', I}, {"uuid7_str", -1, 's', I},
   {"fts_match", -2, 's', DI}, {"fts_score", -1, 's', DI}, {"fts_highlight", -4, 's', DI},
@@ -1103,14 +1102,17 @@ static void openLibsql(sqlite3_str *errors, int turso){
     else rc = sqlite3_create_function_v2(gDb, f->zName, f->nArg, f->flags, 0, hostFunctionStub, 0, 0, 0);
     if( rc!=SQLITE_OK ) functionError(errors, f->zName);
   }
-  /* This build has none of Turso's own, which are all scalar; one with a minimum count is
-  ** registered at each count from it to TURSO_COLUMNS more. */
+  /* This build has none of Turso's own, which are all scalar. One with a minimum count takes any
+  ** count, and each count below the minimum is registered and deleted: SQLite resolves a call to
+  ** the definition of its exact count before one of any count, and reports a deleted one as the
+  ** wrong number of arguments. */
   for(i=0; turso && i<(int)(sizeof(aTursoEngine)/sizeof(aTursoEngine[0])); i++){
     const struct TursoFunction *f = &aTursoEngine[i];
-    int n = f->nArg < -1 ? -f->nArg : f->nArg;
-    int last = f->nArg < -1 ? n + TURSO_COLUMNS : n;
-    for(; n<=last; n++){
-      if( sqlite3_create_function_v2(gDb, f->zName, n, f->flags, 0, hostFunctionStub, 0, 0, 0)!=SQLITE_OK ){ functionError(errors, f->zName); break; }
+    int n;
+    if( sqlite3_create_function_v2(gDb, f->zName, f->nArg < -1 ? -1 : f->nArg, f->flags, 0, hostFunctionStub, 0, 0, 0)!=SQLITE_OK ){ functionError(errors, f->zName); continue; }
+    for(n=0; n<-f->nArg && f->nArg<-1; n++){
+      if( sqlite3_create_function_v2(gDb, f->zName, n, f->flags, 0, hostFunctionStub, 0, 0, 0)!=SQLITE_OK
+       || sqlite3_create_function_v2(gDb, f->zName, n, f->flags, 0, 0, 0, 0, 0)!=SQLITE_OK ){ functionError(errors, f->zName); break; }
     }
   }
   if( sqlite3_create_module(gDb, "vector_top_k", &vectorTopKModule, 0)!=SQLITE_OK ) functionError(errors, "vector_top_k");
