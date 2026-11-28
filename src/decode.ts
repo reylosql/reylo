@@ -26,10 +26,10 @@
 // those oids are arrays, cached in a WeakMap keyed by the app's object. A row value the module knows
 // the fields of has the kind of its column whatever its oid: `record` is one oid for every shape of
 // row, and a built-in catalog table's row type is below 10000 too.
-import { civilFromDays, coerce, coercePostgres, columnKind, DecodeError, describe, elementKind, holdsRareKind, instantOfDate, isLevel, isRareKind, isRowKind, ParameterError, postgresInterval, postgresTypesFor, postgresYear, scalarKind, textDecoder, utf8, wholeArrayKind, withFraction, withinDimensions, type Columns, type Decoder, type JsonNumbers, type Kind } from "./values.ts";
+import { civilFromDays, coerce, coercePostgres, columnKind, DecodeError, describe, elementKind, holdsRareKind, instantOfDate, isLevel, isRareKind, isRowKind, numbersInJson, ParameterError, postgresInterval, postgresTypesFor, postgresYear, scalarKind, textDecoder, utf8, wholeArrayKind, withFraction, withinDimensions, type Columns, type Decoder, type JsonNumbers, type Kind } from "./values.ts";
 import { bareName, holdsWholeArrays, type EngineType } from "./engine-type.ts";
 import { lastOfEach, namesInResult, rowOf, type RowBuilder } from "./row.ts";
-import { arrayLiteral, asByteaHex, EFFECT_SQL, isJsonValue, isTime, jsonElements, takesFloat, jsonText, jsonValue, postgresText, vectorParameter, wrappers, type AnyClient as Client, type Bound, type EffectSql, type Marks, type QueryModule, type Runtime } from "./execute.ts";
+import { arrayLiteral, asByteaHex, EFFECT_SQL, isJsonValue, isTime, jsonElements, takesFloat, jsonText, postgresText, vectorParameter, wrappers, type AnyClient as Client, type Bound, type EffectSql, type Marks, type QueryModule, type Runtime } from "./execute.ts";
 import { readPostgresError } from "./query-error.ts";
 
 type AnyClient = Record<string, any>;
@@ -1054,14 +1054,14 @@ async function runPostgres(c: Client, query: QueryModule<"postgres">, { text, va
     // as it is either way. A query without inputs gets its values as they are, as on every driver.
     const bun = typeof c.commitDistributed === "function";
     // Each handle Bun.sql gives out, a transaction's, a savepoint's and a reserved connection's too, carries its client's options.
-    // Where the JSON text is another than JSON.stringify writes (a NaN, an infinity or -0 in it), the
-    // value its toJSON() returns is that text read back, each number and string as JSON.rawJSON of
-    // its own text, which Bun has and writes as it is, so an integer past 2^53 keeps its digits.
+    // Bun.sql serializes a value for a JSON parameter itself, so a prepared one gets the JSON text
+    // Reylo writes read back, each number and string as JSON.rawJSON of its own text, which Bun has
+    // and writes as it is: a NaN, an infinity or -0 as its database reads it, a BigInt as its
+    // digits, and each value's toJSON() run once, by Reylo's writer.
     const raw = (JSON as { rawJSON?: (text: string) => unknown }).rawJSON;
     const bunJson = (v: unknown, i: number) => {
       const written = jsonText(v, "postgres", names[i]!);
       if (c.options?.prepare === false || written === undefined) return written;
-      if (written === JSON.stringify(jsonValue(v))) return { toJSON: () => jsonValue(v) };
       const value: unknown = JSON.parse(written, (_key, x: unknown, context?: { source?: string }) => (raw === undefined ? x : (typeof x === "number" || typeof x === "string") && context?.source !== undefined ? raw(context.source) : typeof x === "number" ? raw(Object.is(x, -0) ? "-0" : String(x)) : x));
       return { toJSON: () => value };
     };
@@ -1076,8 +1076,7 @@ async function runPostgres(c: Client, query: QueryModule<"postgres">, { text, va
 /** A Postgres column's text as its kind, with the non-finite numbers inside its JSON as numbers and an array held to its dimensions, as `.run()` gives them (`postgresRows`). */
 function postgresDecoder(name: string, kind: Kind, delim: string | undefined, nonFinite: JsonNumbers | undefined, nestedArrays: boolean | undefined): (v: string) => unknown {
   const decode = textDecoder(kind, delim);
-  const inJson = nonFinite === undefined ? undefined : postgresTypesFor("json").numbersInJson;
-  const numbers = nonFinite === undefined ? decode : (v: string) => inJson!(decode(v), nonFinite, name);
+  const numbers = nonFinite === undefined ? decode : (v: string) => numbersInJson(decode(v), nonFinite, name);
   return kind.endsWith("[]") && !nestedArrays ? (v) => withinDimensions(numbers(v), kind, name) : numbers;
 }
 
@@ -1098,7 +1097,6 @@ async function beforePostgres(c: Client, query: QueryModule<"postgres">): Promis
   // returns from has committed, where its module passes none (one an earlier reylo wrote).
   const rare = query.columns?.find(([, kind]) => holdsRareKind(kind));
   if (rare) postgresTypesFor(rare[1], query.source);
-  if (query.nonFinite?.some((at) => at !== null)) postgresTypesFor("json", query.source);
   let name = moneyParams.get(query);
   if (name === undefined) moneyParams.set(query, (name = Object.entries(query.inputs ?? {}).find(([, input]) => holdsMoney(input.type))?.[0] ?? null));
   if (name !== null) await postgresTypesFor("money", query.source).checkMoney(c, query, name);
@@ -1141,21 +1139,10 @@ function postgresValue(type: EngineType, v: unknown, name: string): unknown {
   return kind === "interval" ? postgresInterval(v) : v;
 }
 
-/**
- * The rows as `.run()` returns them: Postgres writes a non-finite float or decimal inside JSON as
- * text, whichever driver reads it, so each is given as the number it is; and an array column holds
- * the dimensions its type declares and no more (src/values.ts, `withinDimensions`), unless the
- * project lets it nest.
- */
+/** The rows as `.run()` returns them: an array column holds the dimensions its type declares and no more (src/values.ts, `withinDimensions`), unless the project lets it nest. */
 function postgresRows(query: QueryModule<"postgres">, rows: unknown[]): unknown[] {
-  const nonFinite = query.nonFinite?.some((at) => at !== null) && query.columns !== undefined ? postgresTypesFor("json").rowMasks(query.columns, query.nonFinite) : [];
   const arrays = query.nestedArrays ? [] : (query.columns ?? []).filter(([, kind]) => kind.endsWith("[]"));
-  if (!nonFinite.length && !arrays.length) return rows;
-  const numbers = nonFinite.length ? postgresTypesFor("json").numbersInJson : undefined;
-  for (const row of rows as Record<string, unknown>[]) {
-    for (const [name, at] of nonFinite) row[name] = numbers!(row[name], at, name);
-    for (const [name, kind] of arrays) withinDimensions(row[name], kind, name);
-  }
+  for (const row of arrays.length ? (rows as Record<string, unknown>[]) : []) for (const [name, kind] of arrays) withinDimensions(row[name], kind, name);
   return rows;
 }
 

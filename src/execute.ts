@@ -10,7 +10,7 @@
 // the databases its queries are written for.
 
 import type { QueryError } from "./query-error.ts";
-import { columnKind, describe, given, isLevel, ParameterError, vectorText, writeJson, zoned, type Columns, type JsonNumbers, type Kind } from "./values.ts";
+import { columnKind, describe, given, isLevel, numbersInJson, ParameterError, rowMasks, vectorText, writeJson, zoned, type Columns, type JsonNumbers, type Kind } from "./values.ts";
 import { holdsWholeArrays, schemaOf, type EngineType } from "./engine-type.ts";
 import { withSqlcommenter } from "./sqlcommenter.ts";
 import type { JsonSchema } from "./engine-type.ts";
@@ -202,7 +202,7 @@ export type QueryModule<D extends Dialect = Dialect> = {
   readonly inputs?: Inputs | undefined;
   /** Each output column's name and kind (src/values.ts), in order: what the run time gives each value (every build step puts it in the module). */
   readonly columns?: Columns | undefined;
-  /** Where each Postgres JSON column, by position beside `columns`, holds a float or a decimal that may be NaN or an infinity, which the run time gives as that number, or a Postgres array it holds to one level (src/values.ts, `numbersInJson`); `null` for a column that holds neither. */
+  /** Where each JSON column, by position beside `columns`, holds a 64-bit integer, whose number past 2^53 - 1 the run time refuses, or on Postgres a float or a decimal that may be NaN or an infinity, which the run time gives as that number, or a Postgres array it holds to one level (src/values.ts, `numbersInJson`); `null` for a column that holds none. */
   readonly nonFinite?: readonly (JsonNumbers | null)[] | undefined;
   /** Each row as an object of the columns' names, one shape for every row (src/row.ts): every build step puts it in the module, beside `columns`. */
   readonly row?: RowBuilder | undefined;
@@ -341,8 +341,26 @@ export function execute<D extends Dialect>(
   if (lent) return lent;
   if (runtime.answersAtOnce?.(c)) return withCodecs(query, syncRows(c, query, params));
   const rows = executeAsync(c, query, params);
+  const plans = jsonPlans(query);
   const after = runtime.after;
-  return withCodecs(query, after ? rows.then((r) => after(query, r)) : rows);
+  if (!plans.length && !after) return withCodecs(query, rows);
+  return withCodecs(query, rows.then((r) => (after ? after(query, inJson(r, plans)) : inJson(r, plans))));
+}
+
+/**
+ * Each JSON column's plan of what the run time reads inside its document, by name: inside JSON a
+ * statement builds, Postgres writes a non-finite float or decimal as text, and JSON.parse rounds an
+ * integer past 2^53 - 1, whichever driver reads it.
+ */
+function jsonPlans(query: QueryModule): (readonly [name: string, at: JsonNumbers])[] {
+  return query.nonFinite !== undefined && query.columns !== undefined ? rowMasks(query.columns, query.nonFinite) : [];
+}
+
+/** The rows with what each JSON column's plan reads inside its document read there. */
+function inJson(rows: unknown[], plans: readonly (readonly [name: string, at: JsonNumbers])[]): unknown[] {
+  if (!plans.length) return rows;
+  for (const row of rows as Record<string, unknown>[]) for (const [name, at] of plans) row[name] = numbersInJson(row[name], at, name);
+  return rows;
 }
 
 /** The rows with the codecs of the module's columns applied where they stand (src/codecs.ts): one pass, where a column holds one. */
@@ -435,7 +453,10 @@ export function refuseSync(why: string): TypeError {
 /** The rows of a client that answers at once (`Runtime`, `answersAtOnce`). */
 function syncRows<D extends Dialect>(c: AnyClient, query: QueryModule<D>, params: ParamsInput): unknown[] | Promise<unknown[]> {
   checkParams(query, params);
-  return query.runtime.runSync!(c, query, statement(query, params));
+  const rows = query.runtime.runSync!(c, query, statement(query, params));
+  const plans = jsonPlans(query);
+  if (!plans.length) return rows;
+  return Array.isArray(rows) ? inJson(rows, plans) : rows.then((r) => inJson(r, plans));
 }
 
 // A SQLite-backed Durable Object's `ctx.storage.sql`: exec() and databaseSize, and no prepare().

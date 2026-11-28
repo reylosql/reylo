@@ -177,11 +177,6 @@ export function trimmedStatement(sql: string): string {
   return trimmed.endsWith("/*") && trimmed.length < sql.length ? sql.slice(0, trimmed.length + 1) : trimmed;
 }
 
-/** Where each Postgres JSON column holds a float or a decimal that may be NaN or an infinity, or an array held to one level, by position beside `columns` (`moduleDefinition`). */
-function moduleNonFinite(m: ModuleInput): (ReturnType<typeof jsonNumbers> | null)[] {
-  return m.dialect === "postgres" ? (m.allowNestedArrays ? analysisWithNestedArrays(m.analysis) : m.analysis).columns.map((c) => jsonNumbers(c.type) ?? null) : [];
-}
-
 /**
  * What a statement's module imports besides its dialect's define function: whether it needs
  * reylo's `checks` and its `codecRuntime`, and each library a codec builds its values with, by the
@@ -204,12 +199,12 @@ export function moduleImports(m: ModuleInput): { checked: boolean; coded: boolea
   const coded = Object.keys(moduleCodecs(m)).length > 0 || Object.values(moduleInputs(m)).some((i) => i.codec !== undefined);
   // Postgres's rarer types (src/postgres-types.ts) are imported only where the statement reads or binds
   // one: a row value, a range, a geometric type, an hstore or a money, anywhere in a column's or a
-  // parameter's value, or a non-finite number inside its JSON. A structured parameter is written by
+  // parameter's value. A structured parameter is written by
   // `checks` (src/rows.ts), but a `money` anywhere in it is checked against the session's locale
   // first (src/decode.ts, `beforePostgres`). An array of whole arrays is written as each one's
   // literal (`postgresValue`).
   const kind = (t: EngineType) => columnKind(t, "postgres");
-  const typed = m.dialect === "postgres" && (moduleNonFinite(m).some((at) => at !== null) || analysis.columns.some((c) => holdsRareKind(kind(c.type))) || analysis.params.some((p) => (p.members === undefined ? holdsRareKind(kind(p.type)) || holdsWholeArrays(p.type) : /\bmoney\b/.test(kind(p.type)))));
+  const typed = m.dialect === "postgres" && (analysis.columns.some((c) => holdsRareKind(kind(c.type))) || analysis.params.some((p) => (p.members === undefined ? holdsRareKind(kind(p.type)) || holdsWholeArrays(p.type) : /\bmoney\b/.test(kind(p.type)))));
   return { checked, coded, typed, imports };
 }
 
@@ -231,11 +226,12 @@ export function moduleDefinition(m: ModuleInput, names: { raw: string; sql: stri
     const beside = c.delimiter ?? c.described;
     return beside === undefined ? [c.name, kind] : [c.name, kind, beside];
   });
-  // Where each Postgres JSON column holds a float or a decimal that may be NaN or an infinity,
-  // which the run time gives as that number, or a Postgres array it holds to one level (src/render.ts,
-  // `jsonNumbers`), by position beside `columns`: two columns may share a name, each with its own
-  // type. Under `allow_nested_arrays: true` a Postgres array nests there too, held to no depth.
-  const nonFinite = moduleNonFinite(m);
+  // Where each JSON column holds a 64-bit integer, whose number past 2^53 - 1 the run time
+  // refuses, and on Postgres a float or a decimal that may be NaN or an infinity, which the run time
+  // gives as that number, or a Postgres array it holds to one level (src/render.ts, `jsonNumbers`),
+  // by position beside `columns`: two columns may share a name, each with its own type. Under
+  // `allow_nested_arrays: true` a Postgres array nests there too, held to no depth.
+  const nonFinite = dialect === "clickhouse" ? [] : (dialect === "postgres" && m.allowNestedArrays ? analysisWithNestedArrays(analysis) : analysis).columns.map((c) => jsonNumbers(c.type, false, dialect) ?? null);
   const codecs = moduleCodecs(m);
   const libraries = moduleLibraries(m);
   const library = [...libraries].find((l) => l !== "ip-address");

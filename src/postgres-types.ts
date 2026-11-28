@@ -1,9 +1,8 @@
 // Postgres's rarer types at run time, `postgresTypes` from "reylo": the readers and writers of its
-// row values, ranges and multiranges, geometric types, hstore and money, and of the non-finite
-// numbers inside its JSON. A build step's module passes them to its define function where its
+// row values, ranges and multiranges, geometric types, hstore and money. A build step's module passes them to its define function where its
 // statement reads or binds one (src/loader.ts), which installs them (src/values.ts,
 // `installPostgresTypes`), so that an app none of whose statements holds one bundles none of this.
-import { hstoreText, numbersInJson, ParameterError, postgresLiteral, rareDecoder, rowMasks, rowsDecoder, type PostgresTypes } from "./values.ts";
+import { hstoreText, ParameterError, postgresLiteral, rareDecoder, rowsDecoder, type PostgresTypes } from "./values.ts";
 import { EFFECT_SQL, type AnyClient, type EffectSql, type QueryModule } from "./execute.ts";
 
 /** The clients whose session writes a `money` in the C locale's form, which `checkMoney` has seen. */
@@ -37,4 +36,4 @@ async function checkMoney(c: AnyClient, query: QueryModule<"postgres">, name: st
   throw new ParameterError(`Parameter "${name}" is a Postgres money, which Postgres reads in the session's lc_monetary, and this session writes 1234.50 as ${JSON.stringify(written)}, not the C locale's "$1,234.50", so it could store the parameter as another amount. Set lc_monetary = 'C' on the session, the role or the database, or cast the parameter to numeric in the statement (:${name}::numeric).`);
 }
 
-export const postgresTypes: PostgresTypes = { decoder: rareDecoder, rowsDecoder, literal: postgresLiteral, hstoreText, numbersInJson, rowMasks, checkMoney };
+export const postgresTypes: PostgresTypes = { decoder: rareDecoder, rowsDecoder, literal: postgresLiteral, hstoreText, checkMoney };

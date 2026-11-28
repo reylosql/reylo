@@ -194,7 +194,7 @@ export type QueryDefinition = {
   inputs?: Inputs;
   /** Each output column's name and kind (src/values.ts), in order: every build step puts them in the module, and the run time gives each value its kind by them. */
   columns?: Columns;
-  /** Where each Postgres JSON column, by position beside `columns`, holds a float or a decimal that may be NaN or an infinity, which Postgres writes there as text, `null` for one that holds none: a build step puts it in the module, and the run time gives each such value as the number it is. */
+  /** Where each JSON column, by position beside `columns`, holds a 64-bit integer or, on Postgres, a float or a decimal that may be NaN or an infinity, which Postgres writes there as text, `null` for one that holds none: a build step puts it in the module, and the run time refuses such an integer past 2^53 - 1 and gives each such float or decimal as the number it is. */
   nonFinite?: readonly (JsonNumbers | null)[];
   /** Each row as an object of the columns' names, one shape for every row (src/row.ts): every build step writes it beside `columns`; a query defined by hand without it builds the same object in a loop. */
   row?: RowBuilder;
@@ -208,7 +208,7 @@ export type QueryDefinition = {
   libraries?: Libraries;
   /** `js.codecs` at run time, `codecRuntime` from "reylo": a build step passes it where `codecs` or a parameter names a codec, so that an app none of whose statements holds such a value bundles none of it. A query defined with `defineQuery` has it. */
   codecRuntime?: CodecRuntime;
-  /** Postgres's rarer types at run time, `postgresTypes` from "reylo": a build step passes it where the statement reads or binds a row value, a range, a geometric type, an hstore, a money or a non-finite number inside JSON, so that an app none of whose statements does bundles none of it. A query defined with `defineQuery` has it. */
+  /** Postgres's rarer types at run time, `postgresTypes` from "reylo": a build step passes it where the statement reads or binds a row value, a range, a geometric type, an hstore or a money, so that an app none of whose statements does bundles none of it. A query defined with `defineQuery` has it. */
   postgresTypes?: PostgresTypes;
   /** Each structured parameter in a MySQL insert, with the lists of `text` the run time writes again for the keys a call carries (a Postgres or SQLite insert copies its defaults instead). */
   structured?: readonly Structured[];
