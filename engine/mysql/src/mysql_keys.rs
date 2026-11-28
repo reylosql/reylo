@@ -774,8 +774,12 @@ fn calls_unvouched(e: &Expr) -> bool {
         // The server folds a subquery of no table into the query around it (`(select pick())` is
         // `pick()`, `pick() in (select 1)` is `pick() = 1`), and then merges as if it were not there.
         Expr::Subquery(q) => lists_unvouched(q),
-        // EXISTS reads no value of its subquery's select list, only whether a row passes.
-        Expr::Exists { subquery, .. } => plain(subquery).is_some_and(|s| s.selection.iter().chain(s.having.iter()).any(calls_unvouched)),
+        // EXISTS reads no value of its subquery's select list, only whether a row passes, unless a
+        // HAVING reads the list by an alias.
+        Expr::Exists { subquery, .. } => match plain(subquery) {
+            Some(s) if s.having.is_none() => s.selection.iter().any(calls_unvouched),
+            _ => lists_unvouched(subquery),
+        },
         Expr::InSubquery { expr, subquery, .. } => calls_unvouched(expr) || lists_unvouched(subquery),
         Expr::MatchAgainst { .. } => false,
         _ => true,
@@ -804,8 +808,20 @@ fn materialized(q: &Query) -> bool {
 /// Whether a query, or a derived table or WITH query inside it, lists a value [`calls_unvouched`]
 /// makes: the server may merge each level into the one around it.
 fn lists_unvouched(q: &Query) -> bool {
-    if q.with.iter().flat_map(|w| &w.cte_tables).any(|c| lists_unvouched(&c.query)) {
-        return true;
+    if let Some(w) = &q.with {
+        // The WITH queries its body reads, and those they read in turn, as names it parses: one
+        // it never reads is never computed for its rows.
+        let mut read = tables_anywhere(&Query { with: None, ..q.clone() }, None);
+        let mut used = vec![false; w.cte_tables.len()];
+        for (at, c) in w.cte_tables.iter().enumerate().rev() {
+            if read.iter().any(|t| crate::mysql_names::may_match(t, &c.alias.name.value)) {
+                used[at] = true;
+                read.extend(tables_anywhere(&c.query, None));
+            }
+        }
+        if w.cte_tables.iter().zip(&used).any(|(c, used)| *used && lists_unvouched(&c.query)) {
+            return true;
+        }
     }
     if let SetExpr::Query(inner) = q.body.as_ref() {
         return lists_unvouched(inner);
