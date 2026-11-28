@@ -58,8 +58,6 @@ pub const OTHER_HISTORY_TABLES: &[&str] = &[
     "__EFMigrationsHistory",
     // Atlas, on Postgres in a schema of its own of the same name.
     "atlas_schema_revisions",
-    // Wrangler, on Cloudflare D1.
-    "d1_migrations",
 ];
 
 /// Every history table's name in lowercase as a SQL list: Reylo's own and other tools'.
@@ -117,13 +115,33 @@ select v.name || '_shadow' from sqlite_schema v where v.type = 'index' and v.sql
 union all select v.name || '_shadow_idx' from sqlite_schema v where v.type = 'index' and v.sql like '%libsql_vector_idx%' \
 union all select m.name from sqlite_schema m where m.name = 'libsql_vector_meta_shadow' and m.sql = 'CREATE TABLE libsql_vector_meta_shadow ( name TEXT PRIMARY KEY, metadata BLOB ) WITHOUT ROWID')";
 
+/// The text after a stored `create table` statement's name, from its first parenthesis, with no
+/// spacing: how a table SQLite keeps as written is told by its definition alone, whatever its name and
+/// however it was laid out.
+fn sqlite_definition(sql: &str) -> String {
+    format!("replace(replace(replace(replace(substr({sql}, instr({sql}, '(')), ' ', ''), char(9), ''), char(10), ''), char(13), '')")
+}
+
 /// Whether a SQLite file is one Cloudflare's runtime keeps, a D1 database's or a Durable Object's:
-/// it holds `_cf_METADATA` or `_cf_KV` as workerd defines them. Only there is `_cf_` Cloudflare's
-/// prefix, which the runtime refuses a statement of the project's to make a name with; in any other
-/// file a table named so is the project's.
-const CLOUDFLARE_FILE: &str = "exists (select 1 from sqlite_schema cf where cf.type = 'table' and (\
-cf.name = '_cf_METADATA' and cf.sql like 'CREATE TABLE _cf_METADATA (%key INTEGER PRIMARY KEY,%value BLOB%)' \
-or cf.name = '_cf_KV' and cf.sql like 'CREATE TABLE _cf_KV (%key TEXT PRIMARY KEY,%value BLOB%) WITHOUT ROWID'))";
+/// it holds `_cf_METADATA` or `_cf_KV` defined exactly as workerd defines them. Only there is `_cf_`
+/// Cloudflare's prefix, which the runtime refuses a statement of the project's to make a name with;
+/// in any other file a table named so is the project's.
+fn cloudflare_file() -> String {
+    let definition = sqlite_definition("cf.sql");
+    format!(
+        "exists (select 1 from sqlite_schema cf where cf.type = 'table' and (cf.name = '_cf_METADATA' and {definition} = '(keyINTEGERPRIMARYKEY,valueBLOB)' or cf.name = '_cf_KV' and {definition} = '(keyTEXTPRIMARYKEY,valueBLOB)WITHOUTROWID'))"
+    )
+}
+
+/// The names of the SQLite tables defined exactly as Wrangler defines its history of a D1 database's
+/// migrations, under whatever name a project gives it (`migrations_table`, `d1_migrations` by
+/// default): it is left out as another migration tool's history is.
+fn wrangler_history() -> String {
+    format!(
+        "select w.name from sqlite_schema w where w.type = 'table' and {} = '(idINTEGERPRIMARYKEYAUTOINCREMENT,nameTEXTUNIQUE,applied_atTIMESTAMPDEFAULTCURRENT_TIMESTAMPNOTNULL)'",
+        sqlite_definition("w.sql")
+    )
+}
 
 /// The tables a tool other than a migration tool makes in every SQLite database it works on, each
 /// known by a name no table of an application's takes: Litestream's, which it writes to as it
@@ -135,14 +153,16 @@ const SQLITE_TOOL_TABLES: &[&str] = &["_litestream_seq", "_litestream_lock"];
 /// platform or another tool keeps for itself: SQLite's own (`sqlite_` and anything after it, in any
 /// case, which SQLite refuses to make), Cloudflare's in a file of its runtime (`_cf_`, in any case),
 /// Turso's engine's, a libSQL vector index's, Litestream's, and a history table and what comes with
-/// it. Every catalog, diff, dump and wipe of a SQLite database reads its objects through this one
-/// condition. In a pattern `_` stands for any character, so each prefix is matched with it escaped:
-/// a table of the project's named `sqlites` is its own.
+/// it, Wrangler's among them. Every catalog, diff, dump and wipe of a SQLite database reads its
+/// objects through this one condition. In a pattern `_` stands for any character, so each prefix is
+/// matched with it escaped: a table of the project's named `sqlites` is its own.
 pub(crate) fn sqlite_project(tbl: &str) -> String {
     let tools = SQLITE_TOOL_TABLES.iter().map(|t| format!("'{t}'")).collect::<Vec<_>>().join(", ");
     format!(
-        r"name not like 'sqlite\_%' escape '\' and {tbl} not like 'sqlite\_%' escape '\' and not (({tbl} like '\_cf\_%' escape '\' or name like '\_cf\_%' escape '\') and {CLOUDFLARE_FILE}) and name {NOT_TURSO_OWN} and {tbl} {NOT_TURSO_OWN} and lower({tbl}) not in ({tools}) and {} and {NOT_LIBSQL_VECTOR_OWN}",
-        not_history(tbl)
+        r"name not like 'sqlite\_%' escape '\' and {tbl} not like 'sqlite\_%' escape '\' and not (({tbl} like '\_cf\_%' escape '\' or name like '\_cf\_%' escape '\') and {}) and name {NOT_TURSO_OWN} and {tbl} {NOT_TURSO_OWN} and lower({tbl}) not in ({tools}) and {} and {tbl} not in ({}) and {NOT_LIBSQL_VECTOR_OWN}",
+        cloudflare_file(),
+        not_history(tbl),
+        wrangler_history()
     )
 }
 
@@ -166,7 +186,7 @@ const TURSO_SEQUENCE: &str = "__turso_internal_seq___turso_internal_autoincremen
 /// that name is never dropped or emptied. The counter itself is `sqlite_sequence`'s, which SQLite keeps as the engine does: the
 /// engine reads it there, and copies it into each sequence when the file moves to its MVCC journal,
 /// which refuses an insert into a table with no sequence. With `restart`, every sequence is also put
-/// back to its first value, as a wipe empties `sqlite_sequence`, but a history table's. Only for a file the engine has
+/// back to its first value, as a wipe empties `sqlite_sequence`, but one of a table not the project's. Only for a file the engine has
 /// written (`turso`): any other gets none of its tables.
 pub async fn turso_sequences(db: &mut Db, turso: bool, restart: bool) -> Result<String, Error> {
     if db.dialect() != Dialect::Sqlite || !turso {
@@ -185,6 +205,12 @@ pub async fn turso_sequences(db: &mut Db, turso: bool, restart: bool) -> Result<
     // so named that is the engine's: any other is left alone.
     let definition = |name: &str| format!("CREATE TABLE {}(value INTEGER PRIMARY KEY,is_called INTEGER,start INTEGER,inc INTEGER,min INTEGER,max INTEGER,cycle INTEGER)", quoted(name));
     let first = |name: &str| format!("insert into {} values (1, 0, 1, 1, 1, 9223372036854775807, 0);", quoted(name));
+    // A wipe restarts the sequences of the tables it empties, the project's, and no other's.
+    let emptied: BTreeSet<String> = if restart {
+        db.rows(&format!("select name from sqlite_schema where type = 'table' and {}", sqlite_project("tbl_name"))).await?.iter().map(|r| r.text("name").to_ascii_lowercase()).collect()
+    } else {
+        BTreeSet::new()
+    };
     let mut sql = String::new();
     let mut taken = BTreeSet::new();
     for r in tables.iter().filter(|r| starts(r.text("name"), TURSO_SEQUENCE)) {
@@ -196,7 +222,7 @@ pub async fn turso_sequences(db: &mut Db, turso: bool, restart: bool) -> Result<
         }
         if !owner {
             sql.push_str(&format!("drop table {};", quoted(name)));
-        } else if restart && !is_history(&name[TURSO_SEQUENCE.len()..]) {
+        } else if emptied.contains(&name[TURSO_SEQUENCE.len()..].to_ascii_lowercase()) {
             sql.push_str(&format!("delete from {};{}", quoted(name), first(name)));
         }
     }

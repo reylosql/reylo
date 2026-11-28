@@ -95,7 +95,7 @@ It leaves out the history tables of other migration tools, as it leaves out its 
 | Django | `django_migrations` |
 | Entity Framework Core | `__EFMigrationsHistory` |
 | Atlas | `atlas_schema_revisions`, in its schema of that name on Postgres |
-| Wrangler, on D1 | `d1_migrations` |
+| Wrangler, on D1 | `d1_migrations`, or the name its `migrations_table` gives it |
 
 It also leaves out Litestream's tables, and on D1 and Durable Objects, Cloudflare's own `_cf_` tables.
 

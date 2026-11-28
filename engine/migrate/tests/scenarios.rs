@@ -1346,7 +1346,7 @@ async fn init_writes_and_records_the_baseline(mut p: P) {
 /// Another migration tool's history: a table of Prisma Migrate's with a check, one of Knex's whose
 /// key is a counter (a sequence the table owns on Postgres), Liquibase's lock in its capitals, and
 /// on Postgres Drizzle Kit's, in a schema of its own, on MySQL a trigger on Prisma's, and on SQLite
-/// Wrangler's, as `wrangler d1 migrations apply` makes it on D1.
+/// Wrangler's, as `wrangler d1 migrations apply` makes it on D1, under its default name and another.
 fn other_tools_history(p: &P) -> String {
     let text = p.t.text;
     let knex_id = match p.d {
@@ -1362,7 +1362,10 @@ fn other_tools_history(p: &P) -> String {
     match p.d {
         Dialect::Postgres => sql.push_str("create schema drizzle; create table drizzle.__drizzle_migrations (id serial primary key, hash text not null); insert into drizzle.__drizzle_migrations (hash) values ('h'); select setval('knex_migrations_id_seq', 100);"),
         Dialect::Mysql => sql.push_str("create trigger prisma_named before insert on _prisma_migrations for each row set new.migration_name = trim(new.migration_name);"),
-        Dialect::Sqlite => sql.push_str("CREATE TABLE d1_migrations(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL); insert into d1_migrations (name) values ('0001_users.sql');"),
+        Dialect::Sqlite => sql.push_str(
+            "CREATE TABLE IF NOT EXISTS \"d1_migrations\"(\n\t\tid         INTEGER PRIMARY KEY AUTOINCREMENT,\n\t\tname       TEXT UNIQUE,\n\t\tapplied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL\n); insert into d1_migrations (name) values ('0001_users.sql');
+             CREATE TABLE IF NOT EXISTS \"wrangler_history\"(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL);",
+        ),
     }
     sql
 }
@@ -1381,7 +1384,7 @@ async fn the_dump_leaves_out_another_tools_history() {
     p.exec(&format!("create table users (id bigint primary key, email text not null);{}", other_tools_history(&p))).await;
     let text = introspect(&p.opts()).await;
     assert!(text.contains("CREATE TABLE public.users"), "{text}");
-    assert!(!has(&text, "(?i)prisma|knex|drizzle|databasechangelog|d1_migrations"), "{text}");
+    assert!(!has(&text, "(?i)prisma|knex|drizzle|databasechangelog|d1_migrations|wrangler_history"), "{text}");
 }
 
 async fn leaves_out_another_tools_history(mut p: P, app: &str) {
@@ -1390,9 +1393,9 @@ async fn leaves_out_another_tools_history(mut p: P, app: &str) {
     p.output();
     let schema = std::fs::read_to_string(p.dir.join("schema.sql")).unwrap();
     assert!(has(&schema, "(?i)create table .*users"), "{schema}");
-    assert!(!has(&schema, "(?i)prisma|knex|drizzle|databasechangelog|d1_migrations"), "{schema}");
+    assert!(!has(&schema, "(?i)prisma|knex|drizzle|databasechangelog|d1_migrations|wrangler_history"), "{schema}");
     assert_eq!(std::fs::read_to_string(p.dir.join("migrations/init.sql")).unwrap(), schema);
-    assert!(!has(&introspect(&p.opts()).await, "(?i)prisma|knex|drizzle|databasechangelog|d1_migrations"));
+    assert!(!has(&introspect(&p.opts()).await, "(?i)prisma|knex|drizzle|databasechangelog|d1_migrations|wrangler_history"));
     assert_eq!(p.dry_run().await, 0, "{}", p.peek());
     // Another database that still holds the old tool's history matches init.sql, and keeps it.
     let q = P::new(p.d).await.unwrap();
@@ -9960,16 +9963,20 @@ async fn init_leaves_out_cloudflares_own_tables() {
 }
 
 /// Outside a file of Cloudflare's runtime, which alone refuses `_cf_` names, a table named so is the
-/// project's. Litestream's tables, which it makes in every database it replicates, are not.
+/// project's, as is one named as Cloudflare's or Wrangler's own but defined otherwise. Litestream's
+/// tables, which it makes in every database it replicates, are not.
 #[tokio::test(flavor = "current_thread")]
 async fn a_cf_table_outside_cloudflare_is_the_projects() {
     let Some(mut p) = P::new(Dialect::Sqlite).await else { return };
     p.exec("create table _cf_parent (id integer primary key); create table child (id integer primary key, parent integer references _cf_parent (id));
+        create table _cf_METADATA (key INTEGER PRIMARY KEY, value BLOB, tenant integer not null); create table d1_migrations (id integer primary key, region text);
         CREATE TABLE IF NOT EXISTS _litestream_seq (id INTEGER PRIMARY KEY, seq INTEGER); CREATE TABLE IF NOT EXISTS _litestream_lock (id INTEGER); insert into _litestream_seq values (1, 1);").await;
     assert_eq!(p.run(async |o, log| reylo_migrate::init(o, &[], log).await).await, 0, "{}", p.peek());
     p.output();
     let schema = std::fs::read_to_string(p.dir.join("schema.sql")).unwrap();
-    assert!(has(&schema, r"(?i)create table _cf_parent\b") && has(&schema, r"(?i)create table child\b"), "{schema}");
+    for table in ["_cf_parent", "child", "_cf_METADATA", "d1_migrations"] {
+        assert!(has(&schema, &format!(r"(?i)create table {table}\b")), "{table}: {schema}");
+    }
     assert!(!has(&schema, "(?i)litestream"), "{schema}");
     assert_eq!(p.dry_run().await, 0, "{}", p.peek());
     assert_eq!(p.run(async |o, log| reylo_migrate::db_wipe(o, false, log).await).await, 0, "{}", p.peek());
