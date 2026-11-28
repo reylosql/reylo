@@ -103,7 +103,7 @@ insert into users (name) values (:name)
 On a Durable Object:
 
 - Each object is a database of its own: before its tables exist, a query fails with the database's own error.
-- The storage rounds an integer past 2^53, so Reylo throws rather than return one, even from a `BIGINT` column. It can't bind a `bigint` parameter past 2^53 either. Reylo rejects one unless it's written to a `BIGINT` column.
+- The storage rounds an integer past 2^53, so Reylo throws rather than return one, even from a `BIGINT` column. A whole number from 2^53 to 2^63 in a column with no type throws too, since it may be such an integer. It can't bind a `bigint` parameter past 2^53 either. Reylo rejects one unless it's written to a `BIGINT` column.
 
 <Callout title="Blocked functions">
 

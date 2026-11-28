@@ -1433,15 +1433,18 @@ fn json_admits(ty: &Type, json: &Value) -> bool {
 }
 
 /// Whether a text is a value of a date, time, timestamp or UUID kind as Postgres writes one inside
-/// a document (`JsonEncodeDateTime`, in XSD's style): a year of four digits or more, ` BC` after one
-/// before the year 1, the fraction of a second where it is not zero, a UTC offset in hours and
-/// minutes and its seconds where they are not zero, an infinity where the type holds one, and a
-/// UUID in lowercase.
+/// a document: a date or a timestamp in XSD's style (`JsonEncodeDateTime`), with a year of four
+/// digits or more, ` BC` after one before the year 1, the fraction of a second where it is not
+/// zero, a UTC offset in hours and minutes and its seconds where they are not zero (its hours in
+/// three digits from 100, as far as the 169 a POSIX zone's summer reaches: `+168:59`), and an
+/// infinity where the type holds one; a time as its type's own text, whose offset is in hours,
+/// with its minutes and its seconds where they are not zero (`12:00:00+00`, `12:00:00-04:56:02`);
+/// and a UUID in lowercase.
 fn written_form(kind: &Kind, text: &str) -> bool {
     static FORMS: std::sync::OnceLock<[regex::Regex; 6]> = std::sync::OnceLock::new();
     let [date, time, time_offset, timestamp, timestamp_offset, uuid] = FORMS.get_or_init(|| {
-        let (date, time, offset) = (r"\d{4,}-\d{2}-\d{2}", r"\d{2}:\d{2}:\d{2}(\.\d+)?", r"[+-]\d{2}:\d{2}(:\d{2})?");
-        [format!("^{date}( BC)?$"), format!("^{time}$"), format!("^{time}{offset}$"), format!("^{date}T{time}( BC)?$"), format!("^{date}T{time}{offset}( BC)?$"), "^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$".to_string()].map(|form| regex::Regex::new(&form).expect("a form is a valid expression"))
+        let (date, time, offset, text_offset) = (r"\d{4,}-\d{2}-\d{2}", r"\d{2}:\d{2}:\d{2}(\.\d+)?", r"[+-]\d{2,3}:\d{2}(:\d{2})?", r"[+-]\d{2}(:\d{2}(:\d{2})?)?");
+        [format!("^{date}( BC)?$"), format!("^{time}$"), format!("^{time}{text_offset}$"), format!("^{date}T{time}( BC)?$"), format!("^{date}T{time}{offset}( BC)?$"), "^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$".to_string()].map(|form| regex::Regex::new(&form).expect("a form is a valid expression"))
     });
     let infinite = matches!(text, "infinity" | "-infinity");
     match kind {
@@ -1467,6 +1470,8 @@ struct SqliteTable {
     name: String,
     /// The visible columns, by name and declared type.
     columns: Vec<(String, String)>,
+    /// Whether the table is STRICT, which holds each column to its declared type.
+    strict: bool,
     /// The column that is an AUTOINCREMENT key, which never takes the largest integer: the next
     /// INSERT without a key would find the table full.
     autoincrement: Option<usize>,
@@ -1595,18 +1600,18 @@ fn value_text(v: &rusqlite::types::Value) -> String {
 /// table, whose rows are the virtual table's to write, and none of the tables libSQL keeps a vector
 /// index in, which are its own.
 fn sqlite_tables<D: SqliteDb + ?Sized>(db: &D) -> Result<Vec<SqliteTable>, String> {
-    let listed: Vec<(String, String, String)> = sqlite_rows(
+    let listed: Vec<(String, String, String, bool)> = sqlite_rows(
         db,
-        "select l.name, l.type, coalesce(s.sql, '') from pragma_table_list l left join sqlite_schema s on s.type = 'table' and s.name = l.name \
+        "select l.name, l.type, coalesce(s.sql, ''), l.strict from pragma_table_list l left join sqlite_schema s on s.type = 'table' and s.name = l.name \
          where l.schema = 'main' and l.type in ('table', 'virtual') and l.name not like 'sqlite_%' order by s.rowid",
     )?
     .iter()
-    .map(|r| (value_text(&r[0]), value_text(&r[1]), value_text(&r[2])))
+    .map(|r| (value_text(&r[0]), value_text(&r[1]), value_text(&r[2]), r[3] == rusqlite::types::Value::Integer(1)))
     .collect();
     // libSQL's list of its vector indexes, each kept in a table named after it; none on SQLite.
     let vector_tables: HashSet<String> = sqlite_rows(db, "select name || '_shadow' from libsql_vector_meta_shadow").unwrap_or_default().iter().map(|r| value_text(&r[0]).to_ascii_lowercase()).chain(["libsql_vector_meta_shadow".to_string()]).collect();
     let mut out = Vec::new();
-    for (name, kind, sql) in listed.into_iter().filter(|(name, _, _)| !vector_tables.contains(&name.to_ascii_lowercase())) {
+    for (name, kind, sql, strict) in listed.into_iter().filter(|(name, _, _, _)| !vector_tables.contains(&name.to_ascii_lowercase())) {
         let columns: Vec<(String, String, bool, i64)> = sqlite_rows(db, &format!("select name, type, hidden, pk from pragma_table_xinfo('{}')", name.replace('\'', "''")))?
             .iter()
             .map(|r| (value_text(&r[0]), value_text(&r[1]), r[2] != rusqlite::types::Value::Integer(0), if let rusqlite::types::Value::Integer(pk) = r[3] { pk } else { 0 }))
@@ -1621,7 +1626,7 @@ fn sqlite_tables<D: SqliteDb + ?Sized>(db: &D) -> Result<Vec<SqliteTable>, Strin
             Some(content) => Rows::Rebuilt(content),
             None => Rows::Inserted,
         };
-        out.push(SqliteTable { name, columns: columns.into_iter().map(|(n, t, _)| (n, t)).collect(), autoincrement, rows });
+        out.push(SqliteTable { name, columns: columns.into_iter().map(|(n, t, _)| (n, t)).collect(), strict, autoincrement, rows });
     }
     Ok(out)
 }
@@ -1690,7 +1695,7 @@ pub fn check_sqlite<D: SqliteDb + ?Sized>(db: &D, statements: &[(String, String,
                     .map(|(i, p)| {
                         let declared = sqlite_declared(&p["type"]);
                         let declared = declared.as_str();
-                        let mut values = sqlite_pool(declared, Scenario::Edges, false);
+                        let mut values = sqlite_pool(declared, Scenario::Edges, false, true);
                         if declared == "text" {
                             values.extend(vector_texts.iter().cloned());
                         }
@@ -1733,6 +1738,20 @@ pub fn check_sqlite<D: SqliteDb + ?Sized>(db: &D, statements: &[(String, String,
                                 // is a BigInt to the run time, which only an INTEGER is.
                                 Some(value) if col["type"]["kind"] == "integer" && col["type"]["label"] == "BIGINT" && !matches!(value, rusqlite::types::Value::Null | rusqlite::types::Value::Integer(_)) => {
                                     found.push(format!("{file}: column {name} typed int8 holds {value:?} with ({shown})"));
+                                }
+                                // A column typed real is read as a REAL: an INTEGER there past 2^53
+                                // comes back rounded from a driver that reads numbers, with no
+                                // error, and Rust's f64 refuses one.
+                                Some(rusqlite::types::Value::Integer(i)) if col["type"]["kind"] == "float" => {
+                                    found.push(format!("{file}: column {name} typed real holds the INTEGER {i} with ({shown})"));
+                                }
+                                // And a column typed integer as an INTEGER, but for what SQLite's
+                                // integer arithmetic answers past 64 bits, a REAL of at least
+                                // 2^63, which the type leaves out as Postgres's overflow error is.
+                                // An INTEGER column outside a STRICT table, which keeps a REAL, is
+                                // typed as what it holds.
+                                Some(rusqlite::types::Value::Real(f)) if col["type"]["kind"] == "integer" && f.abs() < 9.223372036854775808e18 => {
+                                    found.push(format!("{file}: column {name} typed integer holds the REAL {f} with ({shown})"));
                                 }
                                 // JSON a constructor built is text that parses as that JSON,
                                 // each value of the type the engine gave it.
@@ -1981,7 +2000,9 @@ fn run_sqlite_statement<D: SqliteDb + ?Sized>(db: &D, sql: &str, values: &[rusql
 
 /// The edge values of a declared SQLite type in a state, NULL first, by the affinity SQLite gives
 /// the name. The largest integer is in the edge state alone, and never in an AUTOINCREMENT key.
-fn sqlite_pool(declared: &str, scenario: Scenario, autoincrement: bool) -> Vec<rusqlite::types::Value> {
+/// Outside a STRICT table an INTEGER column, a 64-bit one too, also takes a REAL with a fraction,
+/// which it keeps as that REAL.
+fn sqlite_pool(declared: &str, scenario: Scenario, autoincrement: bool, strict: bool) -> Vec<rusqlite::types::Value> {
     use rusqlite::types::Value::{Blob, Integer, Null, Real, Text};
     let t = declared.to_ascii_lowercase();
     let text = || vec![Text("a".into()), Text("A".into()), Text(String::new()), Text("a ".into())];
@@ -2014,6 +2035,9 @@ fn sqlite_pool(declared: &str, scenario: Scenario, autoincrement: bool) -> Vec<r
     }
     if t.contains("int") {
         out.extend([Integer(1), Integer(2), Integer(0), Integer(-1)]);
+        if !strict && !autoincrement {
+            out.push(Real(0.5));
+        }
         if edges {
             out.push(Integer(if autoincrement { AUTOINCREMENT_TOP } else { i64::MAX }));
         }
@@ -2120,7 +2144,7 @@ fn seed_sqlite<D: SqliteDb + ?Sized>(db: &D, tables: &[SqliteTable], scenario: S
             continue;
         }
         let columns = &table.columns;
-        let pools: Vec<Vec<rusqlite::types::Value>> = columns.iter().enumerate().map(|(i, (_, ty))| sqlite_pool(ty, scenario, table.autoincrement == Some(i))).collect();
+        let pools: Vec<Vec<rusqlite::types::Value>> = columns.iter().enumerate().map(|(i, (_, ty))| sqlite_pool(ty, scenario, table.autoincrement == Some(i), table.strict)).collect();
         let base: Vec<rusqlite::types::Value> = pools.iter().map(|p| p.get(1).cloned().unwrap_or(rusqlite::types::Value::Null)).collect();
         let mut rows = vec![base.clone(), vec![rusqlite::types::Value::Null; columns.len()]];
         for (i, pool) in pools.iter().enumerate() {
@@ -2303,9 +2327,9 @@ mod tests {
             (json!({"kind": "date", "infinity": true, "label": "date"}), &["2026-01-01", "0044-03-15 BC", "294276-12-31", "infinity", "-infinity"], &["2026-01-01T00:00:00", "2020-01-01T00:00:00-08:00", "26-01-01", "1/1/2026"]),
             (json!({"kind": "date", "label": "date"}), &["2026-01-01"], &["infinity"]),
             (json!({"kind": "datetime", "tick": "1/1000000", "infinity": true, "label": "timestamp"}), &["2026-01-01T12:00:00", "2026-01-01T12:00:00.5", "4714-11-24T00:00:00 BC", "-infinity"], &["2026-01-01 12:00:00", "2026-01-01T12:00:00+00:00", "2026-01-01"]),
-            (json!({"kind": "instant", "tick": "1/1000000", "infinity": true, "label": "timestamptz"}), &["2025-12-31T22:30:00-08:00", "2026-01-01T12:00:00.123456+05:30", "1799-12-31T19:03:58-04:56:02", "0044-03-15T12:00:00-07:52:58 BC", "infinity"], &["2026-01-01T12:00:00", "2026-01-01T12:00:00Z", "2026-01-01"]),
+            (json!({"kind": "instant", "tick": "1/1000000", "infinity": true, "label": "timestamptz"}), &["2025-12-31T22:30:00-08:00", "2026-01-01T12:00:00.123456+05:30", "1799-12-31T19:03:58-04:56:02", "0044-03-15T12:00:00-07:52:58 BC", "2026-07-08T12:59:00+168:59", "infinity"], &["2026-01-01T12:00:00", "2026-01-01T12:00:00Z", "2026-01-01T12:00:00+00", "2026-01-01T12:00:00+1000:00", "2026-01-01"]),
             (json!({"kind": "time", "tick": "1/1000000", "label": "time"}), &["12:00:00", "24:00:00", "12:00:00.25"], &["12:00:00+05:30", "12:00", "1 day"]),
-            (json!({"kind": "time", "tick": "1/1000000", "offset": true, "label": "timetz"}), &["12:00:00.25+05:30", "12:00:00-08:00"], &["12:00:00"]),
+            (json!({"kind": "time", "tick": "1/1000000", "offset": true, "label": "timetz"}), &["12:00:00+00", "12:00:00-08", "12:00:00.25+05:30", "12:00:00+05:30:15", "12:00:00-04:56:02"], &["12:00:00"]),
             (json!({"kind": "uuid", "label": "uuid"}), &["3f2b5c1e-8d4a-4b6f-9c2d-1e0f5a6b7c8d"], &["3F2B5C1E-8D4A-4B6F-9C2D-1E0F5A6B7C8D", "{3f2b5c1e-8d4a-4b6f-9c2d-1e0f5a6b7c8d}", "a"]),
         ];
         for (t, good, bad) in cases {
@@ -2329,19 +2353,23 @@ mod tests {
             assert!(!plain.iter().any(|v| EXTREMES.iter().any(|x| v.starts_with(x))), "{base}: {plain:?}");
             assert!(plain.len() > 1, "{base}: the plain state keeps a value");
         }
-        assert!(sqlite_pool("INTEGER", Scenario::Edges, false).contains(&Integer(i64::MAX)));
-        assert!(!sqlite_pool("INTEGER", Scenario::Plain, false).contains(&Integer(i64::MAX)));
-        assert!(sqlite_pool("REAL", Scenario::Edges, false).contains(&Real(1e308)));
-        assert!(!sqlite_pool("REAL", Scenario::Plain, false).contains(&Real(1e308)));
+        assert!(sqlite_pool("INTEGER", Scenario::Edges, false, true).contains(&Integer(i64::MAX)));
+        assert!(!sqlite_pool("INTEGER", Scenario::Plain, false, true).contains(&Integer(i64::MAX)));
+        assert!(sqlite_pool("REAL", Scenario::Edges, false, true).contains(&Real(1e308)));
+        assert!(!sqlite_pool("REAL", Scenario::Plain, false, true).contains(&Real(1e308)));
+        // Outside a STRICT table an INTEGER column takes a REAL with a fraction.
+        assert!(sqlite_pool("INTEGER", Scenario::Plain, false, false).contains(&Real(0.5)));
+        assert!(sqlite_pool("BIGINT", Scenario::Plain, false, false).contains(&Real(0.5)));
+        assert!(!sqlite_pool("INTEGER", Scenario::Plain, false, true).contains(&Real(0.5)));
     }
 
     #[test]
     fn an_autoincrement_key_never_takes_the_largest_integer() {
         for scenario in SCENARIOS {
-            let pool = sqlite_pool("INTEGER", scenario, true);
+            let pool = sqlite_pool("INTEGER", scenario, true, false);
             assert!(pool.iter().all(|v| !matches!(v, Integer(n) if *n > AUTOINCREMENT_TOP)), "{scenario:?}: {pool:?}");
         }
-        assert!(sqlite_pool("INTEGER", Scenario::Edges, true).contains(&Integer(AUTOINCREMENT_TOP)));
+        assert!(sqlite_pool("INTEGER", Scenario::Edges, true, false).contains(&Integer(AUTOINCREMENT_TOP)));
     }
 
     #[test]

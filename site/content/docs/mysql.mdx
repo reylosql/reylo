@@ -76,7 +76,7 @@ In TypeScript, `.run()` returns the same value for a type on every driver. The e
 | `BOOLEAN` (a `TINYINT(1)`), `BIT(1)` | `boolean` | `true` |
 | A comparison, `IS NULL`, `IN`, `BETWEEN`, `LIKE`, `EXISTS`, `NOT`, `AND`, `OR` | `boolean` | `false` |
 | `DECIMAL`, `SUM(…)`, `AVG(…)`, `/` | `string` | `"12.50"` |
-| `FLOAT`, `DOUBLE` | `number` | `1.1` |
+| `FLOAT`, `DOUBLE` | `number`, but not `NaN` or an infinity | `1.1` |
 | `CHAR`, `VARCHAR`, `TEXT` | `string` | `"Ada"` |
 | `ENUM` | the union of its labels | `"member"` |
 | `SET` | a `Set` of its labels, its members in the order the column declares them | `new Set(["a", "c"])` |
@@ -154,7 +154,7 @@ When an expression's type depends on the value you pass, it's typed as every typ
 
 A `DECIMAL` comes back as its exact text, keeping the column's scale. So do `SUM(…)`, `AVG(…)` and division, since MySQL computes them as `DECIMAL`: `sum(total)` returns `"19.75"`, and `id / 2` returns `"0.5000"`.
 
-A `FLOAT` is a 32-bit float. On `mysql2` it comes back as its exact value. The `mariadb` driver, PlanetScale and `Bun.sql` may round it to its shorter text, such as `1.1`. A `DOUBLE` is the same on every driver.
+A `FLOAT` is a 32-bit float. On `mysql2` and `mariadb` 3 it comes back as its exact value. PlanetScale, `Bun.sql` and `mariadb` 2 may round it to its shorter text, such as `1.1`, and so does any driver through Hyperdrive. A `DOUBLE` is the same on every driver.
 
 <Pairs>
 
@@ -313,10 +313,11 @@ What changes inside JSON:
 
 **Values inside a document**
 
-Inside JSON, a value can differ from the same value in a column. Numbers past 2^53 lose precision in `JSON.parse`. A `DATETIME` is MySQL's text, and a boolean may be `true` or `1`.
+Inside JSON, a value can differ from the same value in a column. A `BIGINT` past 2^53 throws an error naming its column, since `JSON.parse` rounds it, and any other number past 2^53 is rounded. A `DATETIME` is MySQL's text, and a boolean may be `true` or `1`.
 
 <Pairs>
 
+- `json_object('n', CAST(9007199254740993 AS SIGNED))` → `throws TypeError`
 - `CAST('{"n": 9007199254740993}' AS JSON)` → `{ n: 9007199254740992 }`
 - `json_object('at', CAST('2026-10-20 10:00:00' AS DATETIME))` → `{ at: "2026-10-20 10:00:00.000000" }`
 - `json_object('b', 1 = 1)` → `{ b: true }`
@@ -447,7 +448,7 @@ A parameter accepts the same values `.run()` returns for its type. You can pass 
 | An `ENUM` column | the union of its labels |
 | A `SET` column | a `Set` of its labels |
 | `DATE`, `DATETIME`, `TIMESTAMP`, `TIME` | `string` |
-| `JSON` | any value `JSON.stringify` writes, such as a `Date` inside an object |
+| `JSON` | any value `JSON.stringify` writes, such as a `Date` inside an object, but no `NaN` or infinity |
 | `BINARY`, `VARBINARY`, `BLOB` | `Uint8Array` |
 | `VECTOR` | `number[]` |
 
@@ -514,7 +515,7 @@ where role = coalesce(:role::nullable(text), role)
 
 **Written to a nullable column**
 
-Written directly into a column that accepts `NULL`, with no cast. A column accepts it unless it's `NOT NULL` or a `check (… is not null)` covers it. It also refuses `NULL` when a `NOT NULL` generated column computes from it, as `nu + 1` does.
+Written directly into a column that accepts `NULL`, with no cast. A column accepts it unless it's `NOT NULL`, or a check is false wherever it's `NULL`, as `check (… is not null)` is. It also refuses `NULL` when a `NOT NULL` generated column is `NULL` wherever it is, as `… + 1` is.
 
 <InferenceCard>
 
@@ -567,7 +568,7 @@ With [`.try()`](/docs/typescript#try), an error MySQL raised comes back as `{ er
 
 Reylo names the error from MySQL's own list, whichever driver ran it. MySQL names a key, a constraint or a column only in its message. Reylo reads it in English, so with another `lc_messages` language those fields are `undefined`.
 
-When the query fires no trigger and calls no stored function, its error type is narrowed. A duplicate entry names only the unique keys of the tables it writes. Other errors name only their constraints and columns.
+When the query fires no trigger and calls no stored function, its error type is narrowed. A duplicate entry names only the unique keys of the tables it writes. Other errors name only their constraints and columns. A value's column may also be one of the query's `JSON_TABLE` columns with `ERROR ON ERROR`. It isn't narrowed where the query holds a recursive `WITH` query, or reads a view that holds one or such a `JSON_TABLE`. Nor is an out-of-range value's where either casts to `DECIMAL`, which MySQL names by the cast's select item.
 
 ## Drivers
 
@@ -604,7 +605,9 @@ await getUser.run(callbackPool, { id: 1 });
 Reylo runs each query through `mysql2`'s `execute()`, which prepares it first. Where the server refuses prepared statements, as Hyperdrive does, Reylo writes the values into the statement and uses `query()`:
 
 - A `FLOAT` column comes back with the 6 significant digits MySQL sends as text, so `1.100000023841858` reads as `1.1`.
-- A custom `queryFormat` is refused there, since it would rewrite each statement. So is a non-ASCII value on a connection whose charset isn't UTF-8.
+- A custom `queryFormat` is refused there, since it would rewrite each statement. So is a non-ASCII value where the connection or the session reads text in a charset other than UTF-8, as after `SET NAMES`.
+
+Before `mysql2` 3.23.4, a `TIME` fraction loses its leading zeros, so `12:00:00.05` comes back as `12:00:00.500000`. Use 3.23.4 or later.
 
 ### `mariadb`
 
@@ -628,7 +631,9 @@ const callbackPool = mariadbCallbacks.createPool(process.env.DATABASE_URL);
 await getUser.run(callbackPool, { id: 1 });
 ```
 
-Reylo runs each query through its `query()` method, which prepares nothing. So it also works through Cloudflare Hyperdrive, in a Worker with Node's APIs. Connect it with the fields of the binding:
+Reylo runs each query through the driver's `execute()`, which binds each value. Connect with utf8mb4: the driver writes text in the connection's charset, and stores a character that charset lacks as another. The driver may send the statement a round trip after `.run()` is called, so await `.run()` before the connection's own `commit()` or `rollback()`.
+
+It also works through Cloudflare Hyperdrive, in a Worker with Node's APIs. Hyperdrive refuses prepared statements, so Reylo uses `query()` there. Connect it with the fields of the binding:
 
 ```ts twoslash tab="worker.ts"
 /// <reference types="@cloudflare/workers-types" />
@@ -647,6 +652,16 @@ export default {
 };
 ```
 
+Through `query()`, as there and on `mariadb` 2, the driver writes each value into the statement itself. For a value holding a quote, a backslash or a non-ASCII character, Reylo reads the session's `sql_mode` and charset first. It refuses a value the session would read otherwise:
+
+- A character outside ASCII, where the driver or the session uses a charset other than UTF-8.
+- A quote or a backslash, where the session reads a backslash otherwise than the driver writes it. A stored routine that sets `sql_mode` can cause this, so set `sql_mode` again after calling one.
+- A double quote or a control character, on a session with `NO_BACKSLASH_ESCAPES`, from a driver older than 3.2.5, 3.3.4, 3.4.7 or 3.5.4 in its line. Those versions write a backslash before it that the session keeps.
+- A binary value with a quote, a double quote, a backslash or NUL right after a byte of 0x80 or above, on some charsets. A session in Big5, CP932, GB18030, GBK or SJIS reads that byte and the driver's backslash as one character.
+- A binary value with a backslash right after a byte of 0x80 or above, where the driver writes in one of those charsets and the session reads another.
+
+The driver also finds the placeholders itself, reading the statement as a server without `NO_BACKSLASH_ESCAPES` and `ANSI_QUOTES` does. So a statement whose strings those modes read otherwise runs only where the server Reylo read it on had neither, and the session has neither too. It refuses an array as well, which the driver writes as a list of values.
+
 ### PlanetScale
 
 Pass a connection, or the transaction it hands its callback:
@@ -663,6 +678,8 @@ await db.transaction((tx) => getUser.run(tx, { id: 1 }));
 ```
 
 Version 2.0 isn't supported, since it can't bind parameters.
+
+The driver finds the placeholders itself, as `mariadb` does. So a statement whose strings `NO_BACKSLASH_ESCAPES` or `ANSI_QUOTES` read otherwise is refused where the server Reylo read it on has either. So is an array, which the driver writes as a list of values.
 
 ### `Bun.sql`
 

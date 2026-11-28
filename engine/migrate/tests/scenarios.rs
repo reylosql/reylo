@@ -141,6 +141,29 @@ impl P {
         Some(P { d, dir, url, name, lines: vec![], t, strict: false, server: None })
     }
 
+    /// A project and, fresh, the one database pg_cron makes itself in: the one `cron.database_name`
+    /// names on the server `REYLO_TEST_PG_CRON` names, a Postgres that loads pg_cron. None where it
+    /// is not set.
+    async fn pg_cron() -> Option<P> {
+        let Ok(base) = std::env::var("REYLO_TEST_PG_CRON") else {
+            eprintln!("skipped: no test server with pg_cron");
+            return None;
+        };
+        let mut p = P::new(Dialect::Postgres).await?;
+        // Its database on the other test server goes unused.
+        let mut other = Db::connect(&with_database(&p.url, "postgres"), &p.dir).await.unwrap();
+        other.exec(&format!("drop database if exists {} with (force)", p.name)).await.unwrap();
+        other.close().await;
+        let mut admin = Db::connect(&base, &p.dir).await.unwrap();
+        let name = admin.rows("select current_setting('cron.database_name') as n").await.unwrap()[0].text("n").to_string();
+        admin.exec(&format!("drop database if exists {name} with (force)")).await.unwrap();
+        admin.exec(&format!("create database {name}")).await.unwrap();
+        admin.close().await;
+        p.url = with_database(&base, &name);
+        p.name = name;
+        Some(p)
+    }
+
     /// A project and a fresh database on a libSQL server of its own (Turso's dialect, SQLite).
     async fn turso() -> Option<P> {
         let mut p = P::new(Dialect::Sqlite).await?;
@@ -4291,6 +4314,7 @@ on!(
     a_supabase_database_adopted_after_moving_or_updating_an_extension_replays_it,
     a_stated_grant_supabase_also_gives_by_default_is_written,
     a_stated_grant_keeps_its_table_and_its_option,
+    the_history_stays_where_it_was_made_whatever_the_search_path,
     a_migration_that_makes_supabases_publication_again_runs,
     a_supabase_project_whose_files_create_its_publication_writes_new_migrations,
     a_supabase_dump_keeps_each_tables_grants,
@@ -4368,6 +4392,86 @@ on!(
     a_foreign_key_added_back_under_another_name_holds_through_its_keys_swap,
     a_partitioned_tables_foreign_key_holds_through_its_keys_swap,
 );
+
+/// pg_cron makes itself only in the database `cron.database_name` names, which no shadow is: a project
+/// that creates it, and one that finds it made, schedule jobs from their migrations all the same.
+#[test]
+fn a_project_with_pg_cron_replays_in_shadows() {
+    on_a_main_threads_stack(|| async {
+        let Some(mut p) = P::pg_cron().await else { return };
+        let int = p.t.int;
+        p.exec(&format!("create extension pg_cron; create table runs (id {int}); select cron.schedule('nightly', '0 3 * * *', 'delete from runs')")).await;
+        assert_eq!(p.run(async |o, log| reylo_migrate::init(o, &[], log).await).await, 0, "{}", p.peek());
+        p.output();
+        assert_has!(std::fs::read_to_string(p.dir.join("migrations").join("init.sql")).unwrap(), r"(?i)create extension[^;]*pg_cron");
+        p.file("20261126100000_hourly.sql", "select cron.schedule('hourly', '0 * * * *', 'select 1');");
+        let (code, out) = p.check_every_way().await;
+        assert_eq!(code, 0, "{out}");
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        assert_eq!(p.rows("select jobname from cron.job order by 1").await.iter().map(|r| r.text("jobname").to_string()).collect::<Vec<_>>(), ["hourly", "nightly"]);
+        assert!(p.rows("select 1 from pg_database where datname = 'contrib_regression'").await.is_empty(), "a shadow kept pg_cron's name");
+
+        // A shadow a run cut off left under pg_cron's name is swept; a database of that name that is no
+        // shadow stays, and keeps every shadow from taking the name.
+        let base = std::env::var("REYLO_TEST_PG_CRON").unwrap();
+        let mut admin = Db::connect(&base, &p.dir).await.unwrap();
+        admin.exec("create database contrib_regression").await.unwrap();
+        admin.exec("comment on database contrib_regression is 'reylo shadow reylo_shadow_0000000000'").await.unwrap();
+        reylo_migrate::cache::set_enabled(Some(false));
+        assert_eq!(p.dry_run().await, 0, "{}", p.peek());
+        assert!(p.rows("select 1 from pg_database where datname = 'contrib_regression'").await.is_empty(), "a shadow left under pg_cron's name stayed");
+        admin.exec("create database contrib_regression").await.unwrap();
+        p.output();
+        assert_ne!(p.dry_run().await, 0, "{}", p.peek());
+        assert_has!(p.output(), r"named contrib_regression that is no shadow");
+        reylo_migrate::cache::set_enabled(None);
+        admin.exec("drop database contrib_regression").await.unwrap();
+        admin.close().await;
+        forget(&p.url).await;
+
+        // A pending migration that makes it, which deploy's dry run replays and then runs step by step.
+        let Some(mut q) = P::pg_cron().await else { return };
+        q.file("20261126100000_runs.sql", &format!("create extension pg_cron; create table runs (id {int}); select cron.schedule('nightly', '0 3 * * *', 'delete from runs');"));
+        q.schema(&format!("create extension pg_cron; create table runs (id {int});"));
+        assert_eq!(q.dry_run().await, 0, "{}", q.peek());
+        assert_eq!(q.migrate().await, 0, "{}", q.peek());
+        // One that drops it and makes it again, in a shadow that has it.
+        q.file("20261126110000_again.sql", "drop/* again */extension\nif exists \"legacy;extension\", pg_cron; create extension pg_cron;");
+        assert_eq!(q.dry_run().await, 0, "{}", q.peek());
+        assert_eq!(q.migrate().await, 0, "{}", q.peek());
+        q.file("20261126120000_in_a_block.sql", "do $$ begin drop extension pg_cron; end $$; create extension pg_cron;");
+        assert_eq!(q.dry_run().await, 0, "{}", q.peek());
+        assert_eq!(q.migrate().await, 0, "{}", q.peek());
+        q.file("20261126130000_in_a_procedure.sql", "create procedure remove_cron() language plpgsql as $p$ begin drop extension pg_cron; end $p$; call remove_cron(); create extension pg_cron; drop procedure remove_cron();");
+        assert_eq!(q.dry_run().await, 0, "{}", q.peek());
+        assert_eq!(q.migrate().await, 0, "{}", q.peek());
+        assert!(q.rows("select 1 from pg_database where datname = 'contrib_regression'").await.is_empty(), "a shadow kept pg_cron's name");
+        forget(&q.url).await;
+
+        // Made on the database by hand, it is the environment's, which every shadow is given.
+        let Some(mut e) = P::pg_cron().await else { return };
+        e.exec("create extension pg_cron").await;
+        e.file("20261126100000_runs.sql", &format!("create table runs (id {int}); select cron.schedule('nightly', '0 3 * * *', 'delete from runs');"));
+        e.schema(&format!("create table runs (id {int});"));
+        assert_eq!(e.dry_run().await, 0, "{}", e.peek());
+        assert_has!(e.output(), r"Tried the pending migration on a shadow database");
+        forget(&e.url).await;
+
+        // On another database of the server, pg_cron refuses the target, and so each shadow refuses it too.
+        let Some(mut o) = P::pg_cron().await else { return };
+        let base = std::env::var("REYLO_TEST_PG_CRON").unwrap();
+        let mut admin = Db::connect(&base, &o.dir).await.unwrap();
+        admin.exec("drop database if exists reylo_cron_beside with (force)").await.unwrap();
+        admin.exec("create database reylo_cron_beside").await.unwrap();
+        o.url = with_database(&base, "reylo_cron_beside");
+        o.file("20261126100000_cron.sql", "create extension pg_cron;");
+        assert_ne!(o.dry_run().await, 0, "{}", o.peek());
+        assert_has!(o.output(), r"can only create extension in database");
+        forget(&o.url).await;
+        admin.exec("drop database if exists reylo_cron_beside with (force)").await.unwrap();
+        admin.close().await;
+    });
+}
 
 #[tokio::test(flavor = "current_thread")]
 async fn a_sqlite_numeric_column_made_integer_needs_no_drop() {
@@ -9280,6 +9384,41 @@ create trigger kids_note after insert on kids begin update parents set name = na
         assert_eq!(q.rows(&granted("public", "anon", "NO")).await[0].text("n"), "1");
         assert_eq!(q.rows(&granted("private", "anon", "NO")).await[0].text("n"), "0");
         assert_eq!(q.rows(&granted("public", "authenticated", "YES")).await[0].text("n"), "1");
+    }
+
+    /// On a database whose search_path names, before `public`, a schema a migration makes, the history
+    /// stays the one table Reylo made: later runs read what ran, and a change to a grant's option runs
+    /// as any change does. Two tables of its name, as an earlier version made in that schema, are
+    /// refused with what each holds, until they are one.
+    pub async fn the_history_stays_where_it_was_made_whatever_the_search_path(mut p: P) {
+        p.exec("do $$ begin create role madv_readers; exception when duplicate_object or unique_violation then null; end $$").await;
+        p.exec(&format!("alter database {} set search_path = private, public", p.name)).await;
+        let notes = "create schema private;\n\ncreate table private.drafts (id int primary key);\n\ncreate table public.notes (id int primary key);\n\ngrant select on table public.notes to madv_readers;\n";
+        p.file("20261125000000_notes.sql", notes);
+        p.schema(notes);
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        let made = "select count(*)::text as n from pg_class where relname = '__reylo_migrations' and relkind = 'r'";
+        assert_eq!(p.rows(made).await[0].text("n"), "1");
+        assert_eq!(p.status().await, 0, "{}", p.peek());
+        p.schema(&format!("{notes}\ngrant select on table public.notes to madv_readers with grant option;\n"));
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "readers", &Default::default(), log).await).await, 0, "{}", p.peek());
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        assert_eq!(p.rows(made).await[0].text("n"), "1");
+        let ran = |schema: &str| format!("select count(*)::text as n from {schema}.__reylo_migrations where applied_at is not null");
+        assert_eq!(p.rows(&ran("public")).await[0].text("n"), "2");
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        // A second table, as an earlier version left it: each holds a migration the other lacks, and
+        // one a run the other finished.
+        p.exec("create table private.__reylo_migrations (like public.__reylo_migrations including all); insert into private.__reylo_migrations select * from public.__reylo_migrations; delete from public.__reylo_migrations where name like '%readers.sql'; update private.__reylo_migrations set applied_at = null where name like '%notes.sql'").await;
+        let refused = reylo_migrate::status(&p.opts(), &mut |_: &str| {}).await.unwrap_err().0;
+        assert_has!(refused.clone(), r"This database holds 2 of Reylo's history tables");
+        assert_has!(refused.clone(), r"In public\.__reylo_migrations, 1 migration ran, at [^\n,]+\n");
+        assert_has!(refused.clone(), r"In private\.__reylo_migrations, 1 migration ran, at [^\n]+, and 1 started");
+        assert_has!(refused, r"Keep one table holding each migration's row from any of them, its run over its start, and drop the others");
+        p.exec("insert into public.__reylo_migrations select * from private.__reylo_migrations on conflict (name) do update set applied_at = coalesce(__reylo_migrations.applied_at, excluded.applied_at); drop table private.__reylo_migrations").await;
+        assert_eq!(p.status().await, 0, "{}", p.peek());
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        assert_eq!(p.rows(&ran("public")).await[0].text("n"), "2");
     }
 
     /// A Supabase database that began without one of Supabase's extensions replays its migrations from

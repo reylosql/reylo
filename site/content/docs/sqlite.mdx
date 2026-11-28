@@ -140,7 +140,7 @@ from orders
 
 **Values of another kind**
 
-Outside a `STRICT` table, a value of another kind makes `.run()` throw a `TypeError` that names the column. An example is the text `'abc'` in an `INTEGER` column. To read whatever the column holds, cast it:
+Outside a `STRICT` table, a value of another kind makes `.run()` throw a `TypeError` that names the column. An example is the text `'abc'` in an `INTEGER` column. The exception is a `REAL` such as `0.5` there, which `.run()` returns as the number it is. So a query's `outputSchema` types that column, and what's computed from it, as a number. To read whatever the column holds, cast it:
 
 <InferenceCard>
 
@@ -351,12 +351,13 @@ What changes inside JSON:
 
 **Values inside a document**
 
-Inside JSON, a value can differ from the same value in a column. A boolean is `1` or `0`, and integers past 2^53 lose precision in `JSON.parse`.
+Inside JSON, a value can differ from the same value in a column. A boolean is `1` or `0`. An integer past 2^53 throws an error naming its column, since `JSON.parse` rounds it. Cast it to text to read it exactly.
 
 <Pairs>
 
 - `json_object('a', 1 = 1)` → `{ a: 1 }`
-- `json_object('n', 9007199254740993)` → `{ n: 9007199254740992 }`
+- `json_object('n', 9007199254740993)` → `throws TypeError`
+- `json_object('n', cast(9007199254740993 as text))` → `{ n: "9007199254740993" }`
 
 </Pairs>
 
@@ -510,6 +511,8 @@ A parameter accepts the same values `.run()` returns for its type. You can pass 
 
 A `BLOB` parameter takes only a `Uint8Array`. It rejects base64 or hex text, which SQLite would store as `TEXT`. Decode the text into a `Uint8Array` first.
 
+SQLite stores `NaN` as `NULL`, so a parameter rejects `NaN`, inside JSON too.
+
 Where the query takes no null for a JSON parameter, `null` is JSON's `null`, the text `null`. A `coalesce` or a null test doesn't make a parameter take null, so write `coalesce(:doc::nullable(json), doc)` to keep `doc` for `null`.
 
 ### Parameters without a type
@@ -556,7 +559,7 @@ where name = coalesce(:name::nullable(text), name)
 
 **Written to a nullable column**
 
-Written directly into a column that accepts `NULL`, with no cast. A column accepts it unless it's `NOT NULL` or a `check (… is not null)` covers it.
+Written directly into a column that accepts `NULL`, with no cast. A column accepts it unless it's `NOT NULL`, or a check is false wherever it's `NULL`, as `check (… is not null)` is. It also refuses `NULL` when a `NOT NULL` generated column is `NULL` wherever it is, as `… + 1` is.
 
 <InferenceCard>
 
@@ -765,7 +768,7 @@ export default {
 };
 ```
 
-D1 rounds an integer past 2^53, so Reylo throws an error rather than return it, even for a `BIGINT` column.
+D1 rounds an integer past 2^53, so Reylo throws an error rather than return it, even for a `BIGINT` column. A whole number from 2^53 to 2^63 in a column with no type throws too, since it may be such an integer. D1 sends each row as JSON, so a `REAL`'s infinity comes back as `null`, and -0 as 0.
 
 ### Durable Objects
 
@@ -791,7 +794,7 @@ export class Board extends DurableObject {
 }
 ```
 
-The storage rounds an integer past 2^53, so Reylo throws rather than return one, even from a `BIGINT` column. It can't bind a `bigint` parameter past 2^53 either. Reylo rejects one unless it's written to a `BIGINT` column.
+The storage rounds an integer past 2^53, so Reylo throws rather than return one, even from a `BIGINT` column. A whole number from 2^53 to 2^63 in a column with no type throws too, since it may be such an integer. It can't bind a `bigint` parameter past 2^53 either. Reylo rejects one unless it's written to a `BIGINT` column.
 
 ### `sqlite3`
 
@@ -805,7 +808,7 @@ const db = new sqlite3.Database("app.db");
 const user = await getUser.run(db, { id: 1 });
 ```
 
-The driver rounds an integer past 2^53, so Reylo throws rather than return one, even from a `BIGINT` column. It can't bind a `bigint` parameter past 2^53 either. Reylo rejects one unless it's written to a `BIGINT` column.
+The driver rounds an integer past 2^53, so Reylo throws rather than return one, even from a `BIGINT` column. A whole number from 2^53 to 2^63 in a column with no type throws too, since it may be such an integer. It can't bind a `bigint` parameter past 2^53 either. Reylo rejects one unless it's written to a `BIGINT` column.
 
 ### `sqlite`
 
@@ -824,7 +827,7 @@ await getUser.run(db, { id: 1 });
 await db.exec("commit");
 ```
 
-The driver rounds an integer past 2^53, so Reylo throws rather than return one, even from a `BIGINT` column. It can't bind a `bigint` parameter past 2^53 either. Reylo rejects one unless it's written to a `BIGINT` column.
+The driver rounds an integer past 2^53, so Reylo throws rather than return one, even from a `BIGINT` column. A whole number from 2^53 to 2^63 in a column with no type throws too, since it may be such an integer. It can't bind a `bigint` parameter past 2^53 either. Reylo rejects one unless it's written to a `BIGINT` column.
 
 ### `Bun.sql`
 
@@ -847,7 +850,7 @@ await db.begin(async (tx) => {
 });
 ```
 
-Without `safeIntegers`, Bun rounds an integer past 2^53, so Reylo throws rather than return one. Before Bun 1.4.4, `Bun.sql` returns no rows for a query with a `"` inside a single-quoted string. Pass such text as a parameter instead.
+Without `safeIntegers`, Bun rounds an integer past 2^53, so Reylo throws rather than return one. A whole number from 2^53 to 2^63 in a column with no type throws either way, since it may be such an integer. Before Bun 1.4.4, `Bun.sql` returns no rows for a query with a `"` inside a single-quoted string. Pass such text as a parameter instead.
 
 ### Drizzle
 
@@ -886,7 +889,7 @@ What Reylo can't type on SQLite, and what to do instead:
 
 | Limit | Instead |
 | --- | --- |
-| Declared types outside a `STRICT` table, which SQLite doesn't enforce, so a value of another kind makes `.run()` throw | Make tables `strict` where you can |
+| Declared types outside a `STRICT` table, which SQLite doesn't enforce, so a value of another kind makes `.run()` throw, and inside JSON a query builds is returned as it is | Make tables `strict` where you can |
 | Functions your app registers, or an extension's, which Reylo's SQLite doesn't have: the type check fails with "no such function" | Call the function in TypeScript on what `.run()` returns |
 | A function your app registers under a built-in's name, such as `lower`, which your connection then calls: Reylo types it as SQLite's built-in | Register it under a name of its own |
 | Attached databases and `TEMP` tables, since the type check reads one database file | None: a query on one is an error in the type check |

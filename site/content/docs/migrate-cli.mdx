@@ -467,7 +467,7 @@ Flags:
 
 Synchronizes your development database with `schema.sql`, writing no migration, for trying a change:
 
-```sql title="schema.sql"
+```sql title="reylo/schema.sql"
 create table users (
   id integer primary key,
   email text not null,
@@ -488,7 +488,7 @@ Pushing reylo/schema.sql to postgres://localhost:5432/app
 
 As with `reylo migrate new`, a drop or a type change that loses values is refused until you name it:
 
-```sql title="schema.sql"
+```sql title="reylo/schema.sql"
 create table users (
   id integer primary key,
   email text not null,
@@ -630,7 +630,7 @@ Most commands use shadow databases: throwaway databases where Reylo Migrate repl
 
 Each database makes them its own way:
 
-- **Postgres:** on your database's server, with `create database`, so your role needs `CREATEDB`. A local superuser has it, and so do Neon's and Supabase's roles. Reylo Migrate keeps up to 32 as a cache, so a run replays only new migrations. On Azure, list each extension your migrations create in the server's `azure.extensions` parameter. Timescale Cloud refuses `create database`, so point `shadow_url` at the `timescale/timescaledb-ha` image. On Supabase, each shadow gets Supabase's schemas too, so a migration can reference `auth.users`, and what every new Supabase database has, such as the `supabase_realtime` publication.
+- **Postgres:** on your database's server, with `create database`, so your role needs `CREATEDB`. A local superuser has it, and so do Neon's and Supabase's roles. Reylo Migrate keeps up to 32 as a cache, so a run replays only new migrations. On Azure, list each extension your migrations create in the server's `azure.extensions` parameter. Timescale Cloud refuses `create database`, so point `shadow_url` at the `timescale/timescaledb-ha` image. On Supabase, each shadow gets Supabase's schemas too, so a migration can reference `auth.users`, and what every new Supabase database has, such as the `supabase_realtime` publication. To create pg_cron, a shadow takes the name `contrib_regression` for a moment, the one database pg_cron allows besides the one `cron.database_name` names. That needs a connection with no pooler, such as Supabase's direct connection.
 - **MySQL:** on your database's server, with `create database`, so your user needs the `CREATE` privilege on every database. PlanetScale refuses `create database`, so point `shadow_url` at a plain MySQL 8.4 server.
 - **SQLite:** in memory. There's nothing to grant. A [Turso](/docs/turso#migrations) database's shadows run on libSQL's own engine.
 

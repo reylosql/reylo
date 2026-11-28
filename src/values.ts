@@ -53,13 +53,20 @@ export type Kind = string;
 export type Columns = readonly (readonly [name: string, kind: Kind, delimiter?: string])[];
 
 /**
- * What the run time reads inside a Postgres document (src/render.ts, `jsonNumbers`): where it holds
- * a float or a decimal that may be NaN or an infinity, which Postgres writes there as text, `true`
- * for such a value; for an array, `items` for its elements (`false` where they need nothing),
- * through nested arrays where `deep`, and `flat` where it is a Postgres array held to one level;
- * and `keys` for an object's fields.
+ * What the run time reads inside a document a statement builds (src/render.ts, `jsonNumbers`):
+ * where it holds a float or a decimal that may be NaN or an infinity, which Postgres writes there
+ * as text, `true` for such a value; where it holds an integer wider than a double holds exactly,
+ * `"integer"`, or `"unsigned"` for an unsigned one; for an array, `items` for its elements (`false` where they need nothing), the first
+ * of them by place in `elements` where they differ, through nested arrays where `deep`, and `flat`
+ * where it is a Postgres array held to one level; and `keys` for an object's fields, `others` for
+ * every key they don't name.
  */
-export type JsonNumbers = true | { readonly items: JsonNumbers | false; readonly deep?: true; readonly flat?: true } | { readonly keys: readonly (readonly [key: string, at: JsonNumbers])[] };
+export type JsonNumbers =
+  | true
+  | "integer"
+  | "unsigned"
+  | { readonly items: JsonNumbers | false; readonly elements?: readonly (JsonNumbers | null)[]; readonly deep?: true; readonly flat?: true }
+  | { readonly keys: readonly (readonly [key: string, at: JsonNumbers])[]; readonly others?: JsonNumbers };
 
 /**
  * The JSON columns of a row whose non-finite numbers `.run()` gives as numbers: each name's last
@@ -71,38 +78,208 @@ export function rowMasks(columns: Columns, nonFinite: readonly (JsonNumbers | nu
   return [...last].flatMap(([name, at]) => (at === null ? [] : [[name, at] as const]));
 }
 
+/** An integer inside a document that JSON.parse may have rounded, and where it stands, built up as the walk returns. */
+class Rounded {
+  readonly value: number;
+  readonly path: string[] = [];
+  constructor(value: number) {
+    this.value = value;
+  }
+}
+
+/**
+ * The widest value a signed and an unsigned 64-bit integer hold, as doubles: a number past it inside
+ * a document is a float, which JSON.parse reads exactly, as a non-STRICT SQLite INTEGER column may
+ * store one.
+ */
+const SIGNED_64 = 2 ** 63;
+const UNSIGNED_64 = 2 ** 64;
+
 /**
  * A parsed JSON value with the text Postgres writes for each non-finite float or decimal at
  * `at`, `"NaN"`, `"Infinity"` or `"-Infinity"`, as that number, in place: JSON has no number for
  * one, and a float outside a document is one already. A Postgres array there is written with as
  * many levels as its value has, which Postgres doesn't hold to the one its type has, so one of
- * more is refused, naming `column`, as `withinDimensions` refuses a column's.
+ * more is refused, naming `column`, as `withinDimensions` refuses a column's. So is a number past
+ * 2^53 - 1 where a 64-bit integer stands, which JSON.parse may already have rounded to it: a column
+ * of the integer is an exact BigInt, and a number refuses such a value rather than round it.
  */
 export function numbersInJson(v: unknown, at: JsonNumbers, column = ""): unknown {
+  try {
+    return read(v, at, column);
+  } catch (e) {
+    if (!(e instanceof Rounded)) throw e;
+    const where = e.path.length ? ` at /${e.path.reverse().join("/")}` : "";
+    throw new DecodeError(`Column "${column}" holds, inside its JSON${where}, the integer ${BigInt(e.value)}, which is ${e.value < 0 ? "below -(2^53 - 1)" : "past 2^53 - 1"}, where JSON.parse rounds a number, so it may have been another one. Write it into the document as text and read that with BigInt().`);
+  }
+}
+
+function read(v: unknown, at: JsonNumbers, column: string): unknown {
   if (at === true) return v === "NaN" ? NaN : v === "Infinity" ? Infinity : v === "-Infinity" ? -Infinity : v;
+  if (at === "integer" || at === "unsigned") {
+    if (typeof v === "number" && Math.abs(v) > Number.MAX_SAFE_INTEGER && Math.abs(v) <= (at === "integer" ? SIGNED_64 : UNSIGNED_64)) throw new Rounded(v);
+    return v;
+  }
   if (v === null || typeof v !== "object") return v;
   if ("items" in at) {
     if (!Array.isArray(v)) return v;
     if (at.flat === true && v.some(Array.isArray)) {
       throw new DecodeError(`Column "${column}" holds, inside its JSON, a Postgres array of more than one dimension, and its type has one: Reylo types a Postgres array with one dimension, which Postgres doesn't enforce. Write to_jsonb(<the array>) into the document to read it as JSON, or set allow_nested_arrays: true in .reylo.yaml to type it at any depth.`);
     }
-    const items = at.items;
-    if (items === false) return v;
+    const { items, elements = [] } = at;
+    if (items === false && !elements.length) return v;
     // A Postgres array nests to any depth, each level an array; where its element is a JSON array
     // as well, an array is read as the element, since the two cannot be told apart.
     const nested = at.deep === true && !(typeof items === "object" && "items" in items);
-    for (let i = 0; i < v.length; i++) v[i] = nested && Array.isArray(v[i]) ? numbersInJson(v[i], at, column) : numbersInJson(v[i], items, column);
+    for (let i = 0; i < v.length; i++) {
+      const inner = i < elements.length ? elements[i]! : items;
+      if (inner === null || inner === false) continue;
+      try {
+        v[i] = nested && Array.isArray(v[i]) ? read(v[i], at, column) : read(v[i], inner, column);
+      } catch (e) {
+        if (e instanceof Rounded) e.path.push(String(i));
+        throw e;
+      }
+    }
     return v;
   }
   const o = v as Record<string, unknown>;
-  for (const [key, inner] of at.keys) {
-    if (!Object.prototype.hasOwnProperty.call(o, key)) continue;
-    const value = numbersInJson(o[key], inner, column);
+  const named = new Set<string>();
+  const each = (key: string, inner: JsonNumbers) => {
+    let value: unknown;
+    try {
+      value = read(o[key], inner, column);
+    } catch (e) {
+      if (e instanceof Rounded) e.path.push(key.replace(/~/g, "~0").replace(/\//g, "~1"));
+      throw e;
+    }
     // `__proto__` is an own key JSON.parse made, which an assignment would not reach.
     if (key === "__proto__") Object.defineProperty(o, key, { value, writable: true, enumerable: true, configurable: true });
     else o[key] = value;
+  };
+  for (const [key, inner] of at.keys) {
+    named.add(key);
+    if (Object.prototype.hasOwnProperty.call(o, key)) each(key, inner);
   }
+  if (at.others !== undefined) for (const key of Object.keys(o)) if (!named.has(key)) each(key, at.others);
   return v;
+}
+
+/** JSON text the writer puts in as it is (src/rows.ts: a 64-bit integer's digits, a float's -0 or infinity). */
+export class RawJson {
+  readonly text: string;
+  constructor(text: string) {
+    this.text = text;
+  }
+}
+
+/**
+ * A value as the JSON text the database reads, written as JSON.stringify writes it (each value's
+ * `toJSON()` read, a key whose value is undefined left out) but for the numbers JSON.stringify
+ * writes as null or 0, the inverse of `numbersInJson`. -0 keeps its sign: `-0` on Postgres, which a
+ * `json` value keeps as written (`jsonb` holds no -0), and `-0e0` on MySQL and SQLite, whose JSON
+ * reads `-0` as the integer 0. An infinity goes in on SQLite as a number past a double's range, as
+ * SQLite writes one. NaN, and an infinity on Postgres and MySQL, whose JSON holds no number for
+ * one, are refused through `fail`, with the place in the value where each stands (`at /n`, after
+ * `at`), rather than stored as null.
+ */
+export function writeJson(v: unknown, dialect: Dialect, fail: (message: string) => never, at = ""): string | undefined {
+  const special = (n: unknown): n is number => typeof n === "number" && (!Number.isFinite(n) || Object.is(n, -0));
+  // One pass of JSON.stringify, each such number written as its own text with JSON.rawJSON, so that
+  // each value's `toJSON()` and getters are read once. The replacer sees a value after its
+  // `toJSON()` and before a boxed number is unboxed, and each object's place is kept for a refusal.
+  // An app's `BigInt.prototype.toJSON` runs before any replacer sees the BigInt it turns into text
+  // or a rounded number, so then the value is written by the algorithm below, which reads each
+  // property once and a BigInt before its toJSON().
+  // Found by its property, its own or one it inherits, whose getter runs only when JSON.stringify reads it.
+  const bigintHook = "toJSON" in BigInt.prototype;
+  if (rawJson !== undefined && !bigintHook) {
+    const places = new WeakMap<object, string>();
+    return JSON.stringify(v, function (this: object, key: string, x: unknown) {
+      const parent = places.get(this);
+      const place = parent === undefined ? at : `${parent}/${key.replace(/~/g, "~0").replace(/\//g, "~1")}`;
+      // A BigInt as its digits, as it stands or as a value's own toJSON() returns it.
+      if (typeof x === "bigint") return rawJson(bigintText(x, place, dialect, fail));
+      if (x !== null && typeof x === "object") places.set(x, place);
+      // JSON.rawJSON takes a primitive's text alone, so a document's is read back, each number and
+      // string as its own text.
+      if (x instanceof RawJson) return JSON.parse(x.text, (_k, y: unknown, context?: { source?: string }) => ((typeof y === "number" || typeof y === "string") && context?.source !== undefined ? rawJson(context.source) : typeof y === "number" ? rawJson(String(y)) : y));
+      const n = x instanceof Number ? Number(x) : x;
+      return special(n) ? rawJson(jsonNumber(n, place, dialect, fail)) : x;
+    });
+  }
+  // Without JSON.rawJSON, JSON.stringify's own text where no such number is in the value; else the
+  // value written again by its algorithm, which reads each `toJSON()` a second time.
+  let found = bigintHook;
+  const plain = found
+    ? undefined
+    : JSON.stringify(v, (_key: string, x: unknown) => {
+        if (typeof x === "bigint") {
+          found = true;
+          return null;
+        }
+        if (x instanceof RawJson || special(x instanceof Number ? Number(x) : x)) found = true;
+        return x;
+      });
+  return found ? jsonOf("", v, at, (n, place) => (typeof n === "bigint" ? bigintText(n, place, dialect, fail) : jsonNumber(n, place, dialect, fail))) : plain;
+}
+
+/** The 64-bit integers MySQL and SQLite read from JSON as integers: SQLite's signed ones, and MySQL's signed and unsigned ones. */
+const JSON_INTEGERS: Partial<Record<Dialect, readonly [bigint, bigint]>> = {
+  sqlite: [-(BigInt(2) ** BigInt(63)), BigInt(2) ** BigInt(63) - BigInt(1)],
+  mysql: [-(BigInt(2) ** BigInt(63)), BigInt(2) ** BigInt(64) - BigInt(1)],
+};
+
+/** A BigInt inside a document as its digits (`writeJson`), which a schema's `integer` takes (src/json-schema.ts); on MySQL and SQLite, one their JSON reads as a float is refused through `fail`. */
+function bigintText(n: bigint, at: string, dialect: Dialect, fail: (message: string) => never): string {
+  const range = JSON_INTEGERS[dialect];
+  if (range !== undefined && (n < range[0] || n > range[1])) return fail(`${at ? `at ${at} ` : ""}is the BigInt ${n}, which ${dialect === "sqlite" ? "SQLite" : "MySQL"} reads from JSON as a float: its 64-bit integers run from ${range[0]} to ${range[1]}.`);
+  return String(n);
+}
+
+/** JSON.rawJSON, which JSON.stringify writes as its text, where the runtime has it (Node 21 and later, Bun, Deno, workerd). */
+const rawJson = (JSON as { rawJSON?: (text: string) => unknown }).rawJSON;
+
+/** A number inside a document as the database reads it (`writeJson`). */
+function jsonNumber(n: number, at: string, dialect: Dialect, fail: (message: string) => never): string {
+  if (Object.is(n, -0)) return dialect === "postgres" ? "-0" : "-0e0";
+  if (Number.isFinite(n)) return String(n);
+  if (dialect === "sqlite" && !Number.isNaN(n)) return n > 0 ? "9e999" : "-9e999";
+  return fail(`${at ? `at ${at} ` : ""}is ${n}, which ${dialect === "mysql" ? "MySQL holds no value" : dialect === "sqlite" ? "SQLite holds no value" : "JSON holds no number"} for: write null or a string in its place.`);
+}
+
+/**
+ * JSON.stringify's algorithm (SerializeJSONProperty), each number and BigInt written by `number` and each
+ * place named by its JSON Pointer, `at`, for a runtime without JSON.rawJSON. It runs on a value
+ * JSON.stringify has written once already (`writeJson`), which has thrown on a BigInt or a cycle.
+ */
+function jsonOf(key: string, value: unknown, at: string, number: (n: number | bigint, at: string) => string): string | undefined {
+  if (value !== null && (typeof value === "object" || typeof value === "function")) {
+    const toJSON = (value as { toJSON?: unknown }).toJSON;
+    if (typeof toJSON === "function") value = Reflect.apply(toJSON, value, [key]);
+  }
+  if (value instanceof RawJson) return value.text;
+  if (value instanceof Number) value = Number(value);
+  else if (value instanceof String) value = String(value);
+  // A boxed boolean is the one it holds, as JSON.stringify reads it, whatever its valueOf() says.
+  else if (value instanceof Boolean) value = Boolean.prototype.valueOf.call(value);
+  else if (isRawJson(value)) return value.rawJSON;
+  if (typeof value === "number" || typeof value === "bigint") return number(value, at);
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  const o = value as Record<string, unknown>;
+  if (Array.isArray(value)) return `[${Array.from({ length: value.length }, (_, i) => jsonOf(String(i), o[i], `${at}/${i}`, number) ?? "null").join(",")}]`;
+  return `{${Object.keys(o)
+    .flatMap((k) => {
+      const text = jsonOf(k, o[k], `${at}/${k.replace(/~/g, "~0").replace(/\//g, "~1")}`, number);
+      return text === undefined ? [] : [`${JSON.stringify(k)}:${text}`];
+    })
+    .join(",")}}`;
+}
+
+/** A value `JSON.rawJSON()` made, which JSON.stringify writes as its text. */
+function isRawJson(v: unknown): v is { rawJSON: string } {
+  const is = (JSON as { isRawJSON?: (v: unknown) => boolean }).isRawJSON;
+  return typeof is === "function" && is(v);
 }
 
 const POINT = "{ x: number; y: number }";
@@ -309,7 +486,8 @@ export function columnKind(t: EngineType, dialect: Dialect): Kind {
     case "map":
       return dialect === "postgres" && name === "hstore" ? "hstore" : "unknown";
     case "union":
-      if (dialect === "sqlite") return "label" in t && t.label !== undefined ? sqliteDeclaredKind(t.label) : "unknown";
+      // SQLite: what a declared column stores, or a number SQLite computes as an INTEGER or a REAL.
+      if (dialect === "sqlite" && "label" in t && t.label !== undefined) return sqliteDeclaredKind(t.label);
       if (dialect === "postgres" && (name === "inet" || name === "cidr")) return "text";
       return either(t.members.map((m) => columnKind(m, dialect)));
     case "tagged_union":
@@ -1008,7 +1186,7 @@ export function postgresLiteral(t: EngineType, v: unknown, fail: (message: strin
     };
     return write(v);
   }
-  if (t.kind === "json") return JSON.stringify(v);
+  if (t.kind === "json") return writeJson(v, "postgres", fail) as string;
   if (kind === "hstore" && isObject(v)) return hstoreText(v, (message) => fail(message.replace(/^is /, "")));
   if (kind === "vector" && Array.isArray(v) && v.every((n) => typeof n === "number" && Number.isFinite(n))) return vectorText(v);
   if (v instanceof Uint8Array) {
@@ -1411,7 +1589,7 @@ export function coerce(kind: Kind, v: unknown, column: string, delim = ",", post
     case "float":
       if (typeof v === "number") return kind === "int" ? exactInteger(v, column) : v;
       if (typeof v === "bigint") return exactInteger(v, column);
-      if (typeof v === "string" && v !== "" && !Number.isNaN(+v)) return kind === "int" && /^[+-]?\d+$/.test(v) ? exactInteger(BigInt(v), column) : +v;
+      if (typeof v === "string" && v !== "" && (!Number.isNaN(+v) || (kind === "float" && v === "NaN"))) return kind === "int" && /^[+-]?\d+$/.test(v) ? exactInteger(BigInt(v), column) : +v;
       return v;
     case "int8":
       if (typeof v === "bigint" || typeof v === "number" || typeof v === "string") return bigInteger(v, column);

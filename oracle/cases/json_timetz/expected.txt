@@ -1,0 +1,2 @@
+aggregate.sql: one () -> { starts: jsonb timetz(offset)[]? }
+object.sql: many () -> { o: json { id: int4, starts: timetz(offset) } }
