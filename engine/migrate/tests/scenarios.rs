@@ -2472,7 +2472,24 @@ async fn a_lone_statement_cut_off(mut p: P, landed: bool) {
     }
     db.close().await;
     p.output();
-    if landed {
+    if p.d == Dialect::Mysql {
+        // MySQL commits the statement before its row is finished, and a statement may leave nothing in
+        // the schema to say it ran: deploy and the dry run refuse, running nothing, and history push
+        // settles it from the schema where it can.
+        assert_eq!(p.migrate().await, 1);
+        assert_has!(p.output(), r"✗ A deploy was cut off while it ran 20261027110000_index\.sql\n[\s\S]*  If it ran, record it, running nothing:\n    reylo migrate history push\n  If it didn't, run it, then record it:\n    reylo run --file \S*20261027110000_index\.sql\n    reylo migrate history push");
+        assert_eq!(p.dry_run().await, 1);
+        assert_has!(p.output(), r"A deploy was cut off while it ran 20261027110000_index\.sql");
+        assert_eq!(p.history_push().await, 0, "{}", p.peek());
+        let out = p.output();
+        if landed {
+            assert_has!(&out, r"\+ 20261027110000_index\.sql +recorded");
+        } else {
+            assert_has!(&out, r"20261027110000_index\.sql +taken out of the history");
+            assert_eq!(p.migrate().await, 0, "{}", p.peek());
+            assert_has!(p.output(), r"✓ 20261027110000_index\.sql +applied");
+        }
+    } else if landed {
         // Its change is in place, so this database isn't as Reylo's last finished run left it: deploy
         // refuses, a dry run says what happened, and history push records it.
         assert_eq!(p.migrate().await, 1);
@@ -2518,6 +2535,16 @@ async fn a_lone_statement_cut_off_with_no_fingerprint_to_compare(mut p: P) {
     db.exec("update __reylo_migrations set fingerprint = null").await.unwrap();
     db.close().await;
     p.output();
+    if p.d == Dialect::Mysql {
+        // A MySQL deploy refuses before it runs anything, fingerprint or none.
+        assert_eq!(p.migrate().await, 1);
+        assert_has!(p.output(), r"✗ A deploy was cut off while it ran 20261027110000_index\.sql");
+        assert_eq!(p.history_push().await, 0, "{}", p.peek());
+        assert_has!(p.output(), r"\+ 20261027110000_index\.sql +recorded");
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        assert_has!(p.output(), "Up to date");
+        return;
+    }
     // Run again, it fails where it landed, and says how to find out.
     assert_eq!(p.migrate().await, 1);
     assert_has!(p.output(), r"✗ 20261027110000_index\.sql  failed\n[\s\S]*A run before this one was cut off here, so its change may be in place\.\n  See whether it is:\n    reylo migrate deploy --dry-run\n  Record it if it is, running nothing:\n    reylo migrate history push");
@@ -2527,6 +2554,33 @@ async fn a_lone_statement_cut_off_with_no_fingerprint_to_compare(mut p: P) {
     p.output();
     assert_eq!(p.migrate().await, 0, "{}", p.peek());
     assert_has!(p.output(), "Up to date");
+}
+
+/// A truncate leaves MySQL's schema as it was, so after a deploy cut off with its row marked started
+/// nothing says whether it ran, and running it again would empty what the app wrote since: deploy,
+/// the dry run and status refuse to guess, and history push records it as run.
+#[tokio::test(flavor = "current_thread")]
+async fn a_mysql_truncate_cut_off_is_never_run_again_by_itself() {
+    let Some(mut p) = P::new(Dialect::Mysql).await else { return };
+    p.file("20261027100000_t.sql", "create table t (id bigint primary key);");
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    p.file("20261027110000_empty.sql", "truncate table t;");
+    // The cut: the row marked started, whether or not the truncate ran, then rows the app wrote since.
+    p.exec("insert into __reylo_migrations (name, `sql`, applied_at) values ('20261027110000_empty.sql', 'truncate table t;', null)").await;
+    p.exec("insert into t values (10), (11)").await;
+    p.output();
+    assert_eq!(p.migrate().await, 1);
+    assert_has!(p.output(), r"✗ A deploy was cut off while it ran 20261027110000_empty\.sql");
+    assert_eq!(p.rows("select id from t").await.len(), 2, "nothing ran");
+    assert_eq!(p.dry_run().await, 1);
+    assert_has!(p.output(), r"A deploy was cut off while it ran 20261027110000_empty\.sql");
+    assert_eq!(p.status().await, 1);
+    assert_has!(p.output(), r"20261027110000_empty\.sql +cut off before it finished\n +If it ran, record it, running nothing:\n +reylo migrate history push");
+    assert_eq!(p.history_push().await, 0, "{}", p.peek());
+    assert_has!(p.output(), r"\+ 20261027110000_empty\.sql +recorded: [^\n]*may not have run here");
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    assert_has!(p.output(), "Up to date");
+    assert_eq!(p.rows("select id from t").await.len(), 2);
 }
 
 async fn a_shadow_left_by_a_killed_run_is_swept(mut p: P) {

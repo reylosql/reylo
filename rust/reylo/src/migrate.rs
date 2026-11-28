@@ -401,7 +401,7 @@ pub enum State {
     /// It ran, and the build doesn't hold it.
     Missing,
     /// Its run was cut off before it finished: `reylo migrate deploy --dry-run` says whether it
-    /// landed.
+    /// landed. On MySQL, `.run()` refuses until `reylo migrate history push` records it.
     CutOff,
 }
 
