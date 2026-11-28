@@ -5120,7 +5120,7 @@ mod tests {
             "CREATE TABLE __turso_internal_fts_dir_docs_fts (path TEXT NOT NULL, chunk_no INTEGER NOT NULL, bytes BLOB NOT NULL)",
             "CREATE INDEX IF NOT EXISTS __turso_internal_fts_dir_docs_fts_key ON __turso_internal_fts_dir_docs_fts USING backing_btree (path, chunk_no, bytes)",
             "CREATE INDEX docs_fts ON docs USING fts (title, body)",
-            "CREATE TABLE users (id integer PRIMARY KEY, public_id text NOT NULL UNIQUE DEFAULT (uuid4_str()), stamp blob NOT NULL DEFAULT (time_now()))",
+            "CREATE TABLE users (id integer PRIMARY KEY, public_id text NOT NULL UNIQUE DEFAULT (uuid4_str()), stamp blob NOT NULL DEFAULT (time_now()), trace text DEFAULT (uuid7_str(1700000000, 1)))",
         ]
         .map(String::from)
         .to_vec()
@@ -5163,8 +5163,8 @@ mod tests {
                 a
             };
             // A default that calls one of Turso's functions: an insert runs it.
-            let added = a("insert into users default values returning id, public_id");
-            assert_eq!(col(&added, "public_id"), ("text".into(), false));
+            let added = a("insert into users default values returning id, public_id, trace");
+            assert_eq!((col(&added, "public_id"), col(&added, "trace")), (("text".into(), false), ("text".into(), true)));
             let search = a("select id, fts_score(title, body, :q) as score, fts_match(title, body, :q2) as hit, fts_highlight(title, body, '<b>', '</b>', :q3) as a, fts_highlight(title, '<b>', '</b>', 'kiwi') as b, fts_highlight(body, :open, '</b>', 'kiwi') as c from docs where fts_match(title, body, :q4) order by score desc");
             assert_eq!(["score", "hit", "a", "b", "c"].map(|c| col(&search, c)), [("real", false), ("bool", false), ("text", false), ("text", false), ("text", false)].map(|(t, n)| (t.to_string(), n)));
             assert_eq!(["q", "q2", "q3", "q4", "open"].map(|p| param(&search, p)), ["text"; 5].map(String::from));
