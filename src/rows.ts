@@ -138,9 +138,10 @@ function wholeText(t: EngineType & { kind: "array" }, v: readonly unknown[]): st
 function check(type: EngineType, written: string, v: unknown, dialect: Dialect, fail: (message: string) => never): unknown {
   switch (type.kind) {
     case "json":
-      // JSON.stringify throws on a BigInt and skips a function; a JSON member holds JSON.
+      // A JSON member holds JSON: JSON.stringify skips a function. A BigInt goes in as its digits
+      // (src/values.ts, `writeJson`), which also refuses the numbers its database holds none for.
       try {
-        if (JSON.stringify(v) === undefined) fail(`is ${written}, which holds a JSON value; got ${describe(v)}.`);
+        if (typeof v !== "bigint" && JSON.stringify(v, (_key, x: unknown) => (typeof x === "bigint" ? 0 : x)) === undefined) fail(`is ${written}, which holds a JSON value; got ${describe(v)}.`);
       } catch (e) {
         fail(`is ${written}, which holds a JSON value: ${(e as Error).message}.`);
       }

@@ -1,5 +1,10 @@
+checked_insert.sql: none (id: int64, a: int64, b: int64, c: int64, d: int64, e: int64, f: int64?, g: int64?, h: int64?, i: int64?, j: int64?, k: text(UTF-8, ill-formed)) -> {  }
+checked_update.sql: none (a: int64, b: int64, f: int64?, id: int64) -> {  }
 coalesced.sql: at_most_one (nickname: text(UTF-8, ill-formed)?, email: text(UTF-8, ill-formed)?, id: int64) -> { nickname: TEXT(text(UTF-8, ill-formed) | bytes)?, email: TEXT(text(UTF-8, ill-formed) | bytes)? }
 insert_select.sql: many (id: int64, email: text(UTF-8, ill-formed), nickname: text(UTF-8, ill-formed), note: text(UTF-8, ill-formed)?) -> { id: INTEGER }
 insert_values.sql: one (id: int64, email: text(UTF-8, ill-formed), nickname: text(UTF-8, ill-formed)) -> { id: INTEGER }
+labels_insert.sql: none (id: int64, p: int64, q: int64, r: int64, s: int64?, t: int64, u: int64?) -> {  }
+labels_nullable_cast.sql: none (id: int64, r: int64?) -> {  } !! reylo20: The parameter :r is cast to nullable(…), but it is written to labels.r, which refuses null: cast it to its type alone.
+labels_update.sql: none (p: int64, r: int64, s: int64?, id: int64) -> {  }
 update_set.sql: at_most_one (email: text(UTF-8, ill-formed), nickname: text(UTF-8, ill-formed), id: int64) -> { email: TEXT(text(UTF-8, ill-formed) | bytes), nickname: TEXT(text(UTF-8, ill-formed) | bytes) }
 upsert.sql: one (id: int64, email: text(UTF-8, ill-formed), nickname: text(UTF-8, ill-formed), note: text(UTF-8, ill-formed)?) -> { id: INTEGER }

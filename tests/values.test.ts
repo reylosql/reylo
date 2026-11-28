@@ -909,9 +909,9 @@ test("a value goes into a document as JSON.stringify writes it, but for NaN, the
   // A boxed number is the number it holds.
   assert.equal(writeJson({ a: new Number(-0) }, "postgres", fail), `{"a":-0}`);
   assert.throws(() => writeJson({ a: new Number(Infinity) }, "mysql", fail), /^TypeError: at \/a is Infinity/);
-  // A value written as it is, and what JSON.stringify throws on, a BigInt.
+  // A value written as it is, and a BigInt, which JSON.stringify throws on, as its digits.
   assert.equal(writeJson({ big: new RawJson("12345678901234567890") }, "sqlite", fail), `{"big":12345678901234567890}`);
-  assert.throws(() => writeJson({ z: -0, big: 1n }, "postgres", fail), /BigInt/);
+  assert.equal(writeJson({ z: -0, big: 1n }, "postgres", fail), `{"z":-0,"big":1}`);
 });
 
 test("a row converts each name's last column by that column's own mask, by position beside the columns", () => {
@@ -1015,4 +1015,59 @@ test("a Postgres money is its exact decimal text, read from the C locale's, and 
   }
   assert.deepEqual(textDecoder("money[]")('{"$1.50",NULL,"-$1,000.00"}'), ["1.50", null, "-1000.00"]);
   for (const text of ["1.234,56 €", "€1,234.56", "1234.56", "$1,23.45", "($1.50)"]) assert.throws(() => money(text), (e: Error) => e instanceof DecodeError && e.message.startsWith(`The database wrote a money value as ${JSON.stringify(text)}, which is not the C locale's form ($1,234.56)`), text);
+});
+
+test("a JSON parameter's BigInt is written as its digits, whatever toJSON an app gives BigInt, and held to the integers MySQL and SQLite read from JSON", () => {
+  const fail = (message: string): never => {
+    throw new TypeError(message);
+  };
+  assert.equal(writeJson({ a: [9007199254740993n, 1], d: new Date(0) }, "postgres", fail), '{"a":[9007199254740993,1],"d":"1970-01-01T00:00:00.000Z"}');
+  // Beside the numbers JSON.stringify writes otherwise, in the same one pass.
+  assert.equal(writeJson({ id: 1n, z: -0 }, "mysql", fail), '{"id":1,"z":-0e0}');
+  // A value whose own toJSON() returns a BigInt.
+  assert.equal(writeJson({ id: { toJSON: () => 9007199254740993n } }, "postgres", fail), '{"id":9007199254740993}');
+  // An app's BigInt.prototype.toJSON, which writes text or a rounded number, never reaches one.
+  const proto = BigInt.prototype as unknown as { toJSON?: () => unknown };
+  for (const polyfill of [function (this: bigint) { return this.toString(); }, function (this: bigint) { return Number(this); }]) {
+    proto.toJSON = polyfill;
+    try {
+      assert.equal(writeJson({ n: 9007199254740993n, xs: [9007199254740993n], z: -0 }, "sqlite", fail), '{"n":9007199254740993,"xs":[9007199254740993],"z":-0e0}');
+      // A getter's BigInt too, read once and held to the range.
+      let gets = 0;
+      const got = Object.defineProperty({}, "n", { enumerable: true, get: () => (gets++, 9007199254740993n) });
+      assert.equal(writeJson(got, "postgres", fail), '{"n":9007199254740993}');
+      assert.equal(gets, 1);
+      assert.throws(() => writeJson(Object.defineProperty({}, "n", { enumerable: true, get: () => 2n ** 63n }), "sqlite", fail), /the BigInt 9223372036854775808, which SQLite reads/);
+      // Written by the spec's walk, a boxed boolean is the one it holds and a toJSON() is applied as it is.
+      const boxed = Object.assign(new Boolean(true), { valueOf: () => false });
+      assert.equal(writeJson({ b: boxed, c: { toJSON: Object.assign((key: string) => key, { call: null }) } }, "postgres", fail), '{"b":true,"c":"c"}');
+    } finally {
+      delete proto.toJSON;
+    }
+  }
+  assert.equal(writeJson([2n ** 64n - 1n], "mysql", fail), "[18446744073709551615]");
+  assert.throws(() => writeJson([2n ** 64n], "mysql", fail), /^TypeError: at \/0 is the BigInt 18446744073709551616, which MySQL reads from JSON as a float: its 64-bit integers run from -9223372036854775808 to 18446744073709551615\.$/);
+  assert.throws(() => writeJson({ n: 2n ** 63n }, "sqlite", fail), /^TypeError: at \/n is the BigInt 9223372036854775808, which SQLite reads from JSON as a float/);
+  assert.equal(writeJson([2n ** 64n], "postgres", fail), "[18446744073709551616]");
+  // A hook given by a getter is found without running it, and still never reaches a BigInt.
+  Object.defineProperty(BigInt.prototype, "toJSON", { configurable: true, get(this: unknown) { return typeof this === "bigint" ? function (this: bigint) { return Number(this); } : undefined; } });
+  try {
+    assert.equal(writeJson({ n: 9007199254740993n }, "sqlite", fail), '{"n":9007199254740993}');
+    assert.equal(writeJson({ n: 1 }, "sqlite", fail), '{"n":1}');
+  } finally {
+    delete (BigInt.prototype as unknown as { toJSON?: unknown }).toJSON;
+  }
+  // So is one BigInt inherits.
+  Object.defineProperty(Object.prototype, "toJSON", { configurable: true, writable: true, value: function (this: unknown) { return typeof this === "bigint" ? Number(this) : this; } });
+  try {
+    assert.equal(writeJson({ n: 9007199254740993n }, "sqlite", fail), '{"n":9007199254740993}');
+    assert.throws(() => writeJson({ n: 2n ** 63n }, "sqlite", fail), /the BigInt 9223372036854775808, which SQLite reads/);
+  } finally {
+    delete (Object.prototype as unknown as { toJSON?: unknown }).toJSON;
+  }
+  // A getter runs once.
+  let reads = 0;
+  const once = Object.defineProperty({}, "n", { enumerable: true, get: () => (++reads === 1 ? 9007199254740993n : 1n) });
+  assert.equal(writeJson(once, "postgres", fail), '{"n":9007199254740993}');
+  assert.equal(reads, 1);
 });

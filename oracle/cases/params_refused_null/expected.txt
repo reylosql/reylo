@@ -1,6 +1,11 @@
+checked_insert.sql: none (id: int4, a: int4, b: int4, c: bool, d: int4, e: numeric, f: int4?, g: bool?, h: int4(1..)?, i: int4?, j: int4?, k: text(¬NUL)?) -> {  }
+checked_update.sql: none (a: int4, b: int4, f: int4?, id: int4) -> {  }
 coalesced.sql: at_most_one (nickname: text(¬NUL)?, email: text(¬NUL)?, id: int4) -> { nickname: text(¬NUL)?, email: text(¬NUL)? }
 insert_select.sql: one (id: int4, email: public.required_email(¬NUL), nickname: text(¬NUL), note: text(¬NUL)?, tag: public.present_text(¬NUL)) -> { id: int4 }
 insert_values.sql: one (id: int4, email: public.required_email(¬NUL), nickname: text(¬NUL), tag: public.present_text(¬NUL)) -> { id: int4 }
+labels_insert.sql: none (id: int4, p: int4, q: int4, r: int4, s: int4?, t: int4, u: int4?) -> {  }
+labels_nullable_cast.sql: none (id: int4, r: int4?) -> {  } !! reylo20: The parameter :r is cast to nullable(…), but it is written to labels.r, which refuses null: cast it to its type alone.
+labels_update.sql: none (p: int4, r: int4, s: int4?, id: int4) -> {  }
 row_value.sql: at_most_one (email: public.required_email(¬NUL), nickname: text(¬NUL), id: int4) -> { id: int4 }
 update_set.sql: at_most_one (email: public.required_email(¬NUL), nickname: text(¬NUL), tag: public.present_text(¬NUL), note: text(¬NUL), id: int4) -> { email: text(¬NUL), nickname: text(¬NUL) }
 upsert.sql: one (id: int4, email: text(¬NUL), nickname: text(¬NUL), tag: text(¬NUL), note: text(¬NUL)?) -> { id: int4 }

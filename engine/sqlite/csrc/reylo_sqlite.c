@@ -132,6 +132,7 @@ static const char *opName(int op){
     case TK_ISNULL: return "isnull"; case TK_NOTNULL: return "notnull"; case TK_SELECT: return "select"; case TK_EXISTS: return "exists";
     case TK_CASE: return "case"; case TK_COLLATE: return "collate"; case TK_VECTOR: return "vector"; case TK_SELECT_COLUMN: return "select_column";
     case TK_IF_NULL_ROW: return "if_null_row"; case TK_REGISTER: return "register"; case TK_ID: return "id"; case TK_ROW: return "row";
+    case TK_TRUTH: return "truth";
     default: return "other";
   }
 }
@@ -320,6 +321,13 @@ static void expr(sqlite3_str *s, Expr *p, Select *pSel){
     case TK_SELECT_COLUMN:
       kv_int(s, "index", p->iColumn);
       key(s, "left"); expr(s, p->pLeft, pSel); sqlite3_str_appendchar(s, 1, ',');
+      break;
+    /* `x IS TRUE`, `x IS NOT FALSE` and the like, which resolving turns an IS whose right side is
+    ** TRUE or FALSE into: a test of the truth of `x`, not its equality with 1 or 0. */
+    case TK_TRUTH:
+      kv_bool(s, "isNot", p->op2==TK_ISNOT);
+      key(s, "left"); expr(s, p->pLeft, pSel); sqlite3_str_appendchar(s, 1, ',');
+      key(s, "right"); expr(s, p->pRight, pSel); sqlite3_str_appendchar(s, 1, ',');
       break;
     default:
       if( !ExprHasProperty(p, EP_TokenOnly) ){
@@ -545,30 +553,6 @@ static void returningHook(Parse *pParse, Table *pTab, ExprList *pNew){
 
 /* ---- tables: columns and unique keys ------------------------------------------------------- */
 
-/* Whether a CHECK refuses NULL in column iCol: one of its conjuncts tests the column IS NOT NULL,
-** which NULL makes false where any other test of it would be NULL, and so pass. The CHECK's names
-** are resolved (TK_COLUMN) once the table is built, and still names (TK_ID) before. */
-static int refusesNull(Expr *p, Table *pTab, int iCol){
-  Expr *x;
-  if( p==0 ) return 0;
-  if( p->op==TK_AND ) return refusesNull(p->pLeft, pTab, iCol) || refusesNull(p->pRight, pTab, iCol);
-  if( p->op!=TK_NOTNULL ) return 0;
-  for(x=p->pLeft; x && x->op==TK_COLLATE; x=x->pLeft){}
-  if( x==0 ) return 0;
-  if( x->op==TK_COLUMN ) return x->iColumn==iCol;
-  if( x->op==TK_ID ) return sqlite3StrICmp(x->u.zToken, pTab->aCol[iCol].zCnName)==0;
-  return 0;
-}
-static int checkedNotNull(Table *pTab, int iCol){
-#ifndef SQLITE_OMIT_CHECK
-  int k;
-  for(k=0; pTab->pCheck && k<pTab->pCheck->nExpr; k++){
-    if( refusesNull(pTab->pCheck->a[k].pExpr, pTab, iCol) ) return 1;
-  }
-#endif
-  return 0;
-}
-
 /* Whether the table declares a constraint ON CONFLICT IGNORE (a NOT NULL, a UNIQUE or the PRIMARY
 ** KEY): a write that breaks it skips the row, unless the statement's own OR clause says otherwise. */
 static int ignoresConflict(Table *pTab){
@@ -623,6 +607,15 @@ static void tables(sqlite3_str *s){
     kv_bool(s, "ignores", ignoresConflict(pTab));
     kv_bool(s, "ignoresNull", ignoresNull(pTab));
     kv_bool(s, "replaces", replacesConflict(pTab));
+    /* The table's CHECKs, which refuse NULL in a column where they are false wherever it is NULL.
+    ** Their names are resolved (TK_COLUMN) once the table is built, and still names (TK_ID) before. */
+    key(s, "checks");
+#ifndef SQLITE_OMIT_CHECK
+    exprList(s, pTab->pCheck, 0);
+#else
+    sqlite3_str_appendall(s, "[]");
+#endif
+    sqlite3_str_appendchar(s, 1, ',');
     key(s, "columns"); sqlite3_str_appendchar(s, 1, '[');
     for(i=0; i<pTab->nCol; i++){
       Column *pCol = &pTab->aCol[i];
@@ -631,10 +624,11 @@ static void tables(sqlite3_str *s){
       kv_str(s, "declared", sqlite3ColumnType(pCol, ""));
       kv_str(s, "affinity", affName(pCol->affinity));
       kv_bool(s, "notNull", pCol->notNull!=0 && !IsVirtual(pTab));
-      kv_bool(s, "checkedNotNull", checkedNotNull(pTab, i));
       /* A generated column keeps its expression where a default would be (iDflt), and is written
-      ** by no INSERT. */
+      ** by no INSERT; the expression, its names resolved once the table is built, is what a NOT
+      ** NULL on it refuses NULL in its other columns by. */
       kv_bool(s, "generated", (pCol->colFlags & COLFLAG_GENERATED)!=0);
+      key(s, "expression"); expr(s, (pCol->colFlags & COLFLAG_GENERATED) ? sqlite3ColumnExpr(pTab, pCol) : 0, 0); sqlite3_str_appendchar(s, 1, ',');
       kv_bool(s, "hasDefault", hasDefault(pTab, pCol));
       closeObj(s); sqlite3_str_appendchar(s, 1, ',');
     }
@@ -1142,7 +1136,7 @@ static char *missingSchema(const char *zSql, const char *zMsg, int *piOfst, int 
 /* The version of the tree's format, reylo_sqlite_analyze's first member: TREE_VERSION in
 ** src/sqlite_tree.rs, which refuses a tree of another. A change to what either side reads or writes
 ** moves both. */
-#define REYLO_TREE_VERSION 3
+#define REYLO_TREE_VERSION 4
 
 /*
 ** Analyzes one statement against the schema DDL, with the host's scalar functions (azFn[i] taking

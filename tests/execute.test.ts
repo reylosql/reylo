@@ -171,6 +171,12 @@ test("a JSON parameter's NaN, infinities and -0 go in as each database's JSON re
   const { rawJSON } = JSON as unknown as { rawJSON(text: string): never };
   await execute(bun, pq, { doc: { id: rawJSON("9007199254740993"), z: -0 }, docs: null });
   assert.deepEqual([...seen], [[`{"id":9007199254740993,"z":-0}`, null]]);
+  // So does a BigInt, and each value's toJSON() runs once, by Reylo's writer.
+  seen.length = 0;
+  let calls = 0;
+  await execute(bun, pq, { doc: { id: 9007199254740993n, at: { toJSON: () => (++calls === 1 ? "first" : "again") } }, docs: null });
+  assert.deepEqual([...seen], [[`{"id":9007199254740993,"at":"first"}`, null]]);
+  assert.equal(calls, 1);
   // MySQL and SQLite read -0 from `-0e0`; SQLite an infinity from a number past a double's range.
   const mq: QueryModule<"mysql"> = { dialect: "mysql", sql: "select cast(:doc as json)", params: ["doc"], inputs: { doc: json } };
   const lq: QueryModule<"sqlite"> = { dialect: "sqlite", sql: "select json(:doc)", params: ["doc"], inputs: { doc: json } };
@@ -185,7 +191,10 @@ test("a JSON parameter's NaN, infinities and -0 go in as each database's JSON re
   await assert.rejects(Promise.resolve().then(() => execute(bun, pq, { doc: null, docs: [{ n: -Infinity }] })), /^TypeError: Parameter "docs" at \[0\]\/n is -Infinity, which JSON holds no number for/);
   await assert.rejects(Promise.resolve().then(() => execute(mysql2, mq, { doc: { a: [Infinity] } })), /^TypeError: Parameter "doc" at \/a\/0 is Infinity, which MySQL holds no value for: write null or a string in its place\.$/);
   await assert.rejects(Promise.resolve().then(() => execute(libsql, lq, { doc: { nan: NaN } })), /^TypeError: Parameter "doc" at \/nan is NaN, which SQLite holds no value for/);
-  await assert.rejects(Promise.resolve().then(() => execute(pgPool(async () => ({ rows: [] })), pq, { doc: null, docs: [{ n: 1n }] })), /BigInt/);
+  // A BigInt in an element goes in as its digits.
+  let bound: unknown[] = [];
+  await execute(pgPool(async (_text, values) => ((bound = values), { rows: [] })), pq, { doc: null, docs: [{ n: 9007199254740993n }] });
+  assert.match(String(bound[1]), /\{\\"n\\":9007199254740993\}/);
   assert.equal(seen.length, 2);
 });
 

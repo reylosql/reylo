@@ -729,7 +729,7 @@ fn render_type(t: &Value, in_json: bool, dialect: &str, codecs: &Value) -> Strin
             }
             return match t.get("schema") {
                 None => JSON_TYPE.into(),
-                Some(_) => schema_type(&schema_of(t), false),
+                Some(_) => schema_type(&schema_of(t), false, false),
             };
         }
         "tagged_union" if !in_json => {
@@ -780,15 +780,16 @@ fn schema_of(t: &Value) -> Value {
     Value::Object(keywords)
 }
 
-/// The TypeScript type of a JSON value the engine's canonical JSON Schema describes.
-fn schema_type(schema: &Value, beside_objects: bool) -> String {
+/// The TypeScript type of a JSON value the engine's canonical JSON Schema describes; as a
+/// parameter's (`input`), an integer takes a BigInt too, which `.run()` writes as its digits.
+fn schema_type(schema: &Value, beside_objects: bool, input: bool) -> String {
     if schema == &Value::Bool(false) {
         return "never".into();
     }
     let Some(m) = schema.as_object() else { return JSON_TYPE.into() };
     if let Some(any_of) = m.get("anyOf").and_then(Value::as_array) {
         let shared = beside_objects || object_alternatives(schema) > 1;
-        return union(any_of.iter().map(|s| schema_type(s, shared)).collect());
+        return union(any_of.iter().map(|s| schema_type(s, shared, input)).collect());
     }
     if let Some(values) = m.get("enum").and_then(Value::as_array) {
         return union(values.iter().map(literal_type).collect());
@@ -796,11 +797,13 @@ fn schema_type(schema: &Value, beside_objects: bool) -> String {
     if m.contains_key("not") {
         return "never".into();
     }
-    let kinds = kinds_of(m);
+    // A parameter's integer, `number | bigint`, holds every number it takes.
+    let all = kinds_of(m);
+    let kinds: Vec<&String> = all.iter().filter(|k| !(input && k.as_str() == "number" && all.iter().any(|x| x == "integer"))).collect();
     if kinds.is_empty() {
         return JSON_TYPE.into();
     }
-    union(kinds.iter().map(|k| schema_kind_type(k, m, beside_objects)).collect())
+    union(kinds.iter().map(|k| schema_kind_type(k, m, beside_objects, input)).collect())
 }
 
 fn kinds_of(m: &Map<String, Value>) -> Vec<String> {
@@ -822,15 +825,16 @@ fn object_alternatives(schema: &Value) -> usize {
     usize::from(kinds_of(m).iter().any(|k| k == "object"))
 }
 
-fn schema_kind_type(kind: &str, m: &Map<String, Value>, beside_objects: bool) -> String {
+fn schema_kind_type(kind: &str, m: &Map<String, Value>, beside_objects: bool, input: bool) -> String {
     match kind {
         "string" => "string".into(),
-        "integer" | "number" => "number".into(),
+        "integer" => if input { "number | bigint" } else { "number" }.into(),
+        "number" => "number".into(),
         "boolean" => "boolean".into(),
         "null" => "null".into(),
         "array" => {
-            let prefix: Vec<String> = m.get("prefixItems").and_then(Value::as_array).map(|p| p.iter().map(|s| schema_type(s, false)).collect()).unwrap_or_default();
-            let rest = m.get("items").map_or_else(|| JSON_TYPE.to_string(), |s| schema_type(s, false));
+            let prefix: Vec<String> = m.get("prefixItems").and_then(Value::as_array).map(|p| p.iter().map(|s| schema_type(s, false, input)).collect()).unwrap_or_default();
+            let rest = m.get("items").map_or_else(|| JSON_TYPE.to_string(), |s| schema_type(s, false, input));
             if prefix.is_empty() {
                 return if rest == "never" { "[]".into() } else { format!("{}[]", grouped(&rest)) };
             }
@@ -845,16 +849,17 @@ fn schema_kind_type(kind: &str, m: &Map<String, Value>, beside_objects: bool) ->
             let empty = Map::new();
             let properties = m.get("properties").and_then(Value::as_object).unwrap_or(&empty);
             let required = m.get("required").and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default();
-            let mut fields: Vec<String> = js_entries(properties).into_iter().map(|(key, value)| format!("{}{}: {}", ident(key), if required.iter().any(|r| r.as_str() == Some(key)) { "" } else { "?" }, schema_type(value, false))).collect();
+            let mut fields: Vec<String> = js_entries(properties).into_iter().map(|(key, value)| format!("{}{}: {}", ident(key), if required.iter().any(|r| r.as_str() == Some(key)) { "" } else { "?" }, schema_type(value, false, input))).collect();
             let additional = m.get("additionalProperties");
             let rest = match additional {
                 None | Some(Value::Bool(false)) => "never".to_string(),
-                Some(s) => schema_type(s, false),
+                Some(s) => schema_type(s, false, input),
             };
             let open = additional.is_none() || rest == JSON_TYPE;
             let signature = if fields.is_empty() { rest != "never" } else { (rest != "never" && rest != JSON_TYPE) || (open && beside_objects) };
             if signature {
-                let of = if fields.is_empty() { rest.clone() } else { format!("{JSON_TYPE} | undefined") };
+                // A parameter's named field may hold a BigInt, which `Json` doesn't, so a signature beside one is `unknown`.
+                let of = if fields.is_empty() { rest.clone() } else if input && fields.iter().any(|f| f.contains("bigint")) { "unknown".to_string() } else { format!("{JSON_TYPE} | undefined") };
                 fields.push(format!("[key: string]: {of}"));
             }
             if !fields.is_empty() {
@@ -1026,7 +1031,7 @@ fn render_param_type(t: &Value, dialect: &str, in_row: bool, members: Option<&Va
     if self::kind(t) == "json" {
         return match t.get("schema") {
             None => JSON_INPUT_TYPE.into(),
-            Some(_) => schema_type(&schema_of(t), false),
+            Some(_) => schema_type(&schema_of(t), false, true),
         };
     }
     if members.is_some() {
@@ -1721,12 +1726,15 @@ mod tests {
     #[test]
     fn a_json_schema_reads_as_its_type() {
         let schema = json!({ "type": "object", "properties": { "a": { "type": "string" }, "b": { "type": ["integer", "null"] } }, "required": ["a"], "additionalProperties": false });
-        assert_eq!(schema_type(&schema, false), "{ a: string; b?: number | null }");
-        assert_eq!(schema_type(&json!({ "enum": ["x", 1, 1.5, true, null] }), false), r#""x" | 1 | 1.5 | true | null"#);
-        assert_eq!(schema_type(&json!({ "type": "object" }), false), "Record<string, Json>");
+        assert_eq!(schema_type(&schema, false, false), "{ a: string; b?: number | null }");
+        assert_eq!(schema_type(&json!({ "enum": ["x", 1, 1.5, true, null] }), false, false), r#""x" | 1 | 1.5 | true | null"#);
+        assert_eq!(schema_type(&json!({ "type": "object" }), false, false), "Record<string, Json>");
         // An array index comes first, as JavaScript orders an object's keys.
         let keyed = json!({ "type": "object", "properties": { "name": { "type": "string" }, "10": { "type": "null" }, "2": { "type": "boolean" }, "01": { "type": "null" } }, "required": ["name"], "additionalProperties": false });
-        assert_eq!(schema_type(&keyed, false), r#"{ "2"?: boolean; "10"?: null; name: string; "01"?: null }"#);
+        assert_eq!(schema_type(&keyed, false, false), r#"{ "2"?: boolean; "10"?: null; name: string; "01"?: null }"#);
+        // A parameter's integer takes a BigInt, and holds the numbers beside it.
+        assert_eq!(schema_type(&json!({ "type": "array", "items": { "type": ["integer", "number", "null"] } }), false, true), "(number | bigint | null)[]");
+        assert_eq!(schema_type(&json!({ "type": "integer" }), false, false), "number");
         assert_eq!(literal_type(&json!({ "b": 1, "1": 2 })), r#"{ "1": 2; b: 1 }"#);
     }
 }

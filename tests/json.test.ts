@@ -275,6 +275,74 @@ test("MySQL: a JSON parameter keeps -0, which MySQL's JSON reads from -0e0, and 
   }
 });
 
+test("Postgres: a typed JSON parameter's integer takes a BigInt, written exactly, and JSON the statement builds refuses an integer JSON.parse would round, on every driver", { skip: pgLive }, async () => {
+  const own = await postgresDatabase("reylo_json_integers", "create table rounds (id int primary key, amount bigint not null)");
+  const root = project(own.url, "pg");
+  const insert = `insert into rounds (id, amount)
+select r.id, r.amount from jsonb_to_recordset(:rounds::jsonb('{
+  "type": "array",
+  "items": { "type": "object", "properties": { "id": { "type": "integer" }, "amount": { "type": "integer" } }, "required": ["id", "amount"] }
+}')) as r(id int, amount bigint)
+returning id, amount\n`;
+  const nested = `select json_agg(json_build_object('id', id, 'amount', amount) order by id) as rounds, jsonb_build_object('total', sum(amount)::bigint, 'n', count(*)) as summary from rounds where id <= :upto::int\n`;
+  const pg = driver("pg");
+  const client = new pg.Client({ connectionString: own.url });
+  await client.connect();
+  try {
+    const declared = await declarations(root, { "insert.sql": insert, "nested.sql": nested });
+    assert.ok(types(declared["insert.sql"]!).includes("export type Params = { rounds: { id: number | bigint; amount: number | bigint }[] };"));
+    assert.deepEqual(types(declared["nested.sql"]!).slice(-1), ["export type Row = { rounds: { id: number; amount: number }[] | null; summary: { total: number | null; n: number } };"]);
+    await closeSessions();
+    const write = await built(root, "insert", insert);
+    const read = await built(root, "nested", nested);
+    for (const [i, db] of [own.sql, client].entries()) {
+      const id = i * 10;
+      assert.deepEqual(((await write.run(db, { rounds: [{ id: id + 1, amount: 5 }, { id: id + 2, amount: 9007199254740993n }] })) as object[]).map((r) => ({ ...r })), [{ id: id + 1, amount: 5n }, { id: id + 2, amount: 9007199254740993n }]);
+      await assert.rejects(write.run(db, { rounds: [{ id: id + 3, amount: 9007199254740995 }] }), /Parameter "rounds" at \/0\/amount must be integer, and 9007199254740996 is past 2\^53 - 1/);
+    }
+    for (const db of [own.sql, client]) {
+      assert.deepEqual({ ...((await read.run(db, { upto: 1 })) as object) }, { rounds: [{ id: 1, amount: 5 }], summary: { total: 5, n: 1 } });
+      await assert.rejects(read.run(db, { upto: 2 }), /Column "rounds" holds, inside its JSON at \/1\/amount, the integer 9007199254740992, which is past 2\^53 - 1/);
+    }
+  } finally {
+    await client.end();
+    await closeSessions();
+    await own.drop();
+  }
+});
+
+test("MySQL: a typed JSON parameter's integer takes a BigInt, written exactly, and JSON the statement builds refuses an integer JSON.parse would round, on mysql2 and mariadb", { skip: mysqlLive }, async () => {
+  const own = await mysqlDatabase("reylo_json_integers", "create table rounds (id int primary key, amount bigint not null)");
+  const root = project(own.url, "mysql2");
+  const u = new URL(own.url);
+  const mariadb = await driver("mariadb").createConnection({ host: u.hostname, port: Number(u.port), user: decodeURIComponent(u.username) || "root", password: decodeURIComponent(u.password), database: u.pathname.slice(1) });
+  const insert = `insert into rounds (id, amount)
+select r.id, r.amount from json_table(:rounds::json('{
+  "type": "array",
+  "items": { "type": "object", "properties": { "id": { "type": "integer" }, "amount": { "type": "integer" } }, "required": ["id", "amount"] }
+}'), '$[*]' columns (id int path '$.id', amount bigint path '$.amount')) as r\n`;
+  const nested = `select (select json_arrayagg(json_object('id', id, 'amount', amount)) from rounds where id <= :upto) as rounds\n`;
+  try {
+    const write = await built(root, "insert", insert);
+    const read = await built(root, "nested", nested);
+    for (const [i, db] of [own.db, mariadb].entries()) {
+      const id = i * 10;
+      await write.run(db, { rounds: [{ id: id + 1, amount: 5 }, { id: id + 2, amount: 9007199254740993n }] });
+      await assert.rejects(write.run(db, { rounds: [{ id: id + 3, amount: 9007199254740995 }] }), /Parameter "rounds" at \/0\/amount must be integer, and 9007199254740996 is past 2\^53 - 1/);
+      await assert.rejects(write.run(db, { rounds: [{ id: id + 3, amount: 2n ** 64n }] }), /the BigInt 18446744073709551616, which MySQL reads from JSON as a float/);
+    }
+    assert.deepEqual(await own.rows("select id, cast(amount as char) as amount from rounds order by id"), [{ id: 1, amount: "5" }, { id: 2, amount: "9007199254740993" }, { id: 11, amount: "5" }, { id: 12, amount: "9007199254740993" }]);
+    for (const db of [own.db, mariadb]) {
+      assert.deepEqual({ ...((await read.run(db, { upto: 1 })) as object) }, { rounds: [{ id: 1, amount: 5 }] });
+      await assert.rejects(read.run(db, { upto: 2 }), /Column "rounds" holds, inside its JSON at \/1\/amount, the integer 9007199254740992, which is past 2\^53 - 1/);
+    }
+  } finally {
+    await mariadb.end();
+    await closeSessions();
+    await own.drop();
+  }
+});
+
 test("MySQL: a BIT inside JSON is the text MySQL writes of its bytes at any width, on mysql2 and mariadb", { skip: mysqlLive }, async () => {
   const own = await mysqlDatabase("reylo_json_bit", "create table flags (id int primary key, b bit(1), b8 bit(8), b16 bit(16)); insert into flags values (1, b'1', 5, 258), (2, b'0', 0, 0), (3, null, null, null)");
   const root = project(own.url, "mysql2");

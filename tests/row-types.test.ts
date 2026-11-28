@@ -30,6 +30,12 @@ function literal(v: unknown): string {
   throw new Error(`no literal for ${String(v)}`);
 }
 
+/** A run's refusal of a 64-bit integer inside a document, which JSON.parse would round. */
+const refusesRounded = (message: string) => /holds, inside its JSON.*, the integer -?\d+, which is (past|below)/.test(message);
+const SAFE = BigInt(Number.MAX_SAFE_INTEGER);
+/** Whether a case of 64-bit integers holds one past 2^53 - 1, which every document of it must refuse. */
+const unsafe = ([name, , values]: Case) => /int8|bigint|Int64|UInt64/i.test(name) && values.some((v) => (v.match(/-?\d{16,}/g) ?? []).some((d) => BigInt(d) > SAFE || BigInt(d) < -SAFE));
+
 /** A project at a new directory on `url`, with `drivers` from lab/drivers installed, whose `main.ts` the type check reads. */
 function project(url: string, drivers: string[] = []): string {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "reylo-row-types-")));
@@ -70,8 +76,11 @@ async function check(root: string, cases: readonly Case[], statements: (table: s
   const problems: string[] = [];
   const typed: { file: string; about: string; rows: unknown }[] = [];
   for (const [i, c] of cases.entries()) {
-    for (const [j, sql] of statements(`t${i}`, c).entries()) {
+    // A case a document refuses also has its column read on its own, which holds every value.
+    const refused = unsafe(c);
+    for (const [j, sql] of [...statements(`t${i}`, c), ...(refused ? [`select c from t${i}`] : [])].entries()) {
       const about = `${c[0]}: ${sql}`;
+      const document = refused && /json/i.test(sql);
       let q: Built;
       try {
         q = await built(root, `q${i}_${j}`, `${sql}\n`);
@@ -79,11 +88,20 @@ async function check(root: string, cases: readonly Case[], statements: (table: s
         problems.push(`${about}: the build throws ${(e as Error).message.split("\n")[0]}`);
         continue;
       }
+      let rows: unknown;
       try {
-        typed.push({ file: `q${i}_${j}`, about, rows: await run(q) });
+        rows = await run(q);
       } catch (e) {
-        problems.push(`${about}: the run throws ${(e as Error).message.split("\n")[0]}`);
+        const message = (e as Error).message.split("\n")[0]!;
+        // An edge of a 64-bit integer inside a document is refused rather than returned rounded.
+        if (!(document && refusesRounded(message))) problems.push(`${about}: the run throws ${message}`);
+        continue;
       }
+      if (document) {
+        problems.push(`${about}: a document holding a 64-bit integer past 2^53 - 1 came back, which JSON.parse rounds: ${literal(rows)}`);
+        continue;
+      }
+      typed.push({ file: `q${i}_${j}`, about, rows });
     }
   }
   // Each statement's result as a value of the type its module declares for it.

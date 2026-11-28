@@ -582,6 +582,36 @@ select value ->> '$.title', value ->> '$.done' from json_each(:todos::json('{
   }
 });
 
+test("SQLite: a typed JSON parameter's integer takes a BigInt, written exactly, and JSON the statement builds refuses an integer JSON.parse would round", async () => {
+  const root = project();
+  const db = new DatabaseSync(join(root, "app.db"));
+  db.exec("create table rounds (id integer primary key, lead boolean, amount bigint not null)");
+  const url = "file:./app.db";
+  const insert = `insert into rounds (lead, amount)
+select value ->> '$.lead', value ->> '$.amount' from json_each(:rounds::json('{
+  "type": "array",
+  "items": { "type": "object", "properties": { "lead": { "type": "boolean" }, "amount": { "type": "integer" } }, "required": ["amount"] }
+}')) returning id, amount`;
+  try {
+    const q = await built(root, url, "insert_rounds", insert);
+    assert.deepEqual(plain(await q.run(db, { rounds: [{ lead: true, amount: 9007199254740993n }, { amount: -9223372036854775808n }, { amount: 5 }] })), [{ id: 1, amount: 9007199254740993n }, { id: 2, amount: -9223372036854775808n }, { id: 3, amount: 5n }]);
+    // A number past 2^53 - 1 may already be another one: 9007199254740995 is 9007199254740996 by the time `.run()` sees it.
+    await assert.rejects(q.run(db, { rounds: [{ amount: 9007199254740995 }] }), /Parameter "rounds" at \/0\/amount must be integer, and 9007199254740996 is past 2\^53 - 1, where a number stops being exact, so pass it as a BigInt/);
+    assert.deepEqual(db.prepare("select cast(amount as text) as amount from rounds order by id").all().map((r) => r.amount), ["9007199254740993", "-9223372036854775808", "5"]);
+    // Inside JSON the statement builds, a 64-bit integer within 2^53 - 1 is a number, and one past it is refused rather than rounded.
+    const nested = await built(root, url, "nested_rounds", "select json_group_array(json_object('id', id, 'amount', amount)) as rounds from rounds where id in (select value from json_each(:ids::json('{\"type\": \"array\", \"items\": {\"type\": \"integer\"}}')))");
+    assert.deepEqual({ ...(await nested.run(db, { ids: [3] })) }, { rounds: [{ id: 3, amount: 5 }] });
+    await assert.rejects(nested.run(db, { ids: [3, 1] }), /Column "rounds" holds, inside its JSON at \/0\/amount, the integer 9007199254740992, which is past 2\^53 - 1, where JSON\.parse rounds a number/);
+    assert.throws(() => nested.runSync(db, { ids: [2] }), /inside its JSON at \/0\/amount, the integer -9223372036854775808/);
+    // The same value selected as a column comes back exact.
+    const flat = await built(root, url, "flat_rounds", "select amount from rounds where id = 1");
+    assert.deepEqual({ ...(await flat.run(db)) }, { amount: 9007199254740993n });
+  } finally {
+    db.close();
+    await closeSessions();
+  }
+});
+
 test("SQLite: a JSON member of a column list is checked against its schema, its nested defaults filled", async () => {
   const root = project();
   const db = new DatabaseSync(join(root, "app.db"));

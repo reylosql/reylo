@@ -1,0 +1,8 @@
+insert_child.sql: none (id: int4, x: int4?, y: int4) -> {  }
+insert_mixed.sql: none (region: text(¬NUL), p: int4) -> {  }
+insert_parent.sql: none (id: int4, x: int4, y: int4?) -> {  }
+insert_values.sql: none (region: text(¬NUL), p: int4?, q: int4) -> {  }
+update_beside_insert.sql: none (id: int4, x: int4, y: int4?) -> {  }
+update_only_child.sql: none (x: int4?, y: int4, id: int4) -> {  }
+update_parent.sql: none (x: int4, y: int4, id: int4) -> {  }
+update_set.sql: none (p: int4?, q: int4, region: text(¬NUL)) -> {  }
