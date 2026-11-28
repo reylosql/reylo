@@ -876,12 +876,13 @@ struct Env {
 struct Walk {
     /// Each table of the current schema a FROM item reads, as the statement names it.
     tables: Vec<String>,
-    /// A FROM item names a table by its schema (`db.t`), which `tables` leaves out.
+    /// A FROM item names a table by its schema (`db.t`), which `tables` leaves out, or is one the
+    /// walk doesn't read.
     by_schema: bool,
 }
 
 /// Whether a FROM item of the statement names a table by its schema (`db.t`, its own schema's
-/// included), which [`tables`] leaves out.
+/// included), which [`tables`] leaves out, or is one its walk doesn't read.
 pub(crate) fn reads_by_schema(statement: &Statement) -> bool {
     let mut walk = Walk { tables: Vec::new(), by_schema: false };
     walk.statement(statement, &Env::default());
@@ -1045,7 +1046,9 @@ impl Walk {
             TableFactor::NestedJoin { table_with_joins, .. } => self.items(table_with_joins, env, on),
             TableFactor::JsonTable { json_expr, .. } => self.expr(json_expr, env),
             TableFactor::TableFunction { expr, .. } => self.expr(expr, env),
-            _ => {}
+            // A FROM item the walk doesn't read may reach tables it can't list, as a table named by
+            // its schema does.
+            _ => self.by_schema = true,
         }
     }
 
