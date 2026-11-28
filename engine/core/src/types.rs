@@ -1513,6 +1513,7 @@ impl Type {
                 if i.bounds.exclusive_min.is_some() || i.bounds.exclusive_max.is_some() {
                     return fail("a whole-number kind writes its bounds inclusive".into());
                 }
+                numbers(&i.bounds).or_else(fail)?;
                 check_order(&i.bounds, number_order).or_else(fail)?;
             }
             Kind::Uuid(u) => {
@@ -1529,9 +1530,11 @@ impl Type {
                 if f.exponent_bits == 0 || f.mantissa_bits == 0 {
                     return fail("a float's widths are positive".into());
                 }
+                numbers(&f.bounds).or_else(fail)?;
                 check_bounds(&f.bounds, number_order).or_else(fail)?;
             }
             Kind::Decimal(d) => {
+                numbers(&d.bounds).or_else(fail)?;
                 check_bounds(&d.bounds, number_order).or_else(fail)?;
                 if let (Some(min), Some(max)) = (d.min_scale, d.max_scale) {
                     if min > max {
@@ -1561,6 +1564,9 @@ impl Type {
                 }
                 if matches!(e.ty.kind, Kind::Boolean(_)) && values.len() == 2 {
                     return fail("an enum of both booleans is a boolean".into());
+                }
+                if !tick_spaced(&e.ty.kind, &e.texts().collect::<Vec<_>>()) {
+                    return fail("two values are not a whole number of ticks apart".into());
                 }
             }
             Kind::Array(a) => {
@@ -1728,7 +1734,7 @@ fn enum_value(kind: &Kind, text: &str) -> Result<Option<String>, &'static str> {
         Kind::ZonedDateTime(z) => {
             let (at, fraction, zone) = moment(kind, text).ok_or(FORM)?;
             let at = at.ok_or(FIELDS)?;
-            let named = &zone[1..zone.len() - 1];
+            let (named, zone) = suffix(zone).ok_or(FORM)?;
             if z.offset_only && !matches!(offset(named), Some((Some(_), ""))) {
                 return Err("in a zone that is no UTC offset");
             }
@@ -1895,6 +1901,27 @@ fn within(value: &str, bounds: &Bounds, order: impl Fn(&str, &str) -> Option<std
     keeps(&bounds.min, Ordering::is_lt) && keeps(&bounds.exclusive_min, Ordering::is_le) && keeps(&bounds.max, Ordering::is_gt) && keeps(&bounds.exclusive_max, Ordering::is_ge)
 }
 
+/// Whether every bound a number kind writes is a number (rule 5), which `inf` and `Infinity` are not:
+/// the `infinity` flag speaks for those.
+fn numbers(b: &Bounds) -> Result<(), String> {
+    match [&b.min, &b.exclusive_min, &b.max, &b.exclusive_max].into_iter().flatten().find(|v| number(v).is_none()) {
+        Some(v) => Err(format!("the bound {v:?} is no number")),
+        None => Ok(()),
+    }
+}
+
+/// An exponent's decimal text, with a sign where it has one, as an i64: one past its range at
+/// i64's quarter, which no count of digits reaches.
+fn exponent_of(text: &str) -> Option<i64> {
+    let digits = text.strip_prefix(['+', '-']).unwrap_or(text);
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let far = i64::MAX / 4;
+    let magnitude = digits.parse::<i64>().map_or(far, |n| n.min(far));
+    Some(if text.starts_with('-') { -magnitude } else { magnitude })
+}
+
 fn check_bounds(b: &Bounds, order: impl Fn(&str, &str) -> Option<std::cmp::Ordering>) -> Result<(), String> {
     if b.min.is_some() && b.exclusive_min.is_some() {
         return Err("min beside exclusive_min".into());
@@ -1958,7 +1985,8 @@ fn number(text: &str) -> Option<(bool, i64, String)> {
         None => (false, text.strip_prefix('+').unwrap_or(text)),
     };
     let (mantissa, exponent) = match body.split_once(['e', 'E']) {
-        Some((mantissa, exponent)) => (mantissa, exponent.parse::<i64>().ok()?),
+        // An exponent past what an i64 counts still orders, as one far beyond any digits written.
+        Some((mantissa, exponent)) => (mantissa, exponent_of(exponent)?),
         None => (body, 0),
     };
     let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
@@ -1994,6 +2022,21 @@ fn text_order(a: &str, b: &str) -> Option<std::cmp::Ordering> {
 /// its origin, and the format names none; nor one no decimal fraction writes exactly (`1/300`,
 /// whose values a source prints rounded), nor a sum too large to count.
 fn on_tick(tick: &str, seconds: i64, fraction: &str) -> bool {
+    exact(seconds, fraction, fraction.len()).is_none_or(|n| ticks(tick, n, fraction.len(), true))
+}
+
+/// Seconds and the digits of a fraction as a count of 10^-`digits` seconds, where it fits.
+fn exact(seconds: i64, fraction: &str, digits: usize) -> Option<i128> {
+    let scale = 10i128.checked_pow(u32::try_from(digits).ok()?)?;
+    let fraction = if fraction.is_empty() { 0 } else { fraction.parse::<i128>().ok()?.checked_mul(10i128.checked_pow(u32::try_from(digits.checked_sub(fraction.len())?).ok()?)?)? };
+    i128::from(seconds).checked_mul(scale)?.checked_add(fraction)
+}
+
+/// Whether `count` 10^-`digits` seconds is a whole number of ticks: (count · q) a multiple of
+/// (p · 10^digits) for a tick of p/q. `from_a_second` reads only a tick that divides a second, as
+/// an origin of a whole second needs. A tick no decimal fraction writes exactly (`1/300`, whose
+/// values a source prints rounded) is not read, nor a count too large to multiply.
+fn ticks(tick: &str, count: i128, digits: usize, from_a_second: bool) -> bool {
     let (p, q) = tick.split_once('/').unwrap_or((tick, "1"));
     let (Ok(p), Ok(q)) = (p.parse::<i128>(), q.parse::<i128>()) else { return true };
     let mut rest = q;
@@ -2003,15 +2046,40 @@ fn on_tick(tick: &str, seconds: i64, fraction: &str) -> bool {
     while rest > 0 && rest % 5 == 0 {
         rest /= 5;
     }
-    if p <= 0 || q % p != 0 || rest != 1 || fraction.len() > 18 {
+    if p <= 0 || rest != 1 || (from_a_second && q % p != 0) || digits > 18 {
         return true;
     }
-    // seconds + fraction / 10^k is a whole number of p/q seconds when (seconds·10^k + fraction)·q
-    // is a multiple of p·10^k.
-    let scale = 10i128.pow(fraction.len() as u32);
-    let digits = fraction.parse::<i128>().unwrap_or(0);
-    let Some(total) = i128::from(seconds).checked_mul(scale).and_then(|n| n.checked_add(digits)).and_then(|n| n.checked_mul(q)) else { return true };
-    p.checked_mul(scale).is_none_or(|step| total.rem_euclid(step) == 0)
+    let step = p.checked_mul(10i128.pow(digits as u32));
+    count.checked_mul(q).zip(step).is_none_or(|(total, step)| total.rem_euclid(step) == 0)
+}
+
+/// Whether an enum's moments or times of day lie a whole number of ticks apart, as values of one
+/// type do wherever its steps start; a value the check does not read is left out.
+fn tick_spaced(kind: &Kind, values: &[&str]) -> bool {
+    let tick = match kind {
+        Kind::Time(t) => &t.tick,
+        Kind::DateTime(DateTimeType { tick, .. }) | Kind::Instant(InstantType { tick, .. }) | Kind::ZonedDateTime(ZonedDateTimeType { tick, .. }) => tick,
+        _ => return true,
+    };
+    fn point<'a>(kind: &Kind, text: &'a str) -> Option<(i64, &'a str)> {
+        match kind {
+            Kind::Time(t) => {
+                let c = clock(text)?;
+                let east = if t.offset { offset(c.rest)?.0? } else { 0 };
+                Some((c.seconds? - east, c.fraction))
+            }
+            _ => moment(kind, text).and_then(|(at, fraction, _)| Some((at?, fraction))),
+        }
+    }
+    let points: Vec<(i64, &str)> = values.iter().filter_map(|v| point(kind, v)).collect();
+    let Some(&(first, first_fraction)) = points.first() else { return true };
+    points.iter().all(|&(seconds, fraction)| {
+        let digits = fraction.len().max(first_fraction.len());
+        match (exact(seconds, fraction, digits), exact(first, first_fraction, digits)) {
+            (Some(a), Some(b)) => ticks(tick, a - b, digits, false),
+            _ => true,
+        }
+    })
 }
 
 /// The float a number's canonical text writes at a float type's widths, rounded to the nearest, ties
@@ -2079,11 +2147,35 @@ fn moment<'a>(kind: &Kind, text: &'a str) -> Option<(Option<i64>, &'a str, &'a s
         Kind::Instant(_) if offset(rest) == Some((Some(0), "")) => Some((at, fraction, "")),
         Kind::ZonedDateTime(_) => {
             let (east, zone) = offset(rest)?;
-            let named = zone.strip_prefix('[').and_then(|z| z.strip_suffix(']')).is_some_and(|z| !z.is_empty());
-            named.then_some((at.zip(east).map(|(at, east)| at - east), fraction, zone))
+            suffix(zone)?;
+            Some((at.zip(east).map(|(at, east)| at - east), fraction, zone))
         }
         _ => None,
     }
+}
+
+/// RFC 9557's suffix after a zoned value's offset: its time zone first, a region or an offset in
+/// brackets, then any tags (`[u-ca=iso8601]`), each with or without the critical flag `!`. The zone,
+/// and the suffix without its flags, as what tells one value from another; `None` where no zone
+/// comes first, or the suffix is malformed.
+fn suffix(text: &str) -> Option<(&str, String)> {
+    let (mut zone, mut key, mut rest) = (None, String::new(), text);
+    while !rest.is_empty() {
+        let end = rest.find(']')?;
+        let inner = rest.strip_prefix('[')?.get(..end - 1)?;
+        let inner = inner.strip_prefix('!').unwrap_or(inner);
+        if inner.is_empty() || inner.contains(['[', '!']) {
+            return None;
+        }
+        match (zone, inner.contains('=')) {
+            (None, false) => zone = Some(inner),
+            (Some(_), true) => {}
+            _ => return None,
+        }
+        key.push_str(&format!("[{inner}]"));
+        rest = &rest[end + 1..];
+    }
+    Some((zone?, key))
 }
 
 /// The calendar date an ISO 8601 text starts with in its extended form, its year of four digits,
@@ -2428,6 +2520,11 @@ mod tests {
         refused(json!({"kind": "time", "tick": "1", "min": "24:00:00", "max": "23:59:60"}));
         // A bound in a form the check does not read orders by its text, as before.
         refused(json!({"kind": "time", "tick": "60", "min": "13:00", "max": "12:00"}));
+        // A number's bounds are numbers, and an exponent past an i64 still orders.
+        refused(json!({"kind": "float", "exponent_bits": 11, "mantissa_bits": 52, "min": "inf", "max": "0"}));
+        refused(json!({"kind": "integer", "bits": 32, "min": "Infinity", "max": "0"}));
+        refused(json!({"kind": "decimal", "min": "1e99999999999999999999", "max": "0"}));
+        passes(json!({"kind": "decimal", "min": "-1e99999999999999999999", "max": "0"}));
         refused(json!({"kind": "time", "tick": "1", "offset": true, "min": "13:00:00+00:00", "max": "12:00:00+00:00"}));
         refused(json!({"kind": "uuid", "versions": [9]}));
         refused(json!({"kind": "uuid", "versions": []}));
@@ -2508,6 +2605,9 @@ mod tests {
             // A value falls on its type's tick.
             (json!({"kind": "instant", "tick": "1"}), "2026-01-01T00:00:00.5Z"),
             (json!({"kind": "time", "tick": "1/1000"}), "10:00:00.0005"),
+            // A zoned value names its zone first, in brackets.
+            (json!({"kind": "zoned_datetime", "tick": "1"}), "2026-01-01T10:00:00+07:00[u-ca=iso8601]"),
+            (json!({"kind": "zoned_datetime", "tick": "1"}), "2026-01-01T10:00:00+09:00[Asia/Tokyo][u-ca"),
             (json!({"kind": "zoned_datetime", "tick": "1"}), "2026-01-01T10:00:00.5+09:00[Asia/Tokyo]"),
             // A float's value is inside its finite range.
             (json!({"kind": "float", "exponent_bits": 5, "mantissa_bits": 10}), "65536"),
@@ -2522,6 +2622,16 @@ mod tests {
         // And the midpoint itself rounds to even.
         refused(json!({"kind": "enum", "type": {"kind": "float", "exponent_bits": 5, "mantissa_bits": 10}, "values": [{"value": "1"}, {"value": "1.00048828125"}]}));
         refused(json!({"kind": "enum", "type": {"kind": "time", "tick": "60"}, "values": [{"value": "12:00"}, {"value": "12:00:00"}]}));
+        refused(json!({"kind": "enum", "type": {"kind": "zoned_datetime", "tick": "1"}, "values": [{"value": "2026-01-01T10:00:00+09:00[Asia/Tokyo]"}, {"value": "2026-01-01T10:00:00+09:00[!Asia/Tokyo]"}]}));
+        // Values of one type lie a whole number of ticks apart, wherever its steps start.
+        for (ty, values) in [
+            (json!({"kind": "instant", "tick": "60"}), ["2026-01-01T00:00:00Z", "2026-01-01T00:00:00.5Z"]),
+            (json!({"kind": "time", "tick": "60"}), ["00:00:00", "00:00:00.5"]),
+            (json!({"kind": "time", "tick": "60", "offset": true}), ["00:00:00+00:00", "00:00:00.5+00:00"]),
+            (json!({"kind": "instant", "tick": "2"}), ["2026-01-01T00:00:01Z", "2026-01-01T00:00:02Z"]),
+        ] {
+            refused(json!({"kind": "enum", "type": ty, "values": values.map(|v| json!({"value": v}))}));
+        }
         refused(json!({"kind": "enum", "type": {"kind": "uuid"}, "values": [{"value": "01890a5d-ac96-7ed0-8f4c-c3b8d0a1b2c3"}, {"value": "01890A5D-AC96-7ED0-8F4C-C3B8D0A1B2C3"}]}));
         refused(json!({"kind": "enum", "type": {"kind": "instant", "tick": "1/1000"}, "values": [{"value": "2026-01-01T00:00:00.5Z"}, {"value": "2026-01-01T00:00:00.500Z"}]}));
         for (ty, values) in [
@@ -2558,6 +2668,9 @@ mod tests {
             (json!({"kind": "instant", "tick": "60"}), json!(["2026-01-01T10:00Z"])),
             // A tick past a second says nothing of its origin.
             (json!({"kind": "instant", "tick": "2"}), json!(["2026-01-01T00:00:01Z", "2026-01-01T00:00:03Z"])),
+            // RFC 9557's critical flag and tags after the zone.
+            (json!({"kind": "zoned_datetime", "tick": "1", "offset_only": true}), json!(["2026-01-01T10:00:00+08:00[!+08:00]", "2026-01-01T10:00:00+07:00[+07:00][u-ca=iso8601]"])),
+            (json!({"kind": "zoned_datetime", "tick": "1"}), json!(["2026-01-01T10:00:00+09:00[!Asia/Tokyo][!u-ca=iso8601]"])),
             (json!({"kind": "float", "exponent_bits": 11, "mantissa_bits": 52}), json!(["179769313486231570000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"])),
         ] {
             let values: Vec<Value> = values.as_array().unwrap().iter().map(|v| json!({"value": v})).collect();
