@@ -127,6 +127,8 @@ pub(crate) fn mysql_project(column: &str, tools: &[String]) -> String {
 /// copied, which writes to that copy: pt-online-schema-change's `pt_osc_<database>_<table>_ins`,
 /// `_upd` and `_del` (`rt_pt_osc_…` reversed), whose body replaces into or deletes from `_<table>_new`
 /// or `_<table>_old`, and LHM's `lhmt_ins_<table>` and the like, whose body writes to `lhmn_<table>`.
+/// Each tool cuts its copy's name to MySQL's 64 characters, and pt-online-schema-change puts up to ten
+/// underscores before it, so the body is held to the copy's name as far as every such cut keeps it.
 /// Each is told by its name and the copy its body names; one named so that writes elsewhere is the
 /// project's.
 pub(crate) fn mysql_project_trigger(tools: &[String]) -> String {
@@ -134,9 +136,9 @@ pub(crate) fn mysql_project_trigger(tools: &[String]) -> String {
         "{} and not ((trigger_name like 'pt!_osc!_%' escape '!' or trigger_name like 'rt!_pt!_osc!_%' escape '!')
             and (trigger_name like '%!_ins' escape '!' or trigger_name like '%!_upd' escape '!' or trigger_name like '%!_del' escape '!')
             and (upper(action_statement) like '%DELETE IGNORE FROM%' or upper(action_statement) like '%REPLACE INTO%')
-            and (locate(concat('_', lower(event_object_table), '_new'), lower(action_statement)) > 0 or locate(concat('_', lower(event_object_table), '_old'), lower(action_statement)) > 0))
+            and (locate(left(concat('_', lower(event_object_table), '_new'), 55), lower(action_statement)) > 0 or locate(left(concat('_', lower(event_object_table), '_old'), 55), lower(action_statement)) > 0))
           and not ((trigger_name like 'lhmt!_ins!_%' escape '!' or trigger_name like 'lhmt!_upd!_%' escape '!' or trigger_name like 'lhmt!_del!_%' escape '!')
-            and locate(concat('lhmn_', lower(event_object_table)), lower(action_statement)) > 0)",
+            and locate(left(concat('lhmn_', lower(event_object_table)), 64), lower(action_statement)) > 0)",
         mysql_project("event_object_table", tools)
     )
 }
@@ -164,19 +166,13 @@ pub const PG_TOOL_TABLES: &[&str] = &[
     "attrep_wal_heartbeat",
 ];
 
-/// Whether the `pg_class` row `c` is another tool's table: one of [`PG_TOOL_TABLES`] or one defined as
-/// its tool makes it ([`pg_tool_table`]), unless a publication of the project's names it, which makes
-/// it the project's: a publication that lists a table (Estuary's watermarks, as its setup adds them)
-/// has its whole list replaced by a change to what it publishes, which would leave the table out if
-/// no file made it. One an EXCEPT names, and one Zero's own publication lists, stay the tool's.
+/// Whether the `pg_class` row `c` is another tool's table: one of [`PG_TOOL_TABLES`], or one defined
+/// as its tool makes it ([`pg_tool_table`]). Each is told by its name or definition alone, never by
+/// what refers to it, so that whether a table is the project's never changes with a publication or a
+/// view that names it.
 fn pg_tool_relation(c: &str) -> String {
     let tools = PG_TOOL_TABLES.iter().map(|t| format!("'{t}'")).collect::<Vec<_>>().join(", ");
-    format!(
-        "((lower({c}.relname) in ({tools}) or {}) and not exists (select 1 from pg_publication_rel tr join pg_publication tpb on tpb.oid = tr.prpubid where tr.prrelid = {c}.oid
-           and coalesce((to_jsonb(tr) ->> 'prexcept')::boolean, false) = false and not {}))",
-        pg_tool_table(c),
-        zero_publication("tpb")
-    )
+    format!("(lower({c}.relname) in ({tools}) or {})", pg_tool_table(c))
 }
 
 /// Whether the `pg_class` row `c` is no history table, no table of another tool's
@@ -194,14 +190,13 @@ pub(crate) fn pg_not_history(c: &str) -> String {
 }
 
 /// Whether the `pg_class` row `c` is a table another tool defines as it makes it, which no name
-/// alone tells apart from an application's: Estuary's `flow_watermarks`, and Neon's `health_check`
-/// in `public` where Neon's `neon_migration` schema is beside it.
+/// alone tells apart from an application's: Neon's `health_check` in `public`, where Neon's
+/// `neon_migration` schema is beside it.
 fn pg_tool_table(c: &str) -> String {
     let columns = format!("(select string_agg(a.attname || ' ' || format_type(a.atttypid, a.atttypmod), ', ' order by a.attnum) from pg_attribute a where a.attrelid = {c}.oid and a.attnum > 0 and not a.attisdropped)");
     format!(
-        "({c}.relkind = 'r' and ({c}.relname = 'flow_watermarks' and {columns} = 'slot text, watermark text'
-          or {c}.relname = 'health_check' and {columns} = 'id integer, updated_at timestamp with time zone' and exists (select 1 from pg_namespace tpn where tpn.oid = {c}.relnamespace and tpn.nspname = 'public')
-            and exists (select 1 from pg_class tm join pg_namespace tmn on tmn.oid = tm.relnamespace where tmn.nspname = 'neon_migration' and tm.relname = 'migration_id')))"
+        "({c}.relkind = 'r' and {c}.relname = 'health_check' and {columns} = 'id integer, updated_at timestamp with time zone' and exists (select 1 from pg_namespace tpn where tpn.oid = {c}.relnamespace and tpn.nspname = 'public')
+          and exists (select 1 from pg_class tm join pg_namespace tmn on tmn.oid = tm.relnamespace where tmn.nspname = 'neon_migration' and tm.relname = 'migration_id'))"
     )
 }
 
