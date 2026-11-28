@@ -1552,6 +1552,14 @@ test("postgres: a jsonb[] has one dimension on pg, postgres.js and PGlite, under
         }
       });
     }
+    // A statement warmed on one result whose same text then reads a built-in jsonb[], as another search_path makes it, is read by PGlite's own parser, which decodes each value.
+    await lite.exec(`create schema other; create table other.r (id int4, docs jsonb[]); insert into other.r values (3, '{"[1,2]"}')`);
+    const moved = defineQuery({ dialect: "postgres", sql: "select docs from r where id in (2, 3)", params: [], cardinality: "one", columns: [["docs", "json[]"]] });
+    await lite.transaction(async (tx: never) => {
+      assert.deepEqual({ ...((await moved.run(tx)) as object) }, { docs: [1, "false"] }, "PGlite, warmed on the domain's array");
+      await (tx as { exec(sql: string): Promise<unknown> }).exec("set local search_path = other");
+      assert.deepEqual({ ...((await moved.run(tx)) as object) }, { docs: [[1, 2]] }, "PGlite, then a built-in jsonb[]");
+    });
   } finally {
     await client.end();
     await lite.close();
