@@ -161,3 +161,126 @@ function quotedEnd(b: string[], start: number, q: string, backslash: boolean): n
 
 /** Whether two texts of a migration are the same migration, as the lock's checksum compares them. */
 export const sameMigration = (a: string, b: string): boolean => canonical(normalized(a)) === canonical(normalized(b));
+
+// The statements of SQLite's that end or open a transaction, which a migration can't hold of its own.
+const CONTROL = new Set(["BEGIN", "COMMIT", "END", "ROLLBACK", "SAVEPOINT", "RELEASE"]);
+
+/**
+ * The tokens of each statement of a SQLite migration, as SQLite reads the text: a `--` comment to
+ * the line's end, a `/*` one to the first `*\/`, a byte order mark as spacing, quotes doubled inside
+ * their own, and a trigger as one statement, which ends at the `;` after an `end` that itself follows
+ * a `;`, as SQLite completes one (`sqlite3_complete`), not after a `case`'s `end` or a column named
+ * `end`. A name is uppercase, a number as written, and a quoted text or name `'` followed by its
+ * content; symbols are left out.
+ */
+export function statementTokens(sql: string): string[][] {
+  const statements: string[][] = [];
+  let head: string[] = [];
+  let trigger = false;
+  let afterSemicolon = false;
+  let afterEnd = false;
+  let afterDot = false;
+  const token = (text: string) => {
+    head.push(text);
+    afterSemicolon = afterEnd = afterDot = false;
+  };
+  let k = 0;
+  while (k < sql.length) {
+    const c = sql[k]!;
+    if (SPACING.test(c) || c === "\uFEFF") {
+      k++;
+      continue;
+    }
+    if (c === "-" && sql[k + 1] === "-") {
+      const end = sql.indexOf("\n", k);
+      k = end < 0 ? sql.length : end + 1;
+      continue;
+    }
+    if (c === "/" && sql[k + 1] === "*") {
+      const end = sql.indexOf("*/", k + 2);
+      k = end < 0 ? sql.length : end + 2;
+      continue;
+    }
+    if (c === "'" || c === '"' || c === "`" || c === "[") {
+      const close = c === "[" ? "]" : c;
+      let end = k + 1;
+      for (; end < sql.length; end++) {
+        if (sql[end] !== close) continue;
+        if (close !== "]" && sql[end + 1] === close) end++;
+        else break;
+      }
+      token(`'${sql.slice(k + 1, end).replaceAll(close + close, close)}`);
+      k = end + 1;
+      continue;
+    }
+    // A number is one token, its dot and exponent included (`1.`, `2.5e-3`), so its dot qualifies no name.
+    if (/[0-9]/.test(c) || (c === "." && /[0-9]/.test(sql[k + 1] ?? ""))) {
+      // A sign belongs to a decimal number's exponent alone, and only before its digits.
+      const decimal = !/^0[xX]/.test(sql.slice(k, k + 2));
+      let end = k + 1;
+      while (end < sql.length && (/[0-9A-Za-z_.]/.test(sql[end]!) || (decimal && /[+-]/.test(sql[end]!) && /[eE]/.test(sql[end - 1]!) && /[0-9]/.test(sql[end + 1] ?? "")))) end++;
+      token(sql.slice(k, end));
+      k = end;
+      continue;
+    }
+    // A name, as SQLite reads one: any character past ASCII is part of it.
+    if (/[A-Za-z_]/.test(c) || c.charCodeAt(0) >= 0x80) {
+      let end = k;
+      while (end < sql.length && (/[A-Za-z0-9_$]/.test(sql[end]!) || sql.charCodeAt(end) >= 0x80)) end++;
+      const word = sql.slice(k, end).toUpperCase();
+      // A trigger's body closes at an `end` right after one of its statements' `;`.
+      const closes = trigger && afterSemicolon && !afterDot && word === "END";
+      token(word);
+      afterEnd = closes;
+      // `create trigger` or `create temp trigger`: elsewhere, as in `create table trigger`, it's a name.
+      if (word === "TRIGGER" && head[0] === "CREATE" && (head.length === 2 || (head.length === 3 && (head[1] === "TEMP" || head[1] === "TEMPORARY")))) trigger = true;
+      k = end;
+      continue;
+    }
+    if (c === ";" && (!trigger || afterEnd)) {
+      if (head.length) statements.push(head);
+      head = [];
+      trigger = afterSemicolon = afterEnd = afterDot = false;
+      k++;
+      continue;
+    }
+    afterSemicolon = c === ";";
+    afterDot = c === ".";
+    afterEnd = false;
+    k++;
+  }
+  if (head.length) statements.push(head);
+  return statements;
+}
+
+/**
+ * The first statement of a SQLite migration that controls the transaction (`begin`, `commit`,
+ * `end`, `rollback`, `savepoint`, `release`), lowercase, as `atomicity_problem` refuses one
+ * (engine/migrate/src/sql.rs), or none. Each migration runs in a transaction of its own, so one that
+ * commits partway would leave what ran before its commit in place, with no row in the history to say
+ * so.
+ */
+export function transactionControl(sql: string): string | undefined {
+  return statementTokens(sql).find((t) => CONTROL.has(t[0]!))?.[0]!.toLowerCase();
+}
+
+/**
+ * Whether a SQLite migration may turn foreign keys on: any `pragma foreign_keys` assignment (its
+ * name quoted or not, as itself or `main.foreign_keys`, explained or not) but a plain off, `0`, `off`, `no` or
+ * `false`, quoted or not. The engines read more spellings as on than any list keeps up with (`2`,
+ * `0x1`, `1.0`, `full`), so every other value counts.
+ */
+export function turnsForeignKeysOn(sql: string): boolean {
+  const bare = (token: string | undefined) => token?.replace(/^'/, "").toUpperCase();
+  return statementTokens(sql).some((t) => {
+    // The command, past an `explain`, `explain query plan` or Turso's `… format = text|json`, under which Turso's engine takes the assignment too.
+    let i = 0;
+    if (t[i] === "EXPLAIN") i++;
+    if (i === 1 && t[i] === "QUERY" && t[i + 1] === "PLAN") i += 2;
+    if (i === 3 && t[i] === "FORMAT") i += 2;
+    if (t[i] !== "PRAGMA") return false;
+    const at = [i + 1, i + 2].find((j) => bare(t[j]) === "FOREIGN_KEYS");
+    const value = at === undefined ? undefined : bare(t[at + 1]);
+    return value !== undefined && !["0", "OFF", "NO", "FALSE"].includes(value);
+  });
+}

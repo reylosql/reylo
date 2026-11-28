@@ -6,8 +6,15 @@ import type { Tooling } from "./tooling-loader.ts";
 import { releaseConnections } from "./analyze.ts";
 import { sqlModule } from "./loader.ts";
 import { mapperHandlers } from "./mapper-server.ts";
-import { embeddedModule } from "./embedded-module.ts";
+import { embeddedModule, projectMigrations } from "./embedded-module.ts";
 import { migrate } from "./migrate-deploy.ts";
 import { analyze } from "./analyze-api.ts";
 
-export default { analyze, migrate, sqlModule, embeddedModule, releaseConnections, mapperHandlers } satisfies Tooling;
+/** The project's migrations, from the working directory, as `migrate()` deploys from it; a project with none there is refused, since the app may have started in another directory. */
+async function migrations(): Promise<{ list?: { name: string; sql: string }[]; error?: string }> {
+  const { list, error } = await projectMigrations(process.cwd());
+  if (list === undefined && error === undefined) return { error: `no migrations directory in the project at ${process.cwd()}: start the app in the project's directory, with its migrations beside it` };
+  return error !== undefined ? { error } : { list: list ?? [] };
+}
+
+export default { analyze, migrate, migrations, sqlModule, embeddedModule, releaseConnections, mapperHandlers } satisfies Tooling;

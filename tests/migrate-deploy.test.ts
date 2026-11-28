@@ -6,8 +6,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { nativeBinary } from "../src/native.ts";
-import { migrate } from "../src/migrate.ts";
-import { ROOT } from "./helpers.ts";
+import { migrate, type MigrationConnection } from "../src/migrate.ts";
+import { driver, ROOT } from "./helpers.ts";
 
 // `await migrate()` on a server runs `reylo migrate deploy` in the working directory, as the command
 // line does there, on SQLite so that no server is needed.
@@ -34,9 +34,15 @@ test("await migrate() runs reylo migrate deploy, resolves to what it ran, and re
     assert.deepEqual(await migrate({ url: "file:./prod.sqlite" }), []);
     // The project's own database, which the dev run took to the migrations already.
     assert.deepEqual(await migrate(), []);
+    // On the app's own connection, as Turso's engine holds its file: the project's locked migrations, read here.
+    const turso: MigrationConnection & { close(): Promise<void> } = await driver("@tursodatabase/database").connect(join(root, "turso.db"));
+    assert.deepEqual(await migrate(turso), ran);
+    assert.deepEqual(await migrate(turso), []);
     // A draft refuses the deploy, with what to do about it.
     writeFileSync(join(root, "reylo", "migrations", "20991231000000_draft.sql"), "alter table users add column bio text;\n");
     await assert.rejects(migrate({ url: "file:./prod.sqlite" }), /^Error: reylo migrate deploy refused: The lock doesn't list 20991231000000_draft\.sql yet\n  Run it in development, which locks it: reylo migrate dev/);
+    await assert.rejects(migrate(turso), /^Error: reylo: The lock doesn't list reylo\/migrations\/20991231000000_draft\.sql yet: run it in development, which locks it, with reylo migrate dev$/);
+    await turso.close();
     rmSync(join(root, "reylo", "migrations", "20991231000000_draft.sql"));
     // A database changed by hand refuses it, naming the change as the command line does.
     const changed = new DatabaseSync(join(root, "prod.sqlite"));

@@ -26,7 +26,7 @@ export { checks } from "./checks.ts";
 export { codecRuntime, type CodecRuntime } from "./codecs.ts";
 export { postgresTypes } from "./postgres-types.ts";
 export type { PostgresTypes } from "./values.ts";
-export { migrate, type MigrationStorage } from "./migrate.ts";
+export { migrate, type MigrationStorage, type MigrationConnection } from "./migrate.ts";
 export type { MigrateOptions } from "./build-time.ts";
 export type { AnalyzeInput } from "./build-time.ts";
 export type * as TypeDefs from "../spec/index.ts";
