@@ -156,8 +156,8 @@ impl Server {
     }
 
     /// The servers that answered since this was last called, by the name each answer carries in
-    /// `X-ClickHouse-Server-Display-Name`, `None` for an answer that carries none, which a server of
-    /// 25.11 or later always sends: one server unless the connection reaches several replicas.
+    /// `X-ClickHouse-Server-Display-Name`, `None` for an answer that carries none or an empty one, which
+    /// a server of 25.11 or later always names: one server unless the connection reaches several replicas.
     pub fn answered(&self) -> BTreeSet<Option<String>> {
         std::mem::take(&mut *self.answered.lock().unwrap_or_else(|e| e.into_inner()))
     }
@@ -197,7 +197,7 @@ impl Server {
         let mut response = request.send(sql.as_bytes()).map_err(|e| e.to_string())?;
         let status = response.status().as_u16();
         let header = |name: &str| response.headers().get(name).and_then(|v| v.to_str().ok()).map(String::from);
-        self.answered.lock().unwrap_or_else(|e| e.into_inner()).insert(header("x-clickhouse-server-display-name"));
+        self.answered.lock().unwrap_or_else(|e| e.into_inner()).insert(header("x-clickhouse-server-display-name").filter(|name| !name.is_empty()));
         let code = header("x-clickhouse-exception-code");
         let ours = code.is_some() || header("x-clickhouse-query-id").is_some() || header("x-clickhouse-summary").is_some();
         let tag = header("x-clickhouse-exception-tag");

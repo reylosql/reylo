@@ -38,6 +38,9 @@ struct Connection {
     /// Whether one name has answered for two servers, as replicas that share a `display_name`, or
     /// a proxy that sets the header, make them: nothing is kept on such a connection.
     ambiguous: bool,
+    /// Whether an answer on this connection has named the server that gave it: where none has, the
+    /// header is dropped on the way, and no try of an analysis tells its servers apart.
+    named: bool,
 }
 
 /// The most reads of the schema's fingerprint after an analysis, to hear again from each server it
@@ -46,8 +49,8 @@ const CONFIRM_READS: usize = 12;
 
 /// What the analysis of a statement the loader would keep under a fingerprint comes to: whether it
 /// may be kept under it ([`judged`]), the fingerprint read after it, which the loader takes as its
-/// own read after the analysis, and whether an analysis not kept might be on another try: not where a
-/// server that answered it is not told apart from another, which no try changes.
+/// own read after the analysis, and whether an analysis not kept might be on another try: not where
+/// the servers that answer the connection are not told apart, which no try changes.
 struct Judged {
     kept: bool,
     after: Option<String>,
@@ -56,7 +59,7 @@ struct Judged {
 
 impl Connection {
     fn new(server: Server, version: String) -> Connection {
-        Connection { server, version, answers: AnswerCache::until_cleared(), shown: HashMap::new(), confirmed: None, executables: std::cell::Cell::new(false), uuids: HashMap::new(), ambiguous: false }
+        Connection { server, version, answers: AnswerCache::until_cleared(), shown: HashMap::new(), confirmed: None, executables: std::cell::Cell::new(false), uuids: HashMap::new(), ambiguous: false, named: false }
     }
 
     /// Drops the engine's answers.
@@ -71,6 +74,7 @@ impl Connection {
         self.server.answered();
         let read = self.fingerprint();
         let by = self.server.answered();
+        self.named |= by.iter().any(Option::is_some);
         let server = (by.len() == 1).then(|| by.into_iter().next()).flatten();
         if let (Ok((schema, uuid)), Some(server)) = (&read, &server) {
             self.shown.insert(server.clone(), schema.fingerprint.clone());
@@ -143,13 +147,15 @@ impl Connection {
         self.server.answered();
         let analyzed = answers::analyze(&self.server, sql, &mut self.answers);
         let by = self.server.answered();
+        self.named |= by.iter().any(Option::is_some);
         // A failed analysis is kept nowhere, and leaves no answer of a server unjudged.
         let judged = label.filter(|_| analyzed.is_ok()).map(|label| {
             let (kept, after) = judged(label, &before, &by, || match self.read() {
                 (Ok(schema), server) => Some(server.map(|server| (server, schema.fingerprint))),
                 (Err(_), _) => None,
             });
-            Judged { kept: kept && !self.ambiguous, after, again: !self.ambiguous && !by.contains(&None) }
+            // An answer that named no server, where others on the connection name theirs, is one try's.
+            Judged { kept: kept && !self.ambiguous, after, again: !self.ambiguous && (self.named || !by.contains(&None)) }
         });
         match (&judged, label) {
             (Some(Judged { kept: true, .. }), Some(label)) => self.confirmed = Some(label.to_string()),
@@ -397,6 +403,17 @@ mod tests {
             assert!(c.read().0.is_ok() && c.read().0.is_ok());
             serving.join().unwrap();
             assert_eq!(c.ambiguous, ambiguous, "{names:?}");
+        }
+    }
+
+    #[test]
+    fn a_connection_notes_whether_any_answer_named_its_server() {
+        for (name, named) in [("", false), ("r", true)] {
+            let (url, serving) = stand_in(vec![(name, 200, row("f", 0, "u"))]);
+            let mut c = Connection::new(Server::of(&url).unwrap(), "26.8.1.1".to_string());
+            assert!(c.read().0.is_ok());
+            serving.join().unwrap();
+            assert_eq!(c.named, named, "{name:?}");
         }
     }
 
