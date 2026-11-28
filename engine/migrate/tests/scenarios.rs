@@ -9020,6 +9020,9 @@ create trigger kids_note after insert on kids begin update parents set name = na
         }
         p.exec(&format!("alter database {} set reylo.platform_schemas = 'on'", p.name)).await;
         p.exec("create schema extensions; create extension \"uuid-ossp\" with schema extensions; create extension pgcrypto with schema extensions; create extension pg_stat_statements with schema extensions").await;
+        // Supabase's dashboard gets everything in `extensions`.
+        p.exec("do $$ begin create role dashboard_user nologin; exception when duplicate_object or unique_violation then null; end $$").await;
+        p.exec("grant all on all tables in schema extensions to dashboard_user; grant all on all sequences in schema extensions to dashboard_user; grant all on all routines in schema extensions to dashboard_user").await;
         p.exec("grant usage on schema public to postgres, anon, authenticated, service_role").await;
         for objects in ["tables", "sequences", "functions"] {
             p.exec(&format!("alter default privileges for role postgres in schema public grant all on {objects} to postgres, anon, authenticated, service_role")).await;
@@ -9032,12 +9035,11 @@ create trigger kids_note after insert on kids begin update parents set name = na
     }
 
     /// What Supabase grants its own `dashboard_user` on its extensions as it makes a project is its
-    /// own: init writes none of it, while a grant the project made on them to a Data API role is the
-    /// project's, and written.
+    /// own: init writes none of it, while a grant the project made on them to another role is the
+    /// project's, and written. On a server of no platform, a grant to a role of that name is the
+    /// project's too.
     pub async fn supabases_grants_on_its_extensions_are_supabases(mut p: P) {
         as_supabase_makes_it(&p, true).await;
-        p.exec("do $$ begin create role dashboard_user nologin; exception when duplicate_object or unique_violation then null; end $$").await;
-        p.exec("grant execute on function extensions.pg_stat_statements_reset(oid, oid, bigint, boolean) to dashboard_user; grant select on extensions.pg_stat_statements to dashboard_user; grant execute on function extensions.gen_random_bytes(integer) to dashboard_user").await;
         p.exec("grant execute on function extensions.gen_random_bytes(integer) to authenticated; create table tokens (id int primary key)").await;
         assert_eq!(p.run(async |o, log| reylo_migrate::init(o, &[], log).await).await, 0, "{}", p.peek());
         let init = std::fs::read_to_string(p.dir.join("migrations/init.sql")).unwrap();
@@ -9047,6 +9049,13 @@ create trigger kids_note after insert on kids begin update parents set name = na
         assert_eq!(p.status().await, 0, "{}", p.peek());
         p.exec("revoke execute on function extensions.gen_random_bytes(integer) from dashboard_user").await;
         assert_eq!(p.status().await, 0, "Supabase's own grants are no drift:\n{}", p.peek());
+        let mut q = P::new(p.d).await.unwrap();
+        q.exec(&format!("alter database {} set reylo.platform_schemas = 'off'", q.name)).await;
+        q.exec("do $$ begin create role dashboard_user nologin; exception when duplicate_object or unique_violation then null; end $$").await;
+        q.exec("create schema extensions; create extension pgcrypto with schema extensions; grant execute on function extensions.gen_random_bytes(integer) to dashboard_user; create table tokens (id int primary key)").await;
+        assert_eq!(q.run(async |o, log| reylo_migrate::init(o, &[], log).await).await, 0, "{}", q.peek());
+        let init = std::fs::read_to_string(q.dir.join("migrations/init.sql")).unwrap_or_else(|e| panic!("{e}: {}", q.peek()));
+        assert!(init.contains("dashboard_user"), "a server of no platform writes it:\n{init}");
     }
 
     /// How many of `privilege` on the table `table` `role` holds on the database `q`.
