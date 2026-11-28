@@ -52,6 +52,8 @@ test("postgres: after a migration adds a column under select *, a created type t
     const upper = postgres(own.url, { max: 1, transform: { column: { from: (name: string) => name.toUpperCase() } } });
     try {
       assert.deepEqual(await items.run(upper), [{ ID: 1, TAGS: ["happy", "sad"], NOTE: "x", EXTRA: null }]);
+      // A transaction keeps no options: its names match without their case.
+      assert.deepEqual(await upper.begin((tx: unknown) => items.run(tx)), [{ ID: 1, TAGS: ["happy", "sad"], NOTE: "x", EXTRA: null }]);
     } finally {
       await upper.end();
     }

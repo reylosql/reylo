@@ -218,9 +218,18 @@ async function fieldDecoders(fields: Field[], columns: Columns | undefined, key:
 function declaredColumn(fields: readonly { name: string }[], columns: Columns | undefined, rename?: (name: string) => string): (f: { name: string }, i: number) => Columns[number] | undefined {
   if (!columns?.length) return () => undefined;
   if (columns.length === fields.length) return (_f, i) => columns[i];
-  const byName = new Map(lastOfEach(columns).map((c) => [rename ? rename(c[0]) : c[0], c] as const));
+  const declared = lastOfEach(columns);
+  const byName = new Map(declared.map((c) => [rename ? rename(c[0]) : c[0], c] as const));
+  // Where the renaming isn't reachable (a postgres.js transaction or reserved connection keeps no
+  // options), a name its standard transforms give (camel, pascal, kebab case, another letter case)
+  // matches without its case, underscores and hyphens, where no other declared name does, and no
+  // field of the result has the declared name itself (a column a migration added beside it).
+  const loose = (name: string) => name.toLowerCase().replace(/[_-]/g, "");
+  const present = new Set(fields.map((f) => f.name));
+  const byLoose = new Map<string, Columns[number] | null>();
+  for (const c of declared) if (!present.has(rename ? rename(c[0]) : c[0])) byLoose.set(loose(c[0]), byLoose.has(loose(c[0])) ? null : c);
   const last = new Map(fields.map((f, i) => [f.name, i]));
-  return (f, i) => (last.get(f.name) === i ? byName.get(f.name) : undefined);
+  return (f, i) => (last.get(f.name) === i ? (byName.get(f.name) ?? byLoose.get(loose(f.name)) ?? undefined) : undefined);
 }
 
 // ---------------------------------------------------------------------------------------------
