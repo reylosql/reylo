@@ -2477,7 +2477,7 @@ async fn a_lone_statement_cut_off(mut p: P, landed: bool) {
         // the schema to say it ran: deploy and the dry run refuse, running nothing, and history push
         // settles it from the schema where it can.
         assert_eq!(p.migrate().await, 1);
-        assert_has!(p.output(), r"✗ A deploy was cut off while it ran 20261027110000_index\.sql\n[\s\S]*  Settle it from the schema, running nothing:\n    reylo migrate history push --url <url>\n[\s\S]*  If one of those didn't run, run it by hand too:\n    reylo run --url <url> --file \S*20261027110000_index\.sql");
+        assert_has!(p.output(), r"✗ A deploy was cut off while it ran 20261027110000_index\.sql\n[\s\S]*  Settle it from the schema, running nothing:\n    reylo migrate history push --url <url>\n[\s\S]*  If such a change didn't run, run it by hand too:\n    reylo run --url <url> --file \S*20261027110000_index\.sql");
         assert_eq!(p.dry_run().await, 1);
         assert_has!(p.output(), r"A deploy was cut off while it ran 20261027110000_index\.sql");
         assert_eq!(p.history_push().await, 0, "{}", p.peek());
@@ -2597,6 +2597,53 @@ async fn a_mysql_cut_off_run_whose_file_was_edited_gives_its_text_back() {
     p.output();
     assert_eq!(p.migrate().await, 1);
     assert_has!(p.output(), r"Its file no longer reads as it did when it started\. Write this back to \S*20261027110000_empty\.sql first:\n    truncate table t;");
+}
+
+/// A cut-off run's file renamed since: history push matches the started row by its text, and records
+/// the migration under its new name, so nothing runs it again.
+#[tokio::test(flavor = "current_thread")]
+async fn a_mysql_cut_off_run_whose_file_was_renamed_is_recorded_under_the_new_name() {
+    let Some(mut p) = P::new(Dialect::Mysql).await else { return };
+    p.file("20261027100000_t.sql", "create table t (id bigint primary key);");
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    p.file("20261027110001_reset.sql", "truncate table t;");
+    p.exec("insert into __reylo_migrations (name, `sql`, applied_at) values ('20261027110000_empty.sql', 'truncate table t;', null)").await;
+    p.exec("insert into t values (10)").await;
+    p.output();
+    assert_eq!(p.migrate().await, 1);
+    let out = p.output();
+    assert_has!(&out, r"reylo run --url <url> --file \S*20261027110001_reset\.sql");
+    assert!(!out.contains("no longer reads"), "{out}");
+    assert_eq!(p.history_push().await, 0, "{}", p.peek());
+    assert_has!(p.output(), r"\+ 20261027110001_reset\.sql +recorded");
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    assert_has!(p.output(), "Up to date");
+    assert_eq!(p.rows("select id from t").await.len(), 1);
+}
+
+/// A row marked started while another session holds the migration lock may be a deploy's still
+/// running: status and the dry run say so, and offer no hand run.
+#[tokio::test(flavor = "current_thread")]
+async fn a_mysql_run_another_session_holds_is_not_called_cut_off() {
+    let Some(mut p) = P::new(Dialect::Mysql).await else { return };
+    p.file("20261027100000_t.sql", "create table t (id bigint primary key);");
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    p.file("20261027110000_empty.sql", "truncate table t;");
+    p.exec("insert into __reylo_migrations (name, `sql`, applied_at) values ('20261027110000_empty.sql', 'truncate table t;', null)").await;
+    let mut held = Db::connect(&p.url, &p.dir).await.unwrap();
+    held.rows("select get_lock(concat('reylo_migrate_', left(sha2(coalesce(database(), ''), 256), 32)), 0)").await.unwrap();
+    p.output();
+    assert_eq!(p.status().await, 1);
+    let out = p.output();
+    assert_has!(&out, r"20261027110000_empty\.sql +started, while another run holds this database");
+    assert!(!out.contains("reylo run"), "{out}");
+    assert_eq!(p.dry_run().await, 1);
+    let out = p.output();
+    assert_has!(&out, r"✗ Another run of reylo migrate holds this database\n  It may be a deploy running 20261027110000_empty\.sql now");
+    assert!(!out.contains("reylo run"), "{out}");
+    held.close().await;
+    assert_eq!(p.dry_run().await, 1);
+    assert_has!(p.output(), r"✗ A deploy was cut off while it ran 20261027110000_empty\.sql");
 }
 
 async fn a_shadow_left_by_a_killed_run_is_swept(mut p: P) {
