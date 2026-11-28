@@ -5051,6 +5051,9 @@ async fn pending_findings(shadows: &mut Shadows<'_>, target: &mut Db, ran: &[Mig
     // read for a check only where none of it reaches the columns the check reads, and a check one
     // reaches is said to be left unchecked.
     let mut writes: Vec<Write> = Vec::new();
+    // The MySQL columns, `(table, column)`, whose type a pending migration so far changes, whose
+    // values then reach a later migration converted.
+    let mut converted: BTreeSet<(String, String)> = BTreeSet::new();
     // The tables and columns a pending statement drops or renames, so that one made again under the
     // name holds none of the target's values: MySQL's catalog can show a column dropped and added
     // again as it was.
@@ -5108,6 +5111,9 @@ async fn pending_findings(shadows: &mut Shadows<'_>, target: &mut Db, ran: &[Mig
         for (table, was) in &tables_before {
             let Some(is) = tables_now.get(table).filter(|is| oid(is) == oid(was) && !gone_tables.contains(&bare(table))) else { continue };
             let retyped: Vec<String> = was.columns.iter().filter(|(c, t)| is.columns.get(*c).is_some_and(|n| n != *t)).map(|(c, _)| c.clone()).collect();
+            if d == Dialect::Mysql {
+                converted.extend(retyped.iter().filter(|c| is.columns.get(*c).zip(was.columns.get(*c)).is_some_and(|(n, t)| mysql_column(n).0 != mysql_column(t).0)).map(|c| (table.clone(), c.clone())));
+            }
             if !retyped.is_empty() {
                 writes.push(Write { by: m.name.clone(), table: Some(table.clone()), oid: Some(oid(is)).filter(|o| !o.is_empty()), columns: Some(retyped), retyped: true, reads: true });
             }
@@ -5175,9 +5181,14 @@ async fn pending_findings(shadows: &mut Shadows<'_>, target: &mut Db, ran: &[Mig
             let parent = check.parent.as_ref().map(|(p, refs)| standing(p, Some(refs)));
             // A MySQL foreign key or unique key whose columns the pending migrations change in
             // collation alone, on rows nothing else writes, compares the target's values under the
-            // new collation once it holds them again: read so here, its rows say what the deploy meets.
-            let recollated = (d == Dialect::Mysql && own == Standing::Held && parent.is_none_or(|p| p == Standing::Held) && reached.is_some() && writes.iter().filter(|w| w.reaches(check)).all(|w| w.retyped))
-                .then(|| recollated_rows(check, &tables_here, &tables_now))
+            // new collation once it holds them again: read so here, once, its rows say what the
+            // deploy meets. A foreign key is read where a migration adds it back: one in place can't
+            // have had its columns re-collated under key checks, which MySQL refuses, so nothing
+            // checks it then. A unique key is read too where this migration's change rebuilds it.
+            let added = !checks.contains_key(key);
+            let rebuilt = matches!(check.kind, RowCheckKind::Keys(_)) && writes.iter().any(|w| w.by == m.name && w.retyped && w.reaches(check));
+            let recollated = (d == Dialect::Mysql && (added || rebuilt) && own == Standing::Held && parent.is_none_or(|p| p == Standing::Held) && reached.is_some() && writes.iter().filter(|w| w.reaches(check)).all(|w| w.retyped))
+                .then(|| recollated_rows(check, &tables_here, &tables_now, &converted))
                 .flatten();
             if let Some((query, repeats)) = recollated {
                 match read_rows(target, query, repeats).await {
@@ -5787,6 +5798,8 @@ async fn row_checks(db: &mut Db) -> BTreeMap<String, RowCheck> {
                      group_concat(k.column_name order by k.ordinal_position separator '\u{1f}') as def,
                      group_concat(k.referenced_column_name order by k.ordinal_position separator '\u{1f}') as refs
                    from information_schema.key_column_usage k where k.table_schema = database() and k.referenced_table_name is not null
+                     -- A key to another database's table: its parent is none of this database's tables.
+                     and k.referenced_table_schema = k.table_schema
                    group by k.table_name, k.constraint_name, k.referenced_table_name",
             ];
             for (n, sql) in reads.iter().enumerate() {
@@ -5930,27 +5943,34 @@ async fn read_rows(target: &mut Db, query: String, repeats: bool) -> RowRead {
     }
 }
 
+/// A MySQL column's identity ([`table_identities`]) in its parts: its type and its collation, empty
+/// for a type without one.
+#[cfg(feature = "cli")]
+fn mysql_column(identity: &str) -> (&str, &str) {
+    identity.rsplit_once(' ').unwrap_or((identity, ""))
+}
+
 /// The rows of the target a MySQL foreign key or unique key would refuse once its columns, as
 /// `before` has them, take the collation `after` gives them, their types unchanged: [`orphans_of`], or
 /// the values that repeat, with each column compared under its new collation, and whether they are
-/// values that repeat. None for any other check, for a column whose type changes too, or for a key
-/// whose columns keep their collations, whose own query reads it.
+/// values that repeat. None for any other check, for a column whose type a pending migration changes
+/// (`converted`) or whose character set changes, or for a key whose columns keep their collations,
+/// whose own query reads it.
 #[cfg(feature = "cli")]
-fn recollated_rows(check: &RowCheck, before: &BTreeMap<String, TableIdentity>, after: &BTreeMap<String, TableIdentity>) -> Option<(String, bool)> {
+fn recollated_rows(check: &RowCheck, before: &BTreeMap<String, TableIdentity>, after: &BTreeMap<String, TableIdentity>, converted: &BTreeSet<(String, String)>) -> Option<(String, bool)> {
     let columns = check.columns.as_ref()?;
-    // A column's identity on MySQL: its type, a space, and its collation (none for a type without one).
-    let parts = |identity: &String| -> (String, String) {
-        let (ty, collation) = identity.rsplit_once(' ').unwrap_or((identity.as_str(), ""));
-        (ty.to_string(), collation.to_string())
-    };
+    // The collations a column has before and after, where its values reach the key as they are: its
+    // type kept at every step, and its character set, whose change converts them (a character the
+    // new one lacks fails the change, where a read would take it as `?`).
+    let charset = |collation: &str| collation.split('_').next().unwrap_or_default().to_string();
     let pair = |table: &str, column: &str| -> Option<(String, String)> {
-        let (was, is) = (parts(before.get(table)?.columns.get(column)?), parts(after.get(table)?.columns.get(column)?));
-        (was.0 == is.0).then_some((was.1, is.1))
+        let (was, is) = (mysql_column(before.get(table)?.columns.get(column)?), mysql_column(after.get(table)?.columns.get(column)?));
+        (was.0 == is.0 && charset(was.1) == charset(is.1) && !converted.contains(&(table.to_string(), column.to_string()))).then(|| (was.1.to_string(), is.1.to_string()))
     };
     let bt = |s: &str| format!("`{}`", s.replace('`', "``"));
     let under = |side: &str, column: &str, collation: &str| match collation {
         "" => format!("{side}{}", bt(column)),
-        collation => format!("convert({side}{} using {}) collate {collation}", bt(column), collation.split('_').next().unwrap_or(collation)),
+        collation => format!("{side}{} collate {collation}", bt(column)),
     };
     let mut changed = false;
     let set: Vec<String> = columns.iter().map(|c| format!("c.{} is not null", bt(c))).collect();

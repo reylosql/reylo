@@ -4920,8 +4920,10 @@ async fn a_dry_run_checks_composite_keys_and_waits_on_a_parent_filled_first() {
 
 /// On MySQL: a foreign key added back after its columns move to another collation compares the
 /// target's values under the new one, and so does a unique key whose column does, so the dry run
-/// reads them so: a row that met its parent only under the old collation fails it, as do values that
-/// repeat only under the new one, and once none does, neither key says anything.
+/// reads them so: a row that met its parent only under the old collation fails it, in the migration
+/// that adds the key back alone, as do values that repeat only under the new one, and once none does,
+/// neither key says anything. A change of character set converts the values, which no read can
+/// follow: that key can't be checked.
 #[tokio::test(flavor = "current_thread")]
 async fn a_dry_run_reads_a_mysql_key_under_its_columns_new_collation() {
     let Some(mut p) = P::new(Dialect::Mysql).await else { return };
@@ -4929,19 +4931,23 @@ async fn a_dry_run_reads_a_mysql_key_under_its_columns_new_collation() {
     p.file("20261128100000_p.sql", "create table p (code varchar(10) not null, primary key (code));");
     p.file("20261128100001_c.sql", "create table c (id int primary key, code varchar(10), constraint c_code foreign key (code) references p (code));");
     p.file("20261128100002_tags.sql", "create table tags (name varchar(10) collate utf8mb4_bin, unique key tags_name (name));");
+    p.file("20261128100003_names.sql", "create table names (n varchar(10) collate utf8mb4_bin, unique key names_n (n));");
     assert_eq!(p.migrate().await, 0, "{}", p.peek());
-    p.exec("insert into p values ('a'), ('b'); insert into c values (10, 'A'), (11, 'b'); insert into tags values ('a'), ('A')").await;
+    p.exec("insert into p values ('a'), ('b'); insert into c values (10, 'A'), (11, 'b'); insert into tags values ('a'), ('A'); insert into names values ('a😀'), ('b😀')").await;
     p.file("20261128110000_bin.sql", "alter table c drop foreign key c_code;");
     p.file("20261128110001_bin_2.sql", "alter table c modify column code varchar(10) collate utf8mb4_bin;");
     p.file("20261128110002_bin_3.sql", "alter table p modify column code varchar(10) collate utf8mb4_bin not null;");
     p.file("20261128110003_bin_4.sql", "alter table c add constraint c_code foreign key (code) references p (code);");
     p.file("20261128110004_tags_ci.sql", "alter table tags modify column name varchar(10) collate utf8mb4_0900_ai_ci;");
-    p.schema("create table p (code varchar(10) collate utf8mb4_bin not null, primary key (code));\ncreate table c (id int primary key, code varchar(10) collate utf8mb4_bin, constraint c_code foreign key (code) references p (code));\ncreate table tags (name varchar(10) collate utf8mb4_0900_ai_ci, unique key tags_name (name));\n");
+    p.file("20261128110005_names_latin1.sql", "alter table names modify column n varchar(10) collate latin1_bin;");
+    p.schema("create table p (code varchar(10) collate utf8mb4_bin not null, primary key (code));\ncreate table c (id int primary key, code varchar(10) collate utf8mb4_bin, constraint c_code foreign key (code) references p (code));\ncreate table tags (name varchar(10) collate utf8mb4_0900_ai_ci, unique key tags_name (name));\ncreate table names (n varchar(10) collate latin1_bin, unique key names_n (n));\n");
     p.output();
     assert_eq!(p.dry_run().await, 1, "{}", p.peek());
     let out = p.output();
     assert_has!(&out, r"_bin_4\.sql\n(      ! [^\n]*\n)*      ✗ It fails on this database: 1 row breaks c_code under its columns' new collation\n");
     assert_has!(&out, r"_tags_ci\.sql\n(      ! [^\n]*\n)*      ✗ It fails on this database: 1 value repeats in tags_name under its columns' new collation\n");
+    assert_eq!(out.matches("breaks c_code").count(), 1, "the key is read where it is added back alone: {out}");
+    assert_has!(&out, r"_names_latin1\.sql\n(      ! [^\n]*\n)*      ! It holds rows to names_n, which can't be checked here: it converts their values\n");
     p.exec("update c set code = 'a' where id = 10; delete from tags where name = 'A'").await;
     assert_eq!(p.dry_run().await, 0, "{}", p.peek());
     let out = p.output();

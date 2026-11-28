@@ -1539,7 +1539,10 @@ impl MysqlAlterer {
     fn table_statements(&self, table: &str, from: &Body, to: &Body, pairs: &[(String, String)], made: &BTreeSet<String>) -> Vec<String> {
         let set_null = self.set_null.borrow();
         let held = held_columns(from, to, pairs);
-        let late: BTreeSet<String> = held.iter().filter(|(c, _)| set_null.contains(&format!("column {table}.{c}"))).map(|(c, _)| c.clone()).collect();
+        // InnoDB copies a table that has a FULLTEXT index to change it, and the copy refuses a column
+        // made NOT NULL under any foreign key: such a table keeps every step in place.
+        let copies = from.indexes.iter().any(|(_, _, def)| def.starts_with("fulltext "));
+        let late: BTreeSet<String> = held.iter().filter(|(c, _)| copies || set_null.contains(&format!("column {table}.{c}"))).map(|(c, _)| c.clone()).collect();
         let early: Vec<&str> = held.iter().filter(|(c, _)| !late.contains(c)).map(|(_, clause)| clause.as_str()).collect();
         if !early.is_empty() {
             let clauses = early.join(", ");
@@ -1788,12 +1791,15 @@ impl Alterer for MysqlAlterer {
         *self.swaps.borrow_mut() = swaps;
         *self.early.borrow_mut() = Vec::new();
         let sets_null = |o: &Object| tokenize(&o.def, Dialect::Mysql).windows(2).any(|w| w[0].upper() == "SET" && w[1].upper() == "NULL");
+        // A key's own table: the longest whose name its id opens with (`foreign key <table>.<key>`),
+        // either of which may hold a dot.
+        let tables: Vec<&str> = from.objects.keys().filter_map(|id| id.strip_prefix("table ")).collect();
         *self.set_null.borrow_mut() = from
             .objects
             .values()
             .filter(|o| o.kind == Some(Kind::Constraint) && sets_null(o))
             .flat_map(|o| {
-                let own = o.id.strip_prefix("foreign key ").and_then(|r| r.rsplit_once('.')).map(|(t, _)| format!("column {t}.")).unwrap_or_default();
+                let own = tables.iter().filter(|t| o.id.starts_with(&format!("foreign key {t}."))).max_by_key(|t| t.len()).map(|t| format!("column {t}.")).unwrap_or_default();
                 o.deps.iter().filter(|d| !own.is_empty() && d.starts_with(&own)).cloned().collect::<Vec<_>>()
             })
             .collect();
