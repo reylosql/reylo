@@ -1181,8 +1181,15 @@ pub(crate) fn tables_anywhere(q: &Query, schema: Option<&str>) -> Vec<String> {
         let depth = ctes.len();
         if let Some(w) = &q.with {
             for c in &w.cte_tables {
-                ctes.push(c.alias.name.value.clone());
-                query(&c.query, ctes, schema, out);
+                // A WITH query's body sees the ones before it, and with RECURSIVE itself too: a
+                // name it reads otherwise is a table, or a WITH query of an enclosing query.
+                if w.recursive {
+                    ctes.push(c.alias.name.value.clone());
+                    query(&c.query, ctes, schema, out);
+                } else {
+                    query(&c.query, ctes, schema, out);
+                    ctes.push(c.alias.name.value.clone());
+                }
             }
         }
         body(&q.body, ctes, schema, out);

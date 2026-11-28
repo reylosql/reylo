@@ -4,6 +4,7 @@ distinct_random.sql: many () -> { id: bigint }
 distinct_random_where.sql: many () -> { id: bigint }
 distinct_random_with.sql: many () -> { id: bigint }
 distinct_random_with_escaped.sql: many () -> { id: bigint }
+distinct_random_with_shadowed.sql: many () -> { id: bigint }
 dual.sql: one (n: varchar) -> { n: varchar? }
 dual_where.sql: at_most_one (n: varchar, ok: int32) -> { n: varchar? }
 group_random.sql: many () -> { id: bigint, n: bigint }
