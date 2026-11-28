@@ -6,8 +6,11 @@ import type { Tooling } from "./tooling-loader.ts";
 import { releaseConnections } from "./analyze.ts";
 import { sqlModule } from "./loader.ts";
 import { mapperHandlers } from "./mapper-server.ts";
-import { embeddedModule } from "./embedded-module.ts";
+import { embeddedModule, projectMigrations } from "./embedded-module.ts";
 import { migrate } from "./migrate-deploy.ts";
 import { analyze } from "./analyze-api.ts";
 
-export default { analyze, migrate, sqlModule, embeddedModule, releaseConnections, mapperHandlers } satisfies Tooling;
+/** The project's migrations, from the working directory, as `migrate()` deploys from it. */
+const migrations = () => projectMigrations(process.cwd());
+
+export default { analyze, migrate, migrations, sqlModule, embeddedModule, releaseConnections, mapperHandlers } satisfies Tooling;
