@@ -73,8 +73,8 @@ impl AsyncAnswerer<Describe> for Answers<'_> {
     }
 }
 
-/// A catalog query with its values written into the text, as mysql2's `query()` writes them
-/// (`sqlstring`): each `?` in turn, a string quoted with its special characters escaped.
+/// A catalog query with its values written into the text: each `?` in turn, a string as every
+/// session reads it ([`literal`]).
 pub fn interpolate(sql: &str, params: &[Value]) -> Option<String> {
     let mut out = String::with_capacity(sql.len());
     let mut params = params.iter();
@@ -87,14 +87,34 @@ pub fn interpolate(sql: &str, params: &[Value]) -> Option<String> {
             Value::Null => out.push_str("NULL"),
             Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
             Value::Number(n) => out.push_str(&n.to_string()),
-            Value::String(s) => out.push_str(&quote(s)),
+            Value::String(s) => out.push_str(&literal(s)),
             _ => return None,
         }
     }
     params.next().is_none().then_some(out)
 }
 
-/// A string as a MySQL literal, by `sqlstring`'s escapes.
+/// A string as a MySQL literal that every session reads as written, whatever its `sql_mode`: a quote
+/// doubled and every other character as it is, where [`quote`]'s `\'` and `\n` are text under
+/// NO_BACKSLASH_ESCAPES. A backslash alone has no such spelling, so it is escaped, as a session
+/// without that mode reads it, and NUL with it.
+fn literal(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for c in s.chars() {
+        match c {
+            '\0' => out.push_str("\\0"),
+            '\'' => out.push_str("''"),
+            '\\' => out.push_str("\\\\"),
+            c => out.push(c),
+        }
+    }
+    out.push('\'');
+    out
+}
+
+/// A string as a MySQL literal, by `sqlstring`'s escapes, as mysql2's `query()` and the drivers
+/// that write a value into the statement's text write it.
 pub fn quote(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('\'');
@@ -150,8 +170,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_catalog_query_takes_its_values_as_mysql2_writes_them() {
-        assert_eq!(interpolate("select find_in_set(t, ?)", &[json!("users,it's\\")]).as_deref(), Some("select find_in_set(t, 'users,it\\'s\\\\')"));
+    fn a_catalog_query_takes_its_values_as_every_session_reads_them() {
+        assert_eq!(interpolate("select find_in_set(t, ?)", &[json!("users,it's \"x\"\n\\")]).as_deref(), Some("select find_in_set(t, 'users,it''s \"x\"\n\\\\')"));
         assert_eq!(interpolate("select ?, ?", &[json!(1), Value::Null]).as_deref(), Some("select 1, NULL"));
         assert_eq!(interpolate("select ?", &[]), None);
         assert_eq!(decoded(My::Bytes(b"12".to_vec()), 8), json!(12));

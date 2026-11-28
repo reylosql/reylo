@@ -7,3 +7,5 @@ backslash_key.sql: at_most_one (e: varchar) -> { id: int, name: varchar(≤40) }
 backslash_then_quote_and_placeholder.sql: many (x: int32) -> { id: int }
 doubled_quote.sql: at_most_one (id: int32) -> { id: int }
 plain_string.sql: at_most_one (id: int32) -> { id: int }
+quote_in_table_name.sql: many () -> { doc: json { u16: varchar?, plain: varchar(≤4)? } }
+quote_in_table_name_derived.sql: many () -> { doc: json { u16: varchar?, plain: varchar? } }
