@@ -97,7 +97,7 @@ It leaves out the history tables of other migration tools, as it leaves out its 
 | Atlas | `atlas_schema_revisions`, in its schema of that name on Postgres |
 | Wrangler, on D1 | `d1_migrations` |
 
-On D1 and Durable Objects, it also leaves out Cloudflare's own `_cf_` tables.
+It also leaves out Litestream's tables, and on D1 and Durable Objects, Cloudflare's own `_cf_` tables.
 
 On Supabase, it leaves out what every new Supabase database has, such as the `supabase_realtime` publication. It writes your changes to it, and each table's own grants:
 

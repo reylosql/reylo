@@ -117,18 +117,31 @@ select v.name || '_shadow' from sqlite_schema v where v.type = 'index' and v.sql
 union all select v.name || '_shadow_idx' from sqlite_schema v where v.type = 'index' and v.sql like '%libsql_vector_idx%' \
 union all select m.name from sqlite_schema m where m.name = 'libsql_vector_meta_shadow' and m.sql = 'CREATE TABLE libsql_vector_meta_shadow ( name TEXT PRIMARY KEY, metadata BLOB ) WITHOUT ROWID')";
 
+/// Whether a SQLite file is one Cloudflare's runtime keeps, a D1 database's or a Durable Object's:
+/// it holds `_cf_METADATA` or `_cf_KV` as workerd defines them. Only there is `_cf_` Cloudflare's
+/// prefix, which the runtime refuses a statement of the project's to make a name with; in any other
+/// file a table named so is the project's.
+const CLOUDFLARE_FILE: &str = "exists (select 1 from sqlite_schema cf where cf.type = 'table' and (\
+cf.name = '_cf_METADATA' and cf.sql like 'CREATE TABLE _cf_METADATA (%key INTEGER PRIMARY KEY,%value BLOB%)' \
+or cf.name = '_cf_KV' and cf.sql like 'CREATE TABLE _cf_KV (%key TEXT PRIMARY KEY,%value BLOB%) WITHOUT ROWID'))";
+
+/// The tables a tool other than a migration tool makes in every SQLite database it works on, each
+/// known by a name no table of an application's takes: Litestream's, which it writes to as it
+/// replicates the file.
+const SQLITE_TOOL_TABLES: &[&str] = &["_litestream_seq", "_litestream_lock"];
+
 /// A condition on a `sqlite_schema` or `pragma_table_list` row, whose own name is in `name` and its
 /// table's in `tbl`, that holds for every object of the project's and for none that SQLite, a
 /// platform or another tool keeps for itself: SQLite's own (`sqlite_` and anything after it, in any
-/// case, which SQLite refuses to make), Cloudflare's (`_cf_`, which D1 and a Durable Object keep in
-/// every database, and refuse to make), Turso's engine's, a libSQL vector index's, and a history
-/// table and what comes with it. Every catalog, diff, dump and wipe of a SQLite database reads its
-/// objects through this one condition, so that none of them reads one the others leave out. In a
-/// pattern `_` stands for any character, so each prefix is matched with it escaped: a table of the
-/// project's named `sqlites` is its own.
+/// case, which SQLite refuses to make), Cloudflare's in a file of its runtime (`_cf_`, in any case),
+/// Turso's engine's, a libSQL vector index's, Litestream's, and a history table and what comes with
+/// it. Every catalog, diff, dump and wipe of a SQLite database reads its objects through this one
+/// condition. In a pattern `_` stands for any character, so each prefix is matched with it escaped:
+/// a table of the project's named `sqlites` is its own.
 pub(crate) fn sqlite_project(tbl: &str) -> String {
+    let tools = SQLITE_TOOL_TABLES.iter().map(|t| format!("'{t}'")).collect::<Vec<_>>().join(", ");
     format!(
-        r"name not like 'sqlite\_%' escape '\' and {tbl} not like 'sqlite\_%' escape '\' and name not like '\_cf\_%' escape '\' and {tbl} not like '\_cf\_%' escape '\' and name {NOT_TURSO_OWN} and {tbl} {NOT_TURSO_OWN} and {} and {NOT_LIBSQL_VECTOR_OWN}",
+        r"name not like 'sqlite\_%' escape '\' and {tbl} not like 'sqlite\_%' escape '\' and not (({tbl} like '\_cf\_%' escape '\' or name like '\_cf\_%' escape '\') and {CLOUDFLARE_FILE}) and name {NOT_TURSO_OWN} and {tbl} {NOT_TURSO_OWN} and lower({tbl}) not in ({tools}) and {} and {NOT_LIBSQL_VECTOR_OWN}",
         not_history(tbl)
     )
 }

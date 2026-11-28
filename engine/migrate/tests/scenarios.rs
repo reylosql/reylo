@@ -9959,6 +9959,23 @@ async fn init_leaves_out_cloudflares_own_tables() {
     assert_eq!(p.rows("select * from users").await.len(), 0);
 }
 
+/// Outside a file of Cloudflare's runtime, which alone refuses `_cf_` names, a table named so is the
+/// project's. Litestream's tables, which it makes in every database it replicates, are not.
+#[tokio::test(flavor = "current_thread")]
+async fn a_cf_table_outside_cloudflare_is_the_projects() {
+    let Some(mut p) = P::new(Dialect::Sqlite).await else { return };
+    p.exec("create table _cf_parent (id integer primary key); create table child (id integer primary key, parent integer references _cf_parent (id));
+        CREATE TABLE IF NOT EXISTS _litestream_seq (id INTEGER PRIMARY KEY, seq INTEGER); CREATE TABLE IF NOT EXISTS _litestream_lock (id INTEGER); insert into _litestream_seq values (1, 1);").await;
+    assert_eq!(p.run(async |o, log| reylo_migrate::init(o, &[], log).await).await, 0, "{}", p.peek());
+    p.output();
+    let schema = std::fs::read_to_string(p.dir.join("schema.sql")).unwrap();
+    assert!(has(&schema, r"(?i)create table _cf_parent\b") && has(&schema, r"(?i)create table child\b"), "{schema}");
+    assert!(!has(&schema, "(?i)litestream"), "{schema}");
+    assert_eq!(p.dry_run().await, 0, "{}", p.peek());
+    assert_eq!(p.run(async |o, log| reylo_migrate::db_wipe(o, false, log).await).await, 0, "{}", p.peek());
+    assert_eq!(p.rows("select * from _litestream_seq").await.len(), 1);
+}
+
 // reylo run on a SQLite file that isn't there refuses, as the migrations' commands do, rather than
 // make an empty database at a mistyped path.
 #[tokio::test(flavor = "current_thread")]
