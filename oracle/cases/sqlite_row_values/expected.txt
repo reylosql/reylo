@@ -8,5 +8,5 @@ row_in_select_reversed.sql: many (created_at: text(UTF-8, ill-formed), id: int64
 row_is_not.sql: many (created_at: text(UTF-8, ill-formed), id: int64) -> { id: INTEGER }
 row_reversed.sql: many (created_at: text(UTF-8, ill-formed), id: int64) -> { id: INTEGER }
 row_subquery.sql: many (created_at: text(UTF-8, ill-formed), id: int64) -> { id: INTEGER, name: TEXT(UTF-8, ill-formed) }
-scalar_subquery.sql: many (id: int64) -> { id: INTEGER }
+scalar_subquery.sql: at_most_one (id: int64) -> { id: INTEGER }
 update_row_subquery.sql: at_most_one (name: text(UTF-8, ill-formed), created_at: text(UTF-8, ill-formed), id: int64) -> { id: INTEGER, name: TEXT(UTF-8, ill-formed) }

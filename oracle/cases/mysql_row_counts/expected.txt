@@ -63,12 +63,12 @@ key_with_shadows_recursive.sql: many (id: int32) -> { id: bigint | int }
 key_with_shadows_table.sql: many (id: int32) -> { id: bigint | int }
 lateral.sql: at_most_one (id: int32) -> { id: int, n: bigint }
 no_from.sql: one () -> { one: bigint | int }
-no_from_dual.sql: many () -> { one: bigint | int }
-no_from_dual_where.sql: many () -> { one: bigint | int }
-no_from_having.sql: many () -> { one: bigint | int }
+no_from_dual.sql: one () -> { one: bigint | int }
+no_from_dual_where.sql: at_most_one () -> { one: bigint | int }
+no_from_having.sql: at_most_one () -> { one: bigint | int }
 no_from_now.sql: one (x: int32) -> { at: datetime, next: bigint | double | decimal? }
 no_from_union.sql: many () -> { one: bigint | int }
-no_from_where.sql: many (flag: int32) -> { one: bigint | int }
+no_from_where.sql: at_most_one (flag: int32) -> { one: bigint | int }
 sum_no_rows.sql: one () -> { total: decimal? }
 table_limit.sql: at_most_one () -> { post_id: int, tag: varchar(≤20) }
 table_statement.sql: many () -> { post_id: int, tag: varchar(≤20) }

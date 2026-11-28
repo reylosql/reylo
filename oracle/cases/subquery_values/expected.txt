@@ -1,0 +1,20 @@
+derived_random.sql: many () -> { id: int4 } key (id)
+derived_stable.sql: at_most_one () -> { id: int4 }
+derived_view_volatile.sql: many () -> { id: int4 } key (id)
+distinct_random.sql: many () -> { id: int4 } key (id)
+key_any.sql: at_most_one (id: int4) -> { id: int4 }
+key_in.sql: at_most_one (id: int4) -> { id: int4 }
+key_in_correlated.sql: many () -> { id: int4 } key (id)
+key_in_limit.sql: at_most_one () -> { id: int4 }
+key_in_many.sql: many () -> { id: int4 } key (id)
+key_in_nested_with.sql: many () -> { id: int4 } key (id)
+key_in_view.sql: many (id: int4) -> { id: int4 } key (id)
+key_in_view_qualified.sql: many (id: int4) -> { id: int4 } key (id)
+key_in_with.sql: at_most_one (id: int4) -> { name: text(¬NUL) }
+key_subquery_join_on_outer.sql: many () -> { id: int4 } key (id)
+key_subquery_nested_with.sql: many () -> { id: int4 } key (id)
+key_subquery_view.sql: at_most_one (id: int4) -> { id: int4 }
+key_subquery_with.sql: at_most_one (id: int4) -> { name: text(¬NUL) }
+key_subquery_with_cast.sql: at_most_one (id: int4) -> { name: text(¬NUL) }
+key_subquery_with_list.sql: at_most_one (id: int4) -> { name: text(¬NUL) }
+key_subquery_with_outer.sql: many (id: int4) -> { name: text(¬NUL) }
