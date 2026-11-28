@@ -737,9 +737,17 @@ impl Alterer for SqliteAlterer {
         }
         let schemas = self.schemas.borrow();
         let Some((f, t)) = schemas.as_ref() else { return Vec::new() };
-        let mut candidates = parents_of(f, t, &from.id);
-        candidates.extend(circle(f, t, &from.id).into_iter().filter(|m| *m != from.id && !candidates.contains(m)).collect::<Vec<_>>());
-        let mut out: Vec<String> = candidates.into_iter().filter(|p| self.makes_again(p, &from.id)).collect();
+        // Every table whose change makes it again, read off what that change writes.
+        let tables: Vec<&String> = f.objects.values().filter(|o| o.kind == Some(Kind::Table) && o.id != from.id && t.objects.contains_key(&o.id)).map(|o| &o.id).collect();
+        let mut out: Vec<String> = tables.iter().filter(|p| self.makes_again(p, &from.id)).map(|p| (*p).clone()).collect();
+        // A table that stops referencing one this change drops stops first, but for one it makes again.
+        let made: Vec<&String> = tables.iter().copied().filter(|m| self.makes_again(&from.id, m)).chain(std::iter::once(&from.id)).collect();
+        for y in tables.iter().filter(|y| !made.contains(y)) {
+            let (Some(was), Some(is)) = (f.objects.get(*y), t.objects.get(*y)) else { continue };
+            if made.iter().any(|m| was.deps.contains(*m) && !is.deps.contains(*m)) && !out.contains(*y) {
+                out.push((*y).clone());
+            }
+        }
         let decided = |name: &str| self.decided.of(name);
         if rebuilt_by(f, t, &from.id, &decided).as_deref() == Some(from.id.as_str()) {
             let circling = circle(f, t, &from.id);
@@ -974,16 +982,26 @@ fn alter_table(from: &Object, to: &Object, decided: Renamed, schemas: Option<&(S
         let tokens = tokenize(text, Dialect::Sqlite);
         (0..tokens.len()).filter(|&k| tokens[k].upper() == "REFERENCES").filter_map(|k| tokens.get(k + 1).and_then(qualifier)).collect()
     };
-    let mut cycle = references(target).iter().any(|r| names.contains(r));
-    let (mut order, mut left): (Vec<usize>, Vec<usize>) = (Vec::new(), (0..children.len()).collect());
-    while !left.is_empty() {
-        let ready = |k: usize| references(&carried[k].0).iter().all(|r| *r == names[k] || !names.contains(r) || order.iter().any(|&o| names[o] == *r));
-        let at = left.iter().position(|&k| ready(k)).unwrap_or_else(|| {
-            cycle = true;
-            0
-        });
-        order.push(left.remove(at));
-    }
+    // An order of `texts` (the children's) after the rebuilt table's text, `first`, and whether
+    // none holds.
+    let ordered = |first: &str, texts: &[&str]| -> (Vec<usize>, bool) {
+        let mut cycle = references(first).iter().any(|r| names.contains(r));
+        let (mut order, mut left): (Vec<usize>, Vec<usize>) = (Vec::new(), (0..texts.len()).collect());
+        while !left.is_empty() {
+            let ready = |k: usize| references(texts[k]).iter().all(|r| *r == names[k] || !names.contains(r) || order.iter().any(|&o| names[o] == *r));
+            let at = left.iter().position(|&k| ready(k)).unwrap_or_else(|| {
+                cycle = true;
+                0
+            });
+            order.push(left.remove(at));
+        }
+        (order, cycle)
+    };
+    let written: Vec<&str> = carried.iter().map(|(text, ..)| text.as_str()).collect();
+    let (order, circular) = ordered(target, &written);
+    // The old tables are dropped too, which reference each other as they were.
+    let was: Vec<&str> = children.iter().map(|(x, _)| x.create.first().map_or("", String::as_str)).collect();
+    let cycle = circular || ordered(from.create.first().map_or("", String::as_str), &was).1;
     let children: Vec<(&Object, &Object)> = order.iter().map(|&k| children[k]).collect();
     let mut slots: Vec<Option<(String, Vec<String>, Vec<String>, Option<Shape>)>> = carried.into_iter().map(Some).collect();
     let carried: Vec<(String, Vec<String>, Vec<String>, Option<Shape>)> = order.iter().filter_map(|&k| slots[k].take()).collect();
@@ -1591,25 +1609,6 @@ fn children_of<'a>(from: &'a Schema, to: &'a Schema, id: &str) -> Vec<(&'a Objec
         }
     }
     family
-}
-
-/// The tables whose rebuild makes table `id` again with them (`children_of`, the other way round): those
-/// it references at any depth, through tables that still reference the next in `to`.
-fn parents_of(from: &Schema, to: &Schema, id: &str) -> Vec<String> {
-    let table = |id: &str| from.objects.get(id).is_some_and(|o| o.kind == Some(Kind::Table) && !Info::of(o).virtual_table);
-    let mut seen: Vec<String> = vec![id.to_string()];
-    let mut k = 0;
-    while k < seen.len() {
-        let child = seen[k].clone();
-        k += 1;
-        let (Some(x), Some(y)) = (from.objects.get(&child), to.objects.get(&child)) else { continue };
-        for d in x.deps.iter().filter(|d| y.deps.contains(*d) && table(d)) {
-            if !seen.contains(d) {
-                seen.push(d.clone());
-            }
-        }
-    }
-    seen.split_off(1)
 }
 
 /// The tables that table `id` references and that reference it back, at any depth, as the target
