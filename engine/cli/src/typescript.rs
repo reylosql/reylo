@@ -538,8 +538,6 @@ fn codec_type(codec: &str, t: &Value, member: &dyn Fn(&Value) -> String, input: 
 
 const JSON_TYPE: &str = "Json";
 const JSON_INPUT_TYPE: &str = "JsonInput";
-/// What an element of a `jsonb[]` member of a structured parameter takes: any JSON but an array (src/render.ts).
-const MEMBER_JSON: &str = "Exclude<JsonInput, readonly unknown[]>";
 const NO_CODECS: &Value = &Value::Null;
 
 /// The form Postgres writes `t` in inside a JSON document, of those `json_image` names
@@ -1047,8 +1045,8 @@ fn render_param_type(t: &Value, dialect: &str, in_row: bool, members: Option<&Va
                 .iter()
                 .map(|f| {
                     // A JSON array inside a member is read as one more dimension, so a jsonb[] member's element is any JSON but an array (src/rows.ts).
-                    let json_array = dialect == "postgres" && column_kind(&f["type"], dialect) == "json[]" && self::kind(&f["type"]["element"]["type"]) == "json" && f["type"]["element"]["type"].get("schema").is_none_or(Value::is_null);
-                    let ty = if json_array { format!("{MEMBER_JSON}[]") } else { render_param_type(&f["type"], dialect, true, None, codecs) };
+                    let json_array = dialect == "postgres" && column_kind(&f["type"], dialect) == "json[]" && self::kind(&f["type"]["element"]["type"]) == "json";
+                    let ty = if json_array { format!("Exclude<{}, readonly unknown[]>[]", render_param_type(&f["type"]["element"]["type"], dialect, true, None, codecs)) } else { render_param_type(&f["type"], dialect, true, None, codecs) };
                     format!("{}{}: {}", ident(f["name"].as_str().unwrap_or_default()), if is_true(&f["optional"]) { "?" } else { "" }, if is_true(&f["nullable"]) { or_null(&ty) } else { ty })
                 })
                 .collect();

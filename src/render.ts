@@ -30,8 +30,6 @@ export { JSON_TYPE };
 
 /** What a JSON parameter with no schema takes, the type `reylo` exports: any value `JSON.stringify` writes. */
 export const JSON_INPUT_TYPE = "JsonInput";
-/** What an element of a `jsonb[]` member of a structured parameter takes: any JSON but an array, which Postgres would read as one more dimension. */
-const MEMBER_JSON = "Exclude<JsonInput, readonly unknown[]>";
 
 /** A type that may also be null. `Json` already admits null, which a NOT NULL `jsonb` column can hold, so it reads the same either way, as does `JsonInput`. */
 export const orNull = (type: string) => (type === JSON_TYPE || type === JSON_INPUT_TYPE ? type : `${type} | null`);
@@ -484,8 +482,8 @@ export function renderParamType(t: EngineType, dialect: Dialect = "postgres", in
     if (record !== undefined) {
       const fields = record.fields.map((f) => {
         // A JSON array inside a member is read as one more dimension, so a jsonb[] member's element is any JSON but an array (src/rows.ts).
-        const jsonArray = dialect === "postgres" && f.type.kind === "array" && columnKind(f.type, dialect) === "json[]" && f.type.element.type.kind === "json" && f.type.element.type.schema === undefined;
-        const type = jsonArray ? `${MEMBER_JSON}[]` : renderParamType(f.type, dialect, true, undefined, codecs);
+        const element = f.type.kind === "array" && dialect === "postgres" && columnKind(f.type, dialect) === "json[]" && f.type.element.type.kind === "json" ? f.type.element.type : undefined;
+        const type = element ? `Exclude<${renderParamType(element, dialect, true, undefined, codecs)}, readonly unknown[]>[]` : renderParamType(f.type, dialect, true, undefined, codecs);
         return `${ident(f.name)}${f.optional ? "?" : ""}: ${f.nullable ? orNull(type) : type}`;
       });
       const row = fields.length ? `{ ${fields.join("; ")} }` : "Record<never, never>";

@@ -957,7 +957,8 @@ function slonikValue(kind: Kind, v: unknown, name: string, delim?: string): unkn
   if (typeof v === "string") return textDecoder(kind, delim)(v);
   // pg parses an array's text into an array, each element by the element type's parser, which
   // Reylo's tag passes through for the types it names.
-  if (Array.isArray(v) && wholeArrayKind(elementKind(kind)) !== undefined) return coerce(kind, v, name, delim, true);
+  // An array of whole arrays, or of JSON, whose levels coerce records from the elements' text.
+  if (Array.isArray(v) && (wholeArrayKind(elementKind(kind)) !== undefined || elementKind(kind) === "json")) return coerce(kind, v, name, delim, true);
   if (Array.isArray(v) && kind.endsWith("[]")) return v.map((e) => (Array.isArray(e) ? slonikValue(kind, e, name, delim) : slonikValue(elementKind(kind), e, name, delim)));
   if (SLONIK_STRICT.test(kind)) {
     throw new DecodeError(`Column "${name}" reached Reylo already converted by Slonik's driver (${v instanceof Date ? "a Date" : typeof v}), which ignored the query's type parsers, as a custom driverFactory may: Reylo refuses it rather than return a value that may have been rounded.`);

@@ -464,6 +464,7 @@ test("a Standard Query holds a Postgres array column to one dimension, as .run()
   for (const nestedArrays of [false, true]) {
     const docs = defineQuery<{}, { docs: unknown }, "many", "postgres">({ dialect: "postgres", sql: "select docs from t", params: [], columns: [["docs", "json[]"]], cardinality: "many", nestedArrays })["~standard"].query;
     assert.deepEqual(docs.decode([['{"[1,2]","[3,4]"}']]), [{ docs: [[1, 2], [3, 4]] }]);
-    assert.throws(() => docs.decode([["{{1,2},{3,4}}"]]), /^TypeError: Column "docs" holds an array of 2 dimensions, and its type has one:/);
+    // allow_nested_arrays is no way out for an array of JSON, so the error offers only to_jsonb.
+    assert.throws(() => docs.decode([["{{1,2},{3,4}}"]]), /^TypeError: Column "docs" holds an array of 2 dimensions, and its type has one: .* Select to_jsonb\(docs\) to read it as JSON\.$/);
   }
 });

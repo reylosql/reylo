@@ -1288,7 +1288,7 @@ export function parseArray(text: string, element: (text: string) => unknown, del
 export function withinDimensions(v: unknown, kind: Kind, column: string, path?: FieldPath, jsonOnly = false): unknown {
   if (!kind.endsWith("[]")) {
     // Of two fields of one name the row holds the last one's value, and its type shows that field.
-    if (isRowKind(kind) && isObject(v)) for (const [name, inner] of lastOfEach(rowFields(kind))) if (holdsArray(inner)) withinDimensions(v[name], inner, column, { fields: [...(path?.fields ?? []), name], inArray: path?.inArray ?? false }, jsonOnly);
+    if (isRowKind(kind) && isObject(v)) for (const [name, inner] of lastOfEach(rowFields(kind))) if (jsonOnly ? holdsJsonArray(inner) : holdsArray(inner)) withinDimensions(v[name], inner, column, { fields: [...(path?.fields ?? []), name], inArray: path?.inArray ?? false }, jsonOnly);
     return v;
   }
   if (!Array.isArray(v)) return v;
@@ -1308,7 +1308,7 @@ export function withinDimensions(v: unknown, kind: Kind, column: string, path?: 
   // A whole array's own dimensions, from its text, whatever its elements are.
   const recorded = wholeDepths.get(v);
   if (recorded !== undefined && whole === undefined) {
-    if (holds && recorded > declared) throw tooDeep(column, recorded, declared, path);
+    if (holds && recorded > declared) throw tooDeep(column, recorded, declared, path, element === "json");
     rows(v);
     return v;
   }
@@ -1326,7 +1326,7 @@ export function withinDimensions(v: unknown, kind: Kind, column: string, path?: 
   }
   let depth = 0;
   for (let level: unknown = v; Array.isArray(level) && (depth === 0 || isLevel(element, level)); level = level.find((e) => e !== null)) depth++;
-  if (holds && depth > declared) throw tooDeep(column, depth, declared, path);
+  if (holds && depth > declared) throw tooDeep(column, depth, declared, path, element === "json");
   rows(v);
   return v;
 }
@@ -1357,17 +1357,24 @@ export function holdsArray(kind: Kind): boolean {
 /** A name as SQL reads it whatever it is, a keyword (`current_date`) or mixed case included: quoted. */
 const ident = (name: string) => `"${name.replace(/"/g, '""')}"`;
 
+/** Whether every element of a driver's array, at each level, is still its text or NULL. */
+function textLeaves(v: readonly unknown[]): boolean {
+  return v.every((e) => e === null || e === undefined || typeof e === "string" || (Array.isArray(e) && textLeaves(e)));
+}
+
 /** Why a Postgres array is refused: it holds `depth` dimensions, and its type `declared`; `path` names the row value's field that holds it. */
-function tooDeep(column: string, depth: number, declared: number, path?: FieldPath): DecodeError {
+function tooDeep(column: string, depth: number, declared: number, path?: FieldPath, json = false): DecodeError {
+  // allow_nested_arrays types no array of JSON at any depth, so for one it is no way out.
+  const nesting = json ? "" : " allow_nested_arrays: true in .reylo.yaml to type it at any depth.";
   if (path !== undefined) {
     // The field read off the column, a column expression, is typed as JSON through to_jsonb, where the whole row's to_jsonb holds the field's array to its dimensions too. A field of a row inside an array can be read so only once that row is.
-    const read = path.inArray ? " Set" : ` Select to_jsonb((${ident(column)}).${path.fields.map(ident).join(".")}) to read that field as JSON, or set`;
-    return new DecodeError(`Column "${column}" holds, in its row value's field ${JSON.stringify(path.fields.join("."))}, an array of ${depth} dimensions, and its type has ${declared === 1 ? "one" : declared}: Reylo types a Postgres array with the dimensions its type declares, which Postgres doesn't enforce.${read} allow_nested_arrays: true in .reylo.yaml to type it at any depth.`);
+    const read = path.inArray ? (nesting ? ` Set${nesting}` : "") : ` Select to_jsonb((${ident(column)}).${path.fields.map(ident).join(".")}) to read that field as JSON${nesting ? `, or set${nesting}` : "."}`;
+    return new DecodeError(`Column "${column}" holds, in its row value's field ${JSON.stringify(path.fields.join("."))}, an array of ${depth} dimensions, and its type has ${declared === 1 ? "one" : declared}: Reylo types a Postgres array with the dimensions its type declares, which Postgres doesn't enforce.${read}`);
   }
   // An array built of arrays is too deep only where an array column it collects is.
   return new DecodeError(
     declared === 1
-      ? `Column "${column}" holds an array of ${depth} dimensions, and its type has one: Reylo types a Postgres array column with one dimension, which Postgres doesn't enforce. Select to_jsonb(${column}) to read it as JSON, or set allow_nested_arrays: true in .reylo.yaml to type it at any depth.`
+      ? `Column "${column}" holds an array of ${depth} dimensions, and its type has one: Reylo types a Postgres array column with one dimension, which Postgres doesn't enforce. Select to_jsonb(${column}) to read it as JSON${nesting ? `, or set${nesting}` : "."}`
       : `Column "${column}" holds an array of ${depth} dimensions, and its type has ${declared}: an array column it collects holds more than one dimension, which Postgres doesn't enforce. Collect to_jsonb(<that column>) instead to read it as JSON.`,
   );
 }
@@ -1616,7 +1623,8 @@ export function coerce(kind: Kind, v: unknown, column: string, delim = ",", post
       // A driver's own array, as PGlite's parser gives one, whose arrays are its levels: each whole
       // array in it is still its text.
       const out = v.map((e) => (Array.isArray(e) ? coerce(kind, e, column, delim, postgres) : coerce(element, e, column, ",", postgres)));
-      if (wholeArrayKind(element) !== undefined) {
+      // Its levels are the array's where each whole array, or each JSON value, is still its text; a JSON value the driver parsed may be an array itself, and leaves the levels unknown.
+      if (wholeArrayKind(element) !== undefined || (element === "json" && textLeaves(v))) {
         let depth = 0;
         for (let level: unknown = v; Array.isArray(level); level = level.find((e) => e !== null)) depth++;
         wholeDepths.set(out, depth);

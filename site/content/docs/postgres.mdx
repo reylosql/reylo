@@ -537,7 +537,7 @@ Postgres lets any array contain `NULL`, even in a `NOT NULL` column. So a `text[
 
 **Several dimensions**
 
-An array column is typed with one dimension. Postgres doesn't track an array's dimensions, so an `int[]` column can hold `'{{1,2},{3,4}}'` too. Then `.run()` throws, naming the column, and it does the same for an array in a row value's field. To read it, select `to_jsonb(cells)`, or `to_jsonb((u).tags)` for a field, or set [`allow_nested_arrays: true`](/docs/configuration#allow_nested_arrays). An array your query builds of arrays, like `array_agg(tags)`, is typed with each level it adds. A `jsonb[]` keeps one dimension even with the setting, since a JSON value may be an array itself: `'{{1,2},{3,4}}'::jsonb[]` throws, and `'{"[1,2]","[3,4]"}'::jsonb[]` is `[[1, 2], [3, 4]]`.
+An array column is typed with one dimension. Postgres doesn't track an array's dimensions, so an `int[]` column can hold `'{{1,2},{3,4}}'` too. Then `.run()` throws, naming the column, and it does the same for an array in a row value's field. To read it, select `to_jsonb(cells)`, or `to_jsonb((u).tags)` for a field, or set [`allow_nested_arrays: true`](/docs/configuration#allow_nested_arrays). An array your query builds of arrays, like `array_agg(tags)`, is typed with each level it adds. An array of JSON, `json[]` or `jsonb[]`, keeps one dimension even with the setting, since a JSON value may be an array itself: `'{{1,2},{3,4}}'::jsonb[]` throws, and `'{"[1,2]","[3,4]"}'::jsonb[]` is `[[1, 2], [3, 4]]`.
 
 <Pairs>
 
