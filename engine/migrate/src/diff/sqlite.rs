@@ -1428,30 +1428,39 @@ fn whole_columns(list: &[Token], columns: &BTreeSet<String>) -> bool {
     true
 }
 
-/// The names in the parenthesized list `tokens` opens with, folded, but for each one's collation and
-/// order: None where it holds anything but names.
+/// The names in the parenthesized list `tokens` opens with, folded, but for each one's order: None
+/// where it holds anything but names, a collation among them, which may not be its column's.
 fn listed(tokens: &[Token]) -> Option<(BTreeSet<String>, usize)> {
     if tokens.first()?.text != "(" {
         return None;
     }
     let close = tokens.iter().position(|t| t.text == ")")?;
-    let (mut out, mut k) = (BTreeSet::new(), 1);
-    while k < close {
-        let t = &tokens[k];
-        if t.upper() == "COLLATE" {
-            k += 2;
-            continue;
-        }
+    let mut out = BTreeSet::new();
+    for t in &tokens[1..close] {
         if t.text != "," && !matches!(t.upper().as_str(), "ASC" | "DESC") {
-            out.insert(name_of(t)?);
+            out.insert(name_of(t).filter(|_| t.upper() != "COLLATE")?);
         }
-        k += 1;
     }
     Some((out, close))
 }
 
+/// The primary key of a table's text, as its columns, folded.
+fn primary_key(sql: &str) -> Option<BTreeSet<String>> {
+    parts(sql).into_iter().find_map(|p| {
+        let words = p.words();
+        if !words.windows(2).any(|w| w[0] == "PRIMARY" && w[1] == "KEY") {
+            return None;
+        }
+        match &p.column {
+            Some(c) => Some(BTreeSet::from([c.clone()])),
+            None => p.tokens.iter().position(|t| t.text == "(").and_then(|at| listed(&p.tokens[at..])).map(|(cols, _)| cols),
+        }
+    })
+}
+
 /// The keys a foreign key can name in table `table` of `schema`, each as its columns, folded: its
-/// primary key, each UNIQUE, and each unique index on whole columns over every row.
+/// primary key, each UNIQUE, and each unique index on whole columns over every row. One that names a
+/// collation is left out, which may differ from its column's and so name no key.
 fn keys_of(schema: &Schema, table: &Object) -> Vec<BTreeSet<String>> {
     let mut out = Vec::new();
     for p in table.create.first().map(|sql| parts(sql)).unwrap_or_default() {
@@ -1477,15 +1486,17 @@ fn keys_of(schema: &Schema, table: &Object) -> Vec<BTreeSet<String>> {
 }
 
 /// Whether `text`, a table's, references table `parent` (as the target has it) by a key it has yet
-/// to have: a table `from` lacks, or columns no key of `from`'s covers. A reference that names no
-/// columns names the primary key, there before as after.
+/// to have: a table `from` lacks, columns no key of `from`'s covers, or, naming no columns, a primary
+/// key the change gives it or moves.
 fn new_key(text: &str, from: &Schema, parent: &Object) -> bool {
     let Some(old) = from.objects.get(&parent.id) else { return true };
     let (keys, name) = (keys_of(from, old), fold(&Info::of(parent).name));
+    let primary = || old.create.first().and_then(|sql| primary_key(sql)).is_none_or(|was| parent.create.first().and_then(|sql| primary_key(sql)) != Some(was));
     let tokens = tokenize(text, Dialect::Sqlite);
-    (0..tokens.len())
-        .filter(|&k| tokens[k].upper() == "REFERENCES" && tokens.get(k + 1).and_then(qualifier).as_deref() == Some(name.as_str()))
-        .any(|k| tokens.get(k + 2).and_then(|_| listed(&tokens[k + 2..])).is_some_and(|(cols, _)| !keys.contains(&cols)))
+    (0..tokens.len()).filter(|&k| tokens[k].upper() == "REFERENCES" && tokens.get(k + 1).and_then(qualifier).as_deref() == Some(name.as_str())).any(|k| match tokens.get(k + 2).filter(|t| t.text == "(") {
+        Some(_) => listed(&tokens[k + 2..]).is_none_or(|(cols, _)| !keys.contains(&cols)),
+        None => primary(),
+    })
 }
 
 /// Whether a table's text names a column by the table's own name, as `"users"."age"`.
