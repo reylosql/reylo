@@ -460,6 +460,10 @@ test("a Standard Query holds a Postgres array column to one dimension, as .run()
   assert.deepEqual(rows.decode([['(1,"{{1,2}}")', "42"]]), [{ v: 42 }]);
   const kept = defineQuery<{}, { v: unknown }, "many", "postgres">({ dialect: "postgres", sql: "select 42 as v, p as v from t", params: [], columns: [["v", "int"], ["v", pair]], cardinality: "many" })["~standard"].query;
   assert.throws(() => kept.decode([["42", '(1,"{{1,2}}")']]), /Column "v" holds, in its row value's field "b", an array of 2 dimensions/);
+  // An array of a domain over jsonb[] nests outside its whole arrays under allow_nested_arrays, and each of them holds one dimension.
+  const lists = defineQuery<{}, { docs: unknown }, "many", "postgres">({ dialect: "postgres", sql: "select docs from t", params: [], columns: [["docs", "{json[]}[]"]], cardinality: "many", nestedArrays: true })["~standard"].query;
+  assert.deepEqual(lists.decode([['{{"{\\"[1]\\"}"}}']]), [{ docs: [[[[1]]]] }]);
+  assert.throws(() => lists.decode([['{"{{1,2},{3,4}}"}']]), /Column "docs" holds an array of 2 dimensions, and its type has one/);
   // An array of JSON has one dimension under allow_nested_arrays too: its value can't tell a level from a JSON array, so only its text does.
   for (const nestedArrays of [false, true]) {
     const docs = defineQuery<{}, { docs: unknown }, "many", "postgres">({ dialect: "postgres", sql: "select docs from t", params: [], columns: [["docs", "json[]"]], cardinality: "many", nestedArrays })["~standard"].query;

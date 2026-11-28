@@ -1320,7 +1320,8 @@ export function withinDimensions(v: unknown, kind: Kind, column: string, path?: 
     const each = (level: unknown[], at: number): void => {
       for (const e of level) if (Array.isArray(e)) at > 1 ? each(e, at - 1) : withinDimensions(e, whole, column, path && { ...path, inArray: true }, jsonOnly);
     };
-    each(v, declared);
+    // Under allow_nested_arrays the levels around them may be more than declared, which their text recorded.
+    each(v, recorded ?? declared);
     return v;
   }
   let depth = 0;
@@ -1333,6 +1334,9 @@ export function withinDimensions(v: unknown, kind: Kind, column: string, path?: 
 const holdsJsonArrayCache = new Map<Kind, boolean>();
 /** Whether a value of `kind` is an array of JSON or holds one in a row value's field: what `withinDimensions` holds to its dimensions under allow_nested_arrays too. */
 export function holdsJsonArray(kind: Kind): boolean {
+  // A whole array standing as an element (a domain's over jsonb[]) is one as its own kind is.
+  const whole = wholeArrayKind(kind);
+  if (whole !== undefined) return holdsJsonArray(whole);
   if (kind.endsWith("[]")) return elementKind(kind) === "json" || holdsJsonArray(elementKind(kind));
   if (!isRowKind(kind)) return false;
   let holds = holdsJsonArrayCache.get(kind);

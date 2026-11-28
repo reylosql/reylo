@@ -1517,13 +1517,13 @@ test("postgres: an array a row value's field holds is held to one dimension on p
 });
 
 test("postgres: a jsonb[] has one dimension on pg, postgres.js and PGlite, under allow_nested_arrays too, and what it returns goes back in unchanged", { skip: pgLive }, async () => {
-  const own = await postgresDatabase("reylo_execute_jsonb_arrays", "create table t (id int4 primary key, docs jsonb[]); insert into t values (1, '{\"[1,2]\",\"[3,4]\"}'), (2, '{{1,2},{3,4}}')");
+  const own = await postgresDatabase("reylo_execute_jsonb_arrays", "create table t (id int4 primary key, docs jsonb[]); create domain doc_list as jsonb[]; insert into t values (1, '{\"[1,2]\",\"[3,4]\"}'), (2, '{{1,2},{3,4}}')");
   const pg = driver("pg");
   const client = new pg.Client(own.url);
   await client.connect();
   const { PGlite } = driver("@electric-sql/pglite");
   const lite = new PGlite();
-  await lite.exec("create table t (id int4 primary key, docs jsonb[]); insert into t values (1, '{\"[1,2]\",\"[3,4]\"}'), (2, '{{1,2},{3,4}}')");
+  await lite.exec("create table t (id int4 primary key, docs jsonb[]); create domain doc_list as jsonb[]; insert into t values (1, '{\"[1,2]\",\"[3,4]\"}'), (2, '{{1,2},{3,4}}')");
   const docs = array({ kind: "json", label: "jsonb" } as EngineType, true, "_jsonb");
   try {
     for (const nestedArrays of [false, true]) {
@@ -1534,6 +1534,9 @@ test("postgres: a jsonb[] has one dimension on pg, postgres.js and PGlite, under
         assert.deepEqual(one.docs, [[1, 2], [3, 4]], name);
         assert.deepEqual({ ...((await write.run(c as never, { id: 1, docs: one.docs })) as object) }, { text: '{"[1, 2]","[3, 4]"}' }, `${name}, written back`);
         await assert.rejects(async () => read.run(c as never, { id: 2 }), /Column "docs" holds an array of 2 dimensions, and its type has one/, `${name}, nestedArrays ${nestedArrays}`);
+        // An array of a domain over jsonb[] holds each whole array to one dimension too.
+        const lists = defineQuery({ dialect: "postgres", sql: "select array['{{1,2},{3,4}}'::doc_list] as docs", params: [], cardinality: "one", columns: [["docs", "{json[]}[]"]], nestedArrays });
+        await assert.rejects(async () => lists.run(c as never), /Column "docs" holds an array of 2 dimensions, and its type has one/, `${name}, a domain's, nestedArrays ${nestedArrays}`);
       }
     }
   } finally {
