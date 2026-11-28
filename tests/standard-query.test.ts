@@ -454,4 +454,21 @@ test("a Standard Query holds a Postgres array column to one dimension, as .run()
   assert.throws(() => q.columns![0]!.decode("{{1}}"), /Column "tags" holds an array of 2 dimensions/);
   const nesting = defineQuery<{}, { tags: (number | null)[] | null }, "many", "postgres">({ dialect: "postgres", sql: "select tags from posts", params: [], columns: [["tags", "int[]"]], cardinality: "many", nestedArrays: true })["~standard"].query;
   assert.deepEqual(nesting.decode([["{{1,2},{3,4}}"]]), [{ tags: [[1, 2], [3, 4]] }]);
+  // And a row value's array field, of the last column of its name, which the row holds.
+  const pair = `(${JSON.stringify(["a", "int"])},${JSON.stringify(["b", "int[]"])})`;
+  const rows = defineQuery<{}, { v: unknown }, "many", "postgres">({ dialect: "postgres", sql: "select p as v, 42 as v from t", params: [], columns: [["v", pair], ["v", "int"]], cardinality: "many" })["~standard"].query;
+  assert.deepEqual(rows.decode([['(1,"{{1,2}}")', "42"]]), [{ v: 42 }]);
+  const kept = defineQuery<{}, { v: unknown }, "many", "postgres">({ dialect: "postgres", sql: "select 42 as v, p as v from t", params: [], columns: [["v", "int"], ["v", pair]], cardinality: "many" })["~standard"].query;
+  assert.throws(() => kept.decode([["42", '(1,"{{1,2}}")']]), /Column "v" holds, in its row value's field "b", an array of 2 dimensions/);
+  // An array of a domain over jsonb[] nests outside its whole arrays under allow_nested_arrays, and each of them holds one dimension.
+  const lists = defineQuery<{}, { docs: unknown }, "many", "postgres">({ dialect: "postgres", sql: "select docs from t", params: [], columns: [["docs", "{json[]}[]"]], cardinality: "many", nestedArrays: true })["~standard"].query;
+  assert.deepEqual(lists.decode([['{{"{\\"[1]\\"}"}}']]), [{ docs: [[[[1]]]] }]);
+  assert.throws(() => lists.decode([['{"{{1,2},{3,4}}"}']]), /Column "docs" holds an array of 2 dimensions, and its type has one/);
+  // An array of JSON has one dimension under allow_nested_arrays too: its value can't tell a level from a JSON array, so only its text does.
+  for (const nestedArrays of [false, true]) {
+    const docs = defineQuery<{}, { docs: unknown }, "many", "postgres">({ dialect: "postgres", sql: "select docs from t", params: [], columns: [["docs", "json[]"]], cardinality: "many", nestedArrays })["~standard"].query;
+    assert.deepEqual(docs.decode([['{"[1,2]","[3,4]"}']]), [{ docs: [[1, 2], [3, 4]] }]);
+    // allow_nested_arrays is no way out for an array of JSON, so the error offers only to_jsonb.
+    assert.throws(() => docs.decode([["{{1,2},{3,4}}"]]), /^TypeError: Column "docs" holds an array of 2 dimensions, and its type has one: .* Select to_jsonb\(docs\) to read it as JSON\.$/);
+  }
 });
