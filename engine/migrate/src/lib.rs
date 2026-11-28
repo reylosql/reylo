@@ -132,7 +132,9 @@ pub fn redact(url: &str) -> String {
 /// for a command line, a message or a cache's key leaves out this one too.
 pub fn without_query_password(url: &str) -> (String, Option<String>) {
     let Some((base, query)) = url.split_once('?') else { return (url.to_string(), None) };
-    let (query, fragment) = query.split_once('#').map_or((query, None), |(q, f)| (q, Some(f)));
+    // libpq and tokio-postgres read a `#` in a Postgres URL's query as part of a value, not as a
+    // fragment, so a parameter after one still counts.
+    let (query, fragment) = if postgres_scheme(url) { (query, None) } else { query.split_once('#').map_or((query, None), |(q, f)| (q, Some(f))) };
     let mut password = None;
     let kept: Vec<&str> = query
         .split('&')
@@ -151,6 +153,11 @@ pub fn without_query_password(url: &str) -> (String, Option<String>) {
     let query = kept.join("&");
     let fragment = fragment.map(|f| format!("#{f}")).unwrap_or_default();
     (if query.is_empty() { format!("{base}{fragment}") } else { format!("{base}?{query}{fragment}") }, password)
+}
+
+/// Whether a URL is a Postgres one, whose query libpq reads to its end.
+pub(crate) fn postgres_scheme(url: &str) -> bool {
+    url.split_once("://").is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("postgres") || scheme.eq_ignore_ascii_case("postgresql"))
 }
 
 /// `%XX` escapes decoded, as in a URL's path.
@@ -196,7 +203,10 @@ mod tests {
         assert_eq!(redact("sqlite://app.db"), "sqlite://app.db");
         // A password the query names, as a project's env files write PGPASSWORD, is left out too.
         assert_eq!(redact("postgres://u@h/db?sslmode=require&password=s3cret"), "postgres://…@h/db?sslmode=require");
-        assert_eq!(redact("postgres://h/db?%70assword=s3cret#x"), "postgres://h/db#x");
+        // In a Postgres URL a `#` is part of a value, as libpq reads it, so a password after one still goes.
+        assert_eq!(redact("postgres://h/db?%70assword=s3cret#x"), "postgres://h/db");
+        assert_eq!(redact("postgres://u@h/db?application_name=shop#blue&password=s3cret"), "postgres://…@h/db?application_name=shop#blue");
+        assert_eq!(without_query_password("mysql://h/db?password=x#frag"), ("mysql://h/db#frag".to_string(), Some("x".to_string())));
         assert_eq!(without_query_password("postgres://h/db?password=a&password=b%40c&dbname=x"), ("postgres://h/db?dbname=x".to_string(), Some("b@c".to_string())));
         // ClickHouse's URL keeps secrets in its query, which the refusal leaves out.
         let refusal = Dialect::of_url("clickhouse+https://app:p@ss@db.example:8443/shop?access_token=SECRET&http_header_X-Key=SECRET").unwrap_err().0;

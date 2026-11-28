@@ -574,26 +574,31 @@ export function resolveProject(engine: Engine | MissingEngine, projectDir: strin
     url = hit?.value;
     if (hit) urlSource = hit.source;
   }
-  // libpq's variables the env files set, for what DATABASE_URL leaves out (`withEnvFiles`): the URL
-  // the app connects with, with the files loaded into its environment, however the type check names
-  // it (`direct_url: ${DATABASE_URL}` too). A variable the environment sets, even empty, the files
-  // leave alone, as dotenv does. Any other `direct_url` is Reylo's alone.
+  // libpq's variables for what DATABASE_URL leaves out (`withEnvFiles`), the environment's, else the
+  // env files': the URL the app connects with, with the files loaded into its environment, however
+  // the type check names it (`direct_url: ${DATABASE_URL}` too). Written into the URL whichever
+  // source each comes from, so that one connection is one URL. A variable the environment sets, even
+  // empty, the files leave alone, as dotenv does; an empty one is none, as the engine reads it. Any
+  // other `direct_url` is Reylo's alone.
   if (url && !shadow && url === lookup("DATABASE_URL")?.value && dialectOf(url) === "postgres") {
     const files = envFiles.map((path) => ({ path, vars: readEnvFile(path) }));
-    const hits = new Map<string, { value: string; path: string }>();
+    const hits = new Map<string, { value: string; path?: string }>();
     for (const [name] of LIBPQ_VARIABLES) {
-      if (environmentValue(env, name) !== undefined) continue;
+      const set = environmentValue(env, name);
+      // A certificate file is named from where it was set: the working directory for the environment's, as libpq reads it, and the project's root, where its env files are, for theirs.
+      const certificate = (value: string, from: string) => (CERTIFICATE_VARIABLES.has(name) && value && value !== "system" ? resolve(from, value) : value);
+      if (set !== undefined) {
+        if (set) hits.set(name, { value: certificate(set, process.cwd()) });
+        continue;
+      }
       const file = files.find((f) => f.vars[name] !== undefined);
-      if (!file) continue;
-      // A certificate file is the app's, named from the project's root, where its env files are.
-      const value = CERTIFICATE_VARIABLES.has(name) && file.vars[name] && file.vars[name] !== "system" ? resolve(root, file.vars[name]!) : file.vars[name]!;
-      hits.set(name, { value, path: file.path });
+      if (file) hits.set(name, { value: certificate(file.vars[name]!, root), path: file.path });
     }
     const app = url;
     const fold = (fresh: string) => (fresh === app ? withEnvFiles(fresh, (name) => hits.get(name)?.value) : { url: fresh, names: [] });
     const folded = fold(url);
     url = folded.url;
-    if (folded.names.length) urlSource += `, ${folded.names.map((name) => `${name} in ${shown(hits.get(name)!.path)}`).join(", ")}`;
+    if (folded.names.length) urlSource += `, ${folded.names.map((name) => `${name} in ${hits.get(name)!.path ? shown(hits.get(name)!.path!) : "the environment"}`).join(", ")}`;
     // A command's URL run again after a refused login is folded again, as the first was.
     if (refreshUrl) {
       const refresh = refreshUrl;

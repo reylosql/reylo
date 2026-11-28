@@ -32,8 +32,10 @@ test("the type check's URL takes libpq's variables from the env files where the 
   const project = resolveProject(e, dir, {});
   assert.equal(project.url, "postgres://app@db.internal/?password=s3cret&dbname=local");
   assert.equal(project.urlSource, "DATABASE_URL in .env, PGPASSWORD in .env, PGDATABASE in .env.local");
-  // A variable the environment sets is the engine's to read there.
-  assert.equal(resolveProject(e, dir, { PGDATABASE: "other" }).url, "postgres://app@db.internal/?password=s3cret");
+  // The environment's variable wins over the files', and is written in too, so that one connection is one URL.
+  const fromEnvironment = resolveProject(e, dir, { PGDATABASE: "other" });
+  assert.equal(fromEnvironment.url, "postgres://app@db.internal/?password=s3cret&dbname=other");
+  assert.equal(fromEnvironment.urlSource, "DATABASE_URL in .env, PGPASSWORD in .env, PGDATABASE in the environment");
   // A URL that names its database takes no PGDATABASE, and one of another database none at all.
   assert.equal(resolveProject(e, dir, { DATABASE_URL: "postgres://app:pw@db.internal/shop" }).url, "postgres://app:pw@db.internal/shop");
   assert.equal(resolveProject(e, dir, { DATABASE_URL: "mysql://root@127.0.0.1/app" }).url, "mysql://root@127.0.0.1/app");

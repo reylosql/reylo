@@ -391,22 +391,32 @@ impl Project {
         if self.found("DATABASE_URL").is_none_or(|(app, _)| app != url) || dialect_of(&url) != Some("postgres") {
             return Ok(Some((url, source)));
         }
-        // A variable the environment sets, even empty, the files leave alone, as dotenv does: in any
-        // case of its name on Windows, as Windows reads one.
-        let set = |name: &str| self.env.keys().any(|key| key == name || (cfg!(windows) && key.eq_ignore_ascii_case(name)));
+        // The environment's variable, else the env files', written into the URL whichever source it
+        // comes from, so that one connection is one URL. A variable the environment sets, even empty,
+        // the files leave alone, as dotenv does (in any case of its name on Windows, as Windows reads
+        // one); an empty one is none, as the engine reads it.
+        let set = |name: &str| self.env.iter().find(|(key, _)| key.as_str() == name || (cfg!(windows) && key.eq_ignore_ascii_case(name))).map(|(_, value)| value.clone());
         let files: Vec<(&PathBuf, HashMap<String, String>)> = self.env_files.iter().map(|p| (p, read_env_file(p))).collect();
-        let mut hits: HashMap<&str, (String, &PathBuf)> = HashMap::new();
+        let mut hits: HashMap<&str, (String, Option<&PathBuf>)> = HashMap::new();
         for (name, _) in LIBPQ_VARIABLES {
-            if set(name) {
+            // A certificate file is named from where it was set: the working directory for the
+            // environment's, as libpq reads it, and the project's root, where its env files are, for theirs.
+            let certificate = |value: String, from: &Path| if matches!(name, "PGSSLROOTCERT" | "PGSSLCERT" | "PGSSLKEY") && !value.is_empty() && value != "system" { from.join(&value).to_string_lossy().into_owned() } else { value };
+            if let Some(value) = set(name) {
+                if !value.is_empty() {
+                    hits.insert(name, (certificate(value, &self.cwd), None));
+                }
                 continue;
             }
-            let Some((path, value)) = files.iter().find_map(|(path, vars)| vars.get(name).map(|v| (*path, v.clone()))) else { continue };
-            // A certificate file is the app's, named from the project's root, where its env files are.
-            let value = if matches!(name, "PGSSLROOTCERT" | "PGSSLCERT" | "PGSSLKEY") && !value.is_empty() && value != "system" { self.root.join(&value).to_string_lossy().into_owned() } else { value };
-            hits.insert(name, (value, path));
+            if let Some((path, value)) = files.iter().find_map(|(path, vars)| vars.get(name).map(|v| (*path, v.clone()))) {
+                hits.insert(name, (certificate(value, &self.root), Some(path)));
+            }
         }
         let (url, names) = with_env_files(&url, &|name| hits.get(name).map(|(value, _)| value.clone()));
-        let source = names.iter().fold(source, |source, name| format!("{source}, {name} in {}", shown(&self.cwd, hits[*name].1)));
+        let source = names.iter().fold(source, |source, name| match hits[*name].1 {
+            Some(path) => format!("{source}, {name} in {}", shown(&self.cwd, path)),
+            None => format!("{source}, {name} in the environment"),
+        });
         Ok(Some((url, source)))
     }
 
@@ -950,8 +960,8 @@ mod tests {
         // The first file that sets a variable wins, as for DATABASE_URL.
         let url = |env: &[(&str, &str)]| Project::resolve(&dir, env.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()).unwrap().type_check_url().unwrap().unwrap();
         assert_eq!(url(&[]), ("postgres://app@db.internal/?password=s3cret&dbname=local".to_string(), "DATABASE_URL in .env, PGPASSWORD in .env, PGDATABASE in .env.local".to_string()));
-        // A variable the environment sets is the engine's to read there.
-        assert_eq!(url(&[("PGDATABASE", "other")]).0, "postgres://app@db.internal/?password=s3cret");
+        // The environment's variable wins over the files', and is written in too, so that one connection is one URL.
+        assert_eq!(url(&[("PGDATABASE", "other")]), ("postgres://app@db.internal/?password=s3cret&dbname=other".to_string(), "DATABASE_URL in .env, PGPASSWORD in .env, PGDATABASE in the environment".to_string()));
         // A URL that names its database takes no PGDATABASE, and one of another database none at all.
         assert_eq!(url(&[("DATABASE_URL", "postgres://app:pw@db.internal/shop")]).0, "postgres://app:pw@db.internal/shop");
         assert_eq!(url(&[("DATABASE_URL", "mysql://root@127.0.0.1/app")]).0, "mysql://root@127.0.0.1/app");
