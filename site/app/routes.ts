@@ -1,6 +1,6 @@
 import { readdirSync } from 'node:fs';
 import { index, route, type RouteConfig } from '@react-router/dev/routes';
-import { ogRoutes } from 'docs-kit/routes';
+import { docsRoutes, ogRoutes } from 'docs-kit/routes';
 import { builtPage } from '../lib/rust-content.ts';
 
 // The homepage at /, all docs pages under /docs (index.mdx at /docs, migrate-<name>.mdx at
@@ -37,7 +37,6 @@ export default [
   route('blog.md', 'routes/blog-markdown.ts', { id: 'markdown/blog.md' }),
   ...blogMarkdown.map((file) => route(file, 'routes/blog-markdown.ts', { id: `markdown/${file}` })),
   ...markdown.map((file) => route(file, 'routes/markdown.ts', { id: `markdown/${file}` })),
-  route('404', 'routes/not-found.tsx'),
   // The playground, full screen (components/play.tsx).
   route('play', 'routes/play.tsx'),
   // Its link preview, the card of the query it opens with (a shared query's card is drawn on request).
@@ -46,10 +45,10 @@ export default [
   route('play/api.md', 'routes/play-api-md.ts'),
   // The local playground (app/routes/playground.tsx), on the dev server only: it needs scratch databases.
   ...(process.env.NODE_ENV === 'production' ? [] : [route('playground', 'routes/playground.tsx')]),
-  route('llms.txt', 'routes/llms.ts'),
-  route('robots.txt', 'routes/robots.ts'),
-  route('sitemap.xml', 'routes/sitemap.ts'),
-  route('manifest.webmanifest', 'routes/manifest.ts'),
+  // docs-kit's page a missing address gets, robots.txt and the manifest, beside the site's own
+  // /llms.txt and sitemap; the pages, their Markdown and their link previews are routed here, at
+  // their own addresses.
+  ...docsRoutes({ page: false, markdown: false, llms: 'routes/llms.ts', sitemap: 'routes/sitemap.ts', og: false }),
   route('opengraph-image.png', 'routes/opengraph-image.tsx'),
   route('migrate/opengraph-image.png', 'routes/migrate-opengraph-image.tsx'),
   // Each docs page's link preview, its title on Docs Kit's card (docs.config.ts), at

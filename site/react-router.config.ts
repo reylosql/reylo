@@ -1,6 +1,6 @@
 import { copyFileSync, readdirSync } from 'node:fs';
 import type { Config } from '@react-router/dev/config';
-import { ogPrerender } from 'docs-kit/routes';
+import { docsPrerender, ogPrerender } from 'docs-kit/routes';
 import { builtPage } from './lib/rust-content.ts';
 
 // The site builds to static files only (build/client), which Vercel serves as they are: no server
@@ -25,7 +25,7 @@ const cards = [...ogPrerender(names.map((name) => (name === 'index' ? '' : name)
 
 export default {
   ssr: false,
-  prerender: [...routes, ...names.map((name) => `${docPath(name)}.md`), '/blog.md', ...posts.map((p) => `${p}.md`), '/404', '/play', '/play/og.png', '/play/api.md', '/llms.txt', '/robots.txt', '/sitemap.xml', '/manifest.webmanifest', '/opengraph-image.png', '/migrate/opengraph-image.png', ...cards],
+  prerender: [...routes, ...names.map((name) => `${docPath(name)}.md`), '/blog.md', ...posts.map((p) => `${p}.md`), ...docsPrerender({ page: false, markdown: false, og: false }), '/play', '/play/og.png', '/play/api.md', '/opengraph-image.png', '/migrate/opengraph-image.png', ...cards],
   buildEnd() {
     copyFileSync('build/client/404/index.html', 'build/client/404.html');
   },

@@ -3,6 +3,7 @@ import { DocsShell } from 'docs-kit/shell';
 import type { Root } from 'fumadocs-core/page-tree';
 import type { Route } from './+types/blog-post';
 import { Brand } from '@/components/brand';
+import site from '@/docs.config';
 import { getMDXComponents } from '@/components/mdx';
 import { blogUrl, posts } from '@/lib/blog';
 import { loadPost } from '@/lib/blog-content';
@@ -44,7 +45,7 @@ function PostContent({ loaderData }: Pick<Route.ComponentProps, 'loaderData'>) {
       brand={<Brand />}
       github={githubUrl}
       star
-      footer={<>Released under the MIT License. Copyright © 2026 Colin McDonnell.</>}
+      footer={site.footer}
     >
       <p className="dk-subheader">
         <time dateTime={post.date}>{post.shown}</time>
