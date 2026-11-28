@@ -26,10 +26,10 @@
 // those oids are arrays, cached in a WeakMap keyed by the app's object. A row value the module knows
 // the fields of has the kind of its column whatever its oid: `record` is one oid for every shape of
 // row, and a built-in catalog table's row type is below 10000 too.
-import { civilFromDays, coerce, coercePostgres, columnKind, DecodeError, describe, elementKind, holdsRareKind, instantOfDate, isLevel, isRareKind, isRowKind, numbersInJson, ParameterError, postgresInterval, postgresTypesFor, postgresYear, scalarKind, textDecoder, utf8, wholeArrayKind, withFraction, withinDimensions, type Columns, type Decoder, type JsonNumbers, type Kind } from "./values.ts";
+import { civilFromDays, coerce, coercePostgres, columnKind, DecodeError, describe, elementKind, holdsRareKind, instantOfDate, isLevel, isRareKind, isRowKind, ParameterError, postgresInterval, postgresTypesFor, postgresYear, scalarKind, textDecoder, utf8, wholeArrayKind, withFraction, withinDimensions, type Columns, type Decoder, type Kind } from "./values.ts";
 import { bareName, holdsWholeArrays, type EngineType } from "./engine-type.ts";
 import { lastOfEach, namesInResult, rowOf, type RowBuilder } from "./row.ts";
-import { arrayLiteral, asByteaHex, EFFECT_SQL, isJsonValue, isTime, jsonElements, takesFloat, jsonText, postgresText, vectorParameter, wrappers, type AnyClient as Client, type Bound, type EffectSql, type Marks, type QueryModule, type Runtime } from "./execute.ts";
+import { arrayLiteral, asByteaHex, drizzleDriver, driversOf, EFFECT_SQL, knexDriver, isJsonValue, isTime, jsonElements, takesFloat, jsonText, postgresText, vectorParameter, type AnyClient as Client, type Bound, type EffectSql, type Marks, type QueryModule, type Runtime, type DriverClient } from "./execute.ts";
 import { readPostgresError } from "./query-error.ts";
 
 type AnyClient = Record<string, any>;
@@ -166,6 +166,22 @@ async function learn(key: object, oids: Iterable<number>, load: Load): Promise<v
 }
 
 /**
+ * The catalog's answer for the types a database created, which only a query with no columns of its
+ * own needs: a query defined by hand with `defineQuery` installs it (`postgresCatalog`). A module
+ * a build step writes declares every column's kind, so a value of a created type no column declares
+ * (one a migration added under `select *`) is read as its text.
+ */
+let catalog: typeof learn | undefined;
+
+/** The catalog's reading of the types a database created, for queries without columns (`catalog`). */
+export const postgresCatalog = { learn };
+
+/** The catalog's reading for every query of the process, as `defineQuery` installs it. */
+export function installPostgresCatalog(c: typeof postgresCatalog): void {
+  catalog = c.learn;
+}
+
+/**
  * The decoder of each field a result named: a row value's by the module's column, a built-in type's
  * by its oid, a created type's by the module's column (when the module's columns match the result's)
  * or by what the catalog said.
@@ -175,7 +191,7 @@ async function fieldDecoders(fields: Field[], columns: Columns | undefined, key:
   const created = fields.filter((f) => f.oid >= FIRST_USER_OID);
   const known = learnedOf(key);
   if (byColumn) created.forEach((f) => known.has(f.oid) || known.set(f.oid, { kind: byColumn[fields.indexOf(f)]![1], delim: byColumn[fields.indexOf(f)]![2] ?? "," }));
-  else if (created.length) await learn(key, created.map((f) => f.oid), load);
+  else if (created.length) await catalog?.(key, created.map((f) => f.oid), load);
   return fields.map((f, i) => {
     const column = byColumn?.[i];
     if (column && byModule(column[1])) return textDecoder(column[1], column[2]);
@@ -266,9 +282,9 @@ async function pgFamily(key: object, run: (types: object) => Promise<PgResult>, 
   if (result.fields && !Array.isArray(result)) await fieldDecoders(result.fields.map((f) => ({ name: f.name, oid: f.dataTypeID })), columns, key, load);
   const oids = new Set<number>();
   for (const row of rows) for (const v of Object.values(row)) if (v instanceof Pending) oids.add(v.oid);
-  await learn(key, oids, load);
+  await catalog?.(key, oids, load);
   const known = learnedOf(key);
-  const decoders = new Map([...oids].map((oid) => [oid, textDecoder(known.get(oid)!.kind, known.get(oid)!.delim)]));
+  const decoders = new Map([...oids].map((oid) => [oid, textDecoder(known.get(oid)?.kind ?? "text", known.get(oid)?.delim)]));
   for (const row of rows) {
     for (const name in row) {
       const v = row[name];
@@ -309,48 +325,16 @@ const asText = { getTypeParser: () => (x: string) => x };
 const isNeonFunction = (c: AnyClient) => typeof c === "function" && typeof (c as AnyClient).transaction === "function";
 
 /**
- * Whether a client with query() is one whose results Reylo decodes (`queryPostgres`). Any other,
- * such as a wrapper that passes its calls on to a pool, hands back what its driver made of each
- * value (a Date for a timestamp, a string for an int8), which no kind reads back, so it is
- * refused before it runs anything.
+ * Runs a Postgres statement on pg's Client, PoolClient or Pool, or Neon's or @vercel/postgres's,
+ * with Reylo's decoder table. pg's native client and a client set up to read binary are refused.
  */
-export function takesQuery(c: AnyClient): boolean {
-  return typeof c.manyOrNone === "function" || typeof c.getTypeParser === "function" || isPglite(c) || (typeof c.connect === "function" && typeof c.Client === "function") || isNeonFunction(c);
-}
-
-/**
- * Runs a Postgres statement on a client whose query() Reylo calls: pg's Client, PoolClient and
- * Pool, Neon's, @vercel/postgres's, pg-promise's database, tasks and transactions, PGlite and its
- * transactions, and Neon's neon(). Each is told apart by what it has, and a client that is none
- * of them is refused (`takesQuery`).
- */
-export async function queryPostgres(c: AnyClient, text: string, values: unknown[], columns: Columns | undefined): Promise<unknown[]> {
-  // pg-promise formats the values into the text itself (reading $1 inside a string literal
-  // too) unless it is handed a { text, values } object, which it binds.
-  if (typeof c.manyOrNone === "function") return pgPromise(c, text, values, columns);
+async function queryPg(c: AnyClient, text: string, values: unknown[], columns: Columns | undefined): Promise<unknown[]> {
   if (isPgNative(c)) throw refusePgNative();
-  // pg's Client and PoolClient, Neon's, and @vercel/postgres's VercelClient.
-  if (typeof c.getTypeParser === "function") {
-    if (c.binary === true) throw refuseBinary();
-    const load: Load = async (sql) => (await c.query({ text: sql, rowMode: "array", types: asText })).rows;
-    return pgFamily(c, (types) => c.query({ text, values, types }), columns, load);
-  }
-  // PGlite and its transactions.
-  if (isPglite(c)) return pglite(c, text, values, columns);
   // pg's Pool, Neon's and @vercel/postgres's: query() checks a client out of the pool, and the
   // table goes with the query, so a `connect` listener's parsers do not apply either.
-  if (typeof c.connect === "function" && typeof c.Client === "function") {
-    if (c.options?.binary === true) throw refuseBinary();
-    const load: Load = async (sql) => (await c.query({ text: sql, rowMode: "array", types: asText })).rows;
-    return pgFamily(c, (types) => c.query({ text, values, types }), columns, load);
-  }
-  // Neon's neon() from 1.0: query(text, params, options) replaces Neon's whole table with the
-  // query's, and returns the fields with `fullResults`.
-  if (isNeonFunction(c)) {
-    const load: Load = async (sql) => (await c.query(sql, [], { arrayMode: true, fullResults: true, types: asText })).rows;
-    return pgFamily(c, (types) => c.query(text, values, { fullResults: true, arrayMode: false, types }), columns, load);
-  }
-  throw new TypeError("Reylo cannot read this client's results: its query() is none of pg's, Neon's, pg-promise's and PGlite's.");
+  if ((typeof c.getTypeParser === "function" ? c.binary : c.options?.binary) === true) throw refuseBinary();
+  const load: Load = async (sql) => (await c.query({ text: sql, rowMode: "array", types: asText })).rows;
+  return pgFamily(c, (types) => c.query({ text, values, types }), columns, load);
 }
 
 // pg-promise sends a { text, values, types } object to pg as it is, on the database, a task or a
@@ -994,10 +978,15 @@ function slonikParam(v: unknown): unknown {
   return typeof v === "object" ? JSON.stringify(v) : v;
 }
 
-/** A Postgres statement's rows on each Postgres driver's client, or undefined on any other client. */
+/** A Postgres statement bound for its drivers: its text, marks and values in binding order, each array for a SQL array as its literal, with the names they bind. */
+type Prepared = { readonly query: QueryModule<"postgres">; readonly text: string; readonly marks: Marks | undefined; readonly names: readonly string[]; readonly values: unknown[] };
+
+/** A Postgres driver's way of running a statement (src/execute.ts, `DriverClient`). */
+type PostgresDriver = DriverClient<"postgres", Prepared>;
+
+/** A Postgres statement's rows on the first of the module's drivers that takes `c`, or undefined where none does. */
 async function runPostgres(c: Client, query: QueryModule<"postgres">, { text, values, names, marks }: Bound): Promise<unknown[] | undefined> {
   const type = (i: number) => query.inputs?.[names[i]!]?.type;
-  const isJsonParam = (v: unknown, i: number) => isJsonValue(query, names[i]!, v);
   // An array for a SQL array parameter goes as its literal text, which the server reads as
   // the parameter's type, written as pg writes it: Bun.sql binds no JavaScript array
   // (`any($1)` failed with "insufficient data left in message"), postgres.js types an
@@ -1006,58 +995,124 @@ async function runPostgres(c: Client, query: QueryModule<"postgres">, { text, va
   // left the connection out of step. Each element of a `jsonb[]` is a JSON value.
   const bound = values.map((v, i) => {
     const t = type(i);
-    return Array.isArray(v) && t?.kind === "array" && !isJsonParam(v, i) ? arrayLiteral(t.element.type.kind === "json" ? jsonElements(v, names[i]!) : v, query.inputs?.[names[i]!]?.delimiter) : v;
+    return Array.isArray(v) && t?.kind === "array" && !isJsonValue(query, names[i]!, v) ? arrayLiteral(t.element.type.kind === "json" ? jsonElements(v, names[i]!) : v, query.inputs?.[names[i]!]?.delimiter) : v;
   });
-  // A JSON parameter goes to pg's family, PGlite and Neon as its JSON text, and to postgres.js
-  // as its JSON text declared `unknown` (below). Bun.sql serializes a value for a JSON
-  // parameter itself, so JSON text would be stored as a JSON string, and it types a boolean,
-  // a number or an array of either by its JavaScript type ("cannot cast type boolean to
-  // jsonb"): it gets an object whose toJSON() returns the value, which it binds as JSON and
-  // serializes to exactly its JSON text. So does an unsafe() client without typed(). A Bun.sql
-  // client made with `prepare: false`, as one behind a pooler in transaction mode is, learns no
-  // parameter's type and sends an object as its String() ("invalid input syntax for type json"),
-  // so it gets the JSON text, which the server reads as the parameter's type.
-  const json = () => bound.map((v, i) => (isJsonParam(v, i) ? jsonText(v, "postgres", names[i]!) : v));
-  // Effect SQL's client (src/effect.ts) binds a string as an untyped text parameter, which the
-  // server reads as the parameter's type, and a number or a Date by its JavaScript type, so every
-  // value goes as the text Postgres reads.
-  const effect = (c as Partial<EffectSql>)[EFFECT_SQL];
-  if (effect?.dialect === "postgres") return await effectPostgres(effect, text, bound.map((v, i) => postgresText(query, names[i]!, v)), query.columns);
-  // Slonik before every other query(): its query() takes only its sql tag's queries.
-  if (isSlonik(c)) return await slonik(c, text, marks, json().map(slonikParam), query.columns);
-  // Drizzle's driver writes an array as its literal and binds a Uint8Array as bytea, as pg does.
-  if (isDrizzlePostgres(c)) return await drizzlePostgres(c, text, json(), query.columns, query.row);
-  if (isDrizzleHttp(c)) throw refuseDrizzleHttp();
-  // query() before unsafe(): Neon's neon() has both, and its unsafe() builds a fragment
-  // for a template instead of running anything. Reylo decodes every value itself, so a client
-  // that is none of the drivers' is refused before it runs anything (`takesQuery`).
-  if (typeof c.query === "function") return takesQuery(c) ? await queryPostgres(c, text, json(), query.columns) : undefined;
-  if (typeof c.unsafe === "function") {
-    // Bun.sql's client, transactions, savepoints and reserved connections have commitDistributed(),
-    // and postgres.js's have typed(). Anything else with unsafe() is a wrapper around one of them.
-    if (typeof c.commitDistributed !== "function" && typeof c.typed !== "function") return undefined;
-    // postgres.js reads a string for a date or time parameter through `new Date(x)` and binds
-    // its toISOString(), so a timestamp's wall-clock time moved by the app's offset, and
-    // `infinity` or a zone name failed with "Invalid time value". Declared `unknown` (705), it
-    // is sent as the text, which the server reads as the parameter's type, as it would an
-    // undeclared one. Bun.sql (commitDistributed()) sends the text and has no typed().
-    // A JSON parameter goes to postgres.js as its JSON text declared `unknown` too: its own
-    // serializer would write a value as JSON, but a client Drizzle wraps has that serializer
-    // replaced by one that passes the value through (drizzle-orm/postgres-js), and a
-    // transaction shows neither. Bun.sql serializes the value itself.
-    // postgres.js 4 serializes the values of a statement with an untyped parameter (a number,
-    // null) by the types the server described for it, a value declared `unknown` too: JSON text
-    // went through the jsonb serializer and was stored as a JSON string from the statement's second
-    // run, and an array literal for a `jsonb[]` went through its element's on the first. So where
-    // the statement has inputs, every parameter goes to postgres.js as the text Postgres reads,
-    // declared `unknown`, and postgres.js never learns its types. postgres.js 3 sends such a value
-    // as it is either way. A query without inputs gets its values as they are, as on every driver.
-    const bun = typeof c.commitDistributed === "function";
-    // Each handle Bun.sql gives out, a transaction's, a savepoint's and a reserved connection's too, carries its client's options.
-    // Bun.sql serializes a value for a JSON parameter itself, so a prepared one gets the JSON text
-    // Reylo writes read back, each number and string as JSON.rawJSON of its own text, which Bun has
-    // and writes as it is: a NaN, an infinity or -0 as its database reads it, a BigInt as its
-    // digits, and each value's toJSON() run once, by Reylo's writer.
+  const prepared: Prepared = { query, text, marks, names, values: bound };
+  for (const driver of driversOf(query)) {
+    const rows = driver.run?.(c, prepared);
+    if (rows !== undefined) return await rows;
+  }
+  return undefined;
+}
+
+/**
+ * The values with each JSON parameter's as its JSON text. A JSON parameter goes to pg's family,
+ * PGlite and Neon as its JSON text, and to postgres.js as its JSON text declared `unknown`.
+ */
+const withJson = ({ query, names, values }: Prepared) => values.map((v, i) => (isJsonValue(query, names[i]!, v) ? jsonText(v, "postgres", names[i]!) : v));
+
+/**
+ * Effect SQL's Postgres client (src/effect.ts), which binds a string as an untyped text parameter,
+ * which the server reads as the parameter's type, and a number or a Date by its JavaScript type, so
+ * every value goes as the text Postgres reads.
+ */
+export const effectDriver: PostgresDriver = {
+  label: "the client effect(query, params) from reylo/effect passes",
+  run(c, { query, text, names, values }) {
+    const effect = (c as Partial<EffectSql>)[EFFECT_SQL];
+    if (effect?.dialect !== "postgres") return undefined;
+    return effectPostgres(effect, text, values.map((v, i) => postgresText(query, names[i]!, v)), query.columns);
+  },
+};
+
+/** Slonik, before every other query(): its query() takes only its sql tag's queries. */
+export const slonikDriver: PostgresDriver = {
+  label: "a Slonik pool, connection or transaction",
+  run: (c, p) => (isSlonik(c) ? slonik(c, p.text, p.marks, withJson(p).map(slonikParam), p.query.columns) : undefined),
+};
+
+/** Drizzle's Postgres driver, which writes an array as its literal and binds a Uint8Array as bytea, as pg does; its HTTP clients name no column's type and are refused. */
+export const drizzlePostgresDriver: PostgresDriver = {
+  label: "Drizzle's Postgres driver's Pool or Connection",
+  run(c, p) {
+    if (isDrizzlePostgres(c)) return drizzlePostgres(c, p.text, withJson(p), p.query.columns, p.query.row);
+    if (isDrizzleHttp(c)) throw refuseDrizzleHttp();
+    return undefined;
+  },
+};
+
+/** pg-promise's database, tasks and transactions. */
+export const pgPromiseDriver: PostgresDriver = {
+  label: "a pg-promise database, task or transaction",
+  run: (c, p) => (typeof c.manyOrNone === "function" ? pgPromise(c, p.text, withJson(p), p.query.columns) : undefined),
+};
+
+/** PGlite and its transactions. */
+export const pgliteDriver: PostgresDriver = {
+  label: "PGlite or its transaction",
+  run: (c, p) => (typeof c.manyOrNone !== "function" && isPglite(c) ? pglite(c, p.text, withJson(p), p.query.columns) : undefined),
+};
+
+/** pg's Client, PoolClient and Pool, and Neon's and @vercel/postgres's, which are pg's shape. */
+export const pgDriver: PostgresDriver = {
+  label: "query(text, values) as on pg, Neon's Pool and Client, and @vercel/postgres",
+  run: (c, p) => (typeof c.query === "function" && typeof c.manyOrNone !== "function" && !isPglite(c) && !isNeonFunction(c) && (typeof c.getTypeParser === "function" || (typeof c.connect === "function" && typeof c.Client === "function")) ? queryPg(c, p.text, withJson(p), p.query.columns) : undefined),
+};
+
+/** Neon's neon() function: from 1.0 its query(text, params, options); before, the function itself, called with them. Its unsafe() builds a fragment for a template instead of running anything. */
+export const neonDriver: PostgresDriver = {
+  label: "Neon's neon() function",
+  run(c, p) {
+    if (!isNeonFunction(c)) return undefined;
+    if (typeof c.query === "function") {
+      const load: Load = async (sql) => (await c.query(sql, [], { arrayMode: true, fullResults: true, types: asText })).rows;
+      return pgFamily(c, (types) => c.query(p.text, withJson(p), { fullResults: true, arrayMode: false, types }), p.query.columns, load);
+    }
+    return neonCallable(c as never, p.text, withJson(p).map(asByteaHex), p.query.columns);
+  },
+};
+
+/**
+ * postgres.js, whose clients, transactions, savepoints and reserved connections have typed(). It
+ * reads a string for a date or time parameter through `new Date(x)` and binds its toISOString(), so
+ * a timestamp's wall-clock time moved by the app's offset, and `infinity` or a zone name failed with
+ * "Invalid time value". Declared `unknown` (705), it is sent as the text, which the server reads as
+ * the parameter's type, as it would an undeclared one. A JSON parameter goes as its JSON text
+ * declared `unknown` too: its own serializer would write a value as JSON, but a client Drizzle wraps
+ * has that serializer replaced by one that passes the value through (drizzle-orm/postgres-js), and
+ * a transaction shows neither. postgres.js 4 serializes the values of a statement with an untyped
+ * parameter (a number, null) by the types the server described for it, a value declared `unknown`
+ * too: JSON text went through the jsonb serializer and was stored as a JSON string from the
+ * statement's second run, and an array literal for a `jsonb[]` went through its element's on the
+ * first. So where the statement has inputs, every parameter goes as the text Postgres reads,
+ * declared `unknown`, and postgres.js never learns its types. postgres.js 3 sends such a value as it
+ * is either way. A query without inputs gets its values as they are, as on every driver.
+ */
+export const postgresJsDriver: PostgresDriver = {
+  label: "unsafe(text, values) as on postgres.js",
+  run(c, { query, text, names, values }) {
+    if (typeof c.query === "function" || typeof c.unsafe !== "function" || typeof c.typed !== "function" || typeof c.commitDistributed === "function") return undefined;
+    const mapped = query.inputs ? values.map((v, i) => c.typed(postgresText(query, names[i]!, v), 705)) : values;
+    return postgresJs(c, text, mapped, query.columns, query.row);
+  },
+};
+
+/**
+ * Bun.sql's client, transactions, savepoints and reserved connections, which have
+ * commitDistributed(). Bun.sql serializes a value for a JSON parameter itself, so JSON text would be
+ * stored as a JSON string, and it types a boolean, a number or an array of either by its JavaScript
+ * type ("cannot cast type boolean to jsonb"): a prepared one gets the JSON text Reylo writes read
+ * back, each number and string as JSON.rawJSON of its own text, which Bun has and writes as it is: a
+ * NaN, an infinity or -0 as its database reads it, a BigInt as its digits, and each value's toJSON()
+ * run once, by Reylo's writer. A client made with `prepare: false`, as one behind a pooler in
+ * transaction mode is, learns no parameter's type and sends an object as its String() ("invalid
+ * input syntax for type json"), so it gets the JSON text, which the server reads as the parameter's
+ * type. Each handle carries its client's options.
+ */
+export const bunPostgresDriver: PostgresDriver = {
+  label: "unsafe(text, values) as on Bun.sql",
+  run(c, { query, text, names, values }) {
+    if (typeof c.query === "function" || typeof c.unsafe !== "function" || typeof c.commitDistributed !== "function") return undefined;
     const raw = (JSON as { rawJSON?: (text: string) => unknown }).rawJSON;
     const bunJson = (v: unknown, i: number) => {
       const written = jsonText(v, "postgres", names[i]!);
@@ -1065,18 +1120,15 @@ async function runPostgres(c: Client, query: QueryModule<"postgres">, { text, va
       const value: unknown = JSON.parse(written, (_key, x: unknown, context?: { source?: string }) => (raw === undefined ? x : (typeof x === "number" || typeof x === "string") && context?.source !== undefined ? raw(context.source) : typeof x === "number" ? raw(Object.is(x, -0) ? "-0" : String(x)) : x));
       return { toJSON: () => value };
     };
-    const mapped = bun ? bound.map((v, i) => (isJsonParam(v, i) ? bunJson(v, i) : v)) : query.inputs ? bound.map((v, i) => c.typed(postgresText(query, names[i]!, v), 705)) : bound;
-    if (!bun) return await postgresJs(c, text, mapped, query.columns, query.row);
-    return (await bunRaw(c, text, mapped, query.columns, query.row)) ?? bunRows(await c.unsafe(text, mapped), query.columns, BUN_POSTGRES);
-  }
-  if (isNeonFunction(c)) return await neonCallable(c, text, json().map(asByteaHex), query.columns);
-  return undefined;
-}
+    const mapped = values.map((v, i) => (isJsonValue(query, names[i]!, v) ? bunJson(v, i) : v));
+    return bunRaw(c, text, mapped, query.columns, query.row).then(async (rows) => rows ?? bunRows(await c.unsafe(text, mapped), query.columns, BUN_POSTGRES));
+  },
+};
 
 /** A Postgres column's text as its kind, with the non-finite numbers inside its JSON as numbers and an array held to its dimensions, as `.run()` gives them (`postgresRows`). */
-function postgresDecoder(name: string, kind: Kind, delim: string | undefined, nonFinite: JsonNumbers | undefined, nestedArrays: boolean | undefined): (v: string) => unknown {
+function postgresDecoder(name: string, kind: Kind, delim: string | undefined, inJson: ((v: unknown) => unknown) | undefined, nestedArrays: boolean | undefined): (v: string) => unknown {
   const decode = textDecoder(kind, delim);
-  const numbers = nonFinite === undefined ? decode : (v: string) => numbersInJson(decode(v), nonFinite, name);
+  const numbers = inJson === undefined ? decode : (v: string) => inJson(decode(v));
   return kind.endsWith("[]") && !nestedArrays ? (v) => withinDimensions(numbers(v), kind, name) : numbers;
 }
 
@@ -1150,14 +1202,15 @@ function postgresRows(query: QueryModule<"postgres">, rows: unknown[]): unknown[
 export const postgres: Runtime<"postgres"> = {
   dialect: "postgres",
   run: runPostgres,
-  wrappers,
   before: beforePostgres,
   after: postgresRows,
   readError: readPostgresError,
   decoder: postgresDecoder,
   encode: postgresValue,
   rawValue: postgresText,
-  clients: "query(text, values) as on pg, PGlite, Neon, @vercel/postgres, pg-promise and Drizzle's Postgres driver; unsafe(text, values) as on postgres.js and Bun.sql; Neon's neon() function; a Slonik pool, connection or transaction; or a Drizzle database or Knex instance over one of them",
 };
+
+/** Every Postgres driver, in the order they are tried, which `defineQuery` passes; a module passes the ones its project installs (src/loader.ts, `moduleDrivers`). */
+export const postgresDrivers: readonly DriverClient<"postgres", any>[] = [effectDriver, slonikDriver, drizzleDriver, drizzlePostgresDriver, knexDriver, pgPromiseDriver, pgliteDriver, pgDriver, neonDriver, postgresJsDriver, bunPostgresDriver];
 
 export { DecodeError, parseArray } from "./values.ts";

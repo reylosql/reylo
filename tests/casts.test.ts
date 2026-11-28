@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { sqlModule } from "../src/loader.ts";
-import { DRIVERS, mysqlLive, INDEX, closeSessions, plain, mysqlDatabase } from "./helpers.ts";
+import { DRIVERS, mysqlLive, INDEX, MODULE, closeSessions, plain, mysqlDatabase } from "./helpers.ts";
 
 // A parameter's `::type` on MySQL and SQLite, which have no `::`: the build writes the dialect's
 // own cast, and the run time checks the value against the type, since both databases' casts turn
@@ -31,7 +31,7 @@ async function built(root: string, url: string, name: string, sql: string) {
   writeFileSync(join(root, ".env"), `DATABASE_URL=${url}\n`);
   const { code } = await sqlModule(file, sql);
   const out = join(root, `${name}.mjs`);
-  writeFileSync(out, code.replace(`from "reylo"`, `from ${JSON.stringify(INDEX)}`));
+  writeFileSync(out, code.replace(`from "reylo/module"`, `from ${JSON.stringify(MODULE)}`));
   const module = await import(pathToFileURL(out).href);
   const text = module.default.sql as string;
   const comment = `/*file='${name}.sql'*/`;

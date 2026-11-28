@@ -16,7 +16,7 @@ import { pathToFileURL } from "node:url";
 import { engine as loadEngine, type EngineIo } from "../src/engine.ts";
 import { marksOf, sqlModule } from "../src/loader.ts";
 import { connect, createServer, type AddressInfo, type Socket } from "node:net";
-import { closeSessions, DRIVERS, driver, handWritten, INDEX, MYSQL, mysqlDatabase, mysqlLive, pgLive, plain, postgresDatabase, sqliteWasm } from "./helpers.ts";
+import { closeSessions, DRIVERS, driver, handWritten, INDEX, MODULE, MYSQL, mysqlDatabase, mysqlLive, pgLive, plain, postgresDatabase, sqliteWasm } from "./helpers.ts";
 import { neonSql, pgPool, postgresJsSql } from "./stand-ins.ts";
 
 // Each fake client records what execute handed it and answers the way its driver does; the
@@ -1404,7 +1404,7 @@ async function builtModule(url: string, name: string, raw: string): Promise<any>
   try {
     const { code } = await sqlModule(file, raw);
     const out = join(root, `${name}.mjs`);
-    writeFileSync(out, code.replace(`from "reylo"`, `from ${JSON.stringify(INDEX)}`));
+    writeFileSync(out, code.replace(`from "reylo/module"`, `from ${JSON.stringify(MODULE)}`));
     return (await import(pathToFileURL(out).href)).default;
   } finally {
     await closeSessions();
@@ -2201,9 +2201,9 @@ test("postgres: Slonik, through a tag from its own createSqlTag that passes ever
 });
 
 test("an unsupported client rejects, naming what it has and what reylo takes", async () => {
-  await assert.rejects(() => execute({ connect() {}, end() {} } as never, pg) as Promise<unknown>, (e: TypeError) => e instanceof TypeError && /postgres statement on an object with connect, end\. It takes a client with query\(text, values\)/.test(e.message));
+  await assert.rejects(() => execute({ connect() {}, end() {} } as never, pg) as Promise<unknown>, (e: TypeError) => e instanceof TypeError && /postgres statement on an object with connect, end\. It takes .*query\(text, values\) as on pg/.test(e.message));
   // An object with Drizzle's select() but no session over a client is no Drizzle database.
-  await assert.rejects(() => execute({ $client: {}, select() {} } as never, pg) as Promise<unknown>, /object with select\. .*or a Drizzle database or Knex instance over one of them\./);
+  await assert.rejects(() => execute({ $client: {}, select() {} } as never, pg) as Promise<unknown>, /object with select\. .*a Drizzle database over one of them; a Knex instance over one of them\./);
   // Kysely and Prisma decode their values themselves, so each is told to pass the driver's client.
   class Kysely { selectFrom() {} executeQuery() {} transaction() {} }
   await assert.rejects(() => execute(new Kysely() as never, pg) as Promise<unknown>, /object with selectFrom, executeQuery, transaction\. .* Kysely decodes the values of its queries itself: pass the pool or database its dialect was made with\.$/);
@@ -2256,7 +2256,7 @@ test("an Effect SQL client is refused before it runs anything: its unsafe() hand
 test("postgres: a client that is none of the drivers' is refused before it runs anything, a wrapper around one included", async () => {
   let ran = 0;
   const rows = async () => (ran++, { rows: [{ id: "1" }] });
-  const refused = (seen: string) => (e: Error) => e instanceof TypeError && e.message.startsWith(`reylo cannot run a postgres statement on ${seen}. It takes a client with query(text, values) as on pg,`) && /It is none of those drivers' clients\. A wrapper around one hands back the values its driver already converted/.test(e.message);
+  const refused = (seen: string) => (e: Error) => e instanceof TypeError && e.message.startsWith(`reylo cannot run a postgres statement on ${seen}. It takes `) && e.message.includes("; query(text, values) as on pg,") && /It is none of those drivers' clients\. A wrapper around one hands back the values its driver already converted/.test(e.message);
   // A wrapper with a pool's query(), which would hand back pg's Date and its string for an int8.
   await assert.rejects(() => execute({ query: rows }, pg, { id: 1, name: "ada" }) as Promise<unknown>, refused("an object with query"));
   // One with a query() and a transaction() of its own: Neon's neon() is a function.

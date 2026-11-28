@@ -10,7 +10,7 @@
 // the databases its queries are written for.
 
 import type { QueryError } from "./query-error.ts";
-import { columnKind, describe, given, isLevel, numbersInJson, ParameterError, rowMasks, vectorText, writeJson, zoned, type Columns, type JsonNumbers, type Kind } from "./values.ts";
+import { columnKind, describe, given, isLevel, ParameterError, type numbersInJson, rowMasks, vectorText, writeJson, zoned, type Columns, type JsonNumbers, type Kind } from "./values.ts";
 import { holdsWholeArrays, schemaOf, type EngineType } from "./engine-type.ts";
 import { withSqlcommenter } from "./sqlcommenter.ts";
 import type { JsonSchema } from "./engine-type.ts";
@@ -204,6 +204,8 @@ export type QueryModule<D extends Dialect = Dialect> = {
   readonly columns?: Columns | undefined;
   /** Where each JSON column, by position beside `columns`, holds a 64-bit integer, whose number past 2^53 - 1 the run time refuses, or on Postgres a float or a decimal that may be NaN or an infinity, which the run time gives as that number, or a Postgres array it holds to one level (src/values.ts, `numbersInJson`); `null` for a column that holds none. */
   readonly nonFinite?: readonly (JsonNumbers | null)[] | undefined;
+  /** The reading of `nonFinite`'s plans (src/values.ts, `numbersInJson`), which a build step passes where a column has one. */
+  readonly jsonNumbers?: typeof numbersInJson | undefined;
   /** Each row as an object of the columns' names, one shape for every row (src/row.ts): every build step puts it in the module, beside `columns`. */
   readonly row?: RowBuilder | undefined;
   /** The result key: output columns, by name, that identify each row of the result, where the analysis proves one. */
@@ -232,7 +234,51 @@ export type QueryModule<D extends Dialect = Dialect> = {
   readonly checks?: Checks | undefined;
   /** The dialect's half of the run time, which its define function passes (src/index.ts). */
   readonly runtime: Runtime<D>;
+  /** The drivers the statement runs on, which a build step passes for the ones the project installs (src/loader.ts, `moduleDrivers`), in the order they are tried. */
+  readonly drivers?: readonly DriverClient<D, any>[] | undefined;
 };
+
+/**
+ * One driver's way of running a statement: a module passes the drivers its project installs
+ * (src/loader.ts, `moduleDrivers`), so that an app's bundle holds those drivers' code and no
+ * other. `P` is what the dialect's run time hands each, its statement bound for its drivers.
+ */
+export type DriverClient<D extends Dialect = Dialect, P = Bound> = {
+  /** What this driver takes, as the refusal of any other client names it. */
+  readonly label: string;
+  /** The rows of the statement on `c`, or undefined where `c` is not this driver's. */
+  run?(c: AnyClient, prepared: P): Promise<unknown[]> | undefined;
+  /** The driver's client a wrapper runs on (a Drizzle database's), or undefined where `c` is no such wrapper. */
+  unwrap?(c: AnyClient): AnyClient | undefined;
+  /** The rows of `run` on a connection a wrapper lends (a Knex instance's), or undefined where `c` is no such wrapper. */
+  lend?(c: AnyClient, dialect: Dialect, run: (connection: AnyClient) => unknown[] | Promise<unknown[]>): Promise<unknown[]> | undefined;
+};
+
+/** The drivers a query runs on: a module passes them, and a query defined by hand with `defineQuery` has every one. */
+export function driversOf<D extends Dialect>(query: QueryModule<D>): readonly DriverClient<D, any>[] {
+  if (query.drivers) return query.drivers;
+  throw new TypeError(`${query.source ? `${query.source}: ` : ""}This query names no driver to run on, which a module a build step writes passes for the drivers its project installs: build a module an earlier reylo wrote again (reylo generate typescript writes the files it wrote). A query defined by hand runs on every driver with defineQuery({ dialect: "${query.dialect}", … }).`);
+}
+
+/** The driver's client under a wrapper, by the drivers that know one (Drizzle's database), else `c` itself. */
+function unwrapped(query: QueryModule, c: AnyClient): AnyClient {
+  if (!query.drivers) return query.runtime.wrappers?.underneath(c) ?? c;
+  for (const d of query.drivers) {
+    const u = d.unwrap?.(c);
+    if (u !== undefined) return u;
+  }
+  return c;
+}
+
+/** The rows of `run` on a connection a wrapper lends (a Knex instance), by the drivers that know one, or undefined where `c` is no such wrapper. */
+function lent(query: QueryModule, c: AnyClient, run: (connection: AnyClient) => unknown[] | Promise<unknown[]>): Promise<unknown[]> | undefined {
+  if (!query.drivers) return query.runtime.wrappers?.knex(c, query.dialect, run);
+  for (const d of query.drivers) {
+    const rows = d.lend?.(c, query.dialect, run);
+    if (rows !== undefined) return rows;
+  }
+  return undefined;
+}
 
 /**
  * What the run time does differently on each database, each in its database's own module: running
@@ -262,14 +308,14 @@ export type Runtime<D extends Dialect = Dialect> = {
   encode(type: EngineType, v: unknown, name: string): unknown;
   /** A bound value as the database reads it with no declared type, which a Standard Query's `encode` returns (Postgres's text, `rawStatement`); every other database's as it is bound. */
   rawValue?(query: QueryModule<D>, name: string, v: unknown): unknown;
-  /** The clients `.run()` takes, in the refusal of any other (`unsupported`). */
-  readonly clients: string;
+  /** The clients `.run()` takes, in the refusal of any other (`unsupported`), for a dialect whose module names no drivers. */
+  readonly clients?: string;
   /** The database's error `error` is, or undefined where it is another (`.try()`). */
   readError(error: unknown): QueryError<D> | undefined | Promise<QueryError<D> | undefined>;
   /** The same at once, for the synchronous clients (`.trySync()`). */
   readErrorSync?(error: unknown): QueryError<D> | undefined;
   /** A column's raw value as `.run()` gives it, as a Standard Query's `decode` maps it (src/standard-query.ts). */
-  decoder(name: string, kind: Kind, delim: string | undefined, nonFinite: JsonNumbers | undefined, nestedArrays: boolean | undefined): (v: never) => unknown;
+  decoder(name: string, kind: Kind, delim: string | undefined, inJson: ((v: unknown) => unknown) | undefined, nestedArrays: boolean | undefined): (v: never) => unknown;
 };
 
 /** Placeholders' places in a statement: `[start, end]` for each, at JavaScript's offsets, in text order. */
@@ -336,15 +382,15 @@ export function execute<D extends Dialect>(
   params: ParamsInput = {},
 ): unknown[] | Promise<unknown[]> {
   const { runtime } = query;
-  const c = runtime.wrappers?.underneath(client as AnyClient) ?? (client as AnyClient);
-  const lent = runtime.wrappers?.knex(c, query.dialect, (connection) => execute(connection as ClientFor<D>, query, params));
-  if (lent) return lent;
+  const c = unwrapped(query, client as AnyClient);
+  const onConnection = lent(query, c, (connection) => execute(connection as ClientFor<D>, query, params));
+  if (onConnection) return onConnection;
   if (runtime.answersAtOnce?.(c)) return withCodecs(query, syncRows(c, query, params));
   const rows = executeAsync(c, query, params);
   const plans = jsonPlans(query);
   const after = runtime.after;
   if (!plans.length && !after) return withCodecs(query, rows);
-  return withCodecs(query, rows.then((r) => (after ? after(query, inJson(r, plans)) : inJson(r, plans))));
+  return withCodecs(query, rows.then((r) => (after ? after(query, inJson(query, r, plans)) : inJson(query, r, plans))));
 }
 
 /**
@@ -357,10 +403,17 @@ function jsonPlans(query: QueryModule): (readonly [name: string, at: JsonNumbers
 }
 
 /** The rows with what each JSON column's plan reads inside its document read there. */
-function inJson(rows: unknown[], plans: readonly (readonly [name: string, at: JsonNumbers])[]): unknown[] {
+function inJson(query: QueryModule, rows: unknown[], plans: readonly (readonly [name: string, at: JsonNumbers])[]): unknown[] {
   if (!plans.length) return rows;
-  for (const row of rows as Record<string, unknown>[]) for (const [name, at] of plans) row[name] = numbersInJson(row[name], at, name);
+  const read = jsonNumbersOf(query);
+  for (const row of rows as Record<string, unknown>[]) for (const [name, at] of plans) row[name] = read(row[name], at, name);
   return rows;
+}
+
+/** The reading of what a JSON column's plan reads inside its document (src/values.ts, `numbersInJson`): every build step passes it where a column has a plan. */
+export function jsonNumbersOf(query: QueryModule): typeof numbersInJson {
+  if (query.jsonNumbers) return query.jsonNumbers;
+  throw new TypeError(`${query.source ? `${query.source}: ` : ""}This statement returns JSON whose numbers Reylo reads with jsonNumbers, which a module a build step writes passes: build a module an earlier reylo wrote again (reylo generate typescript writes the files it wrote). A query defined by hand passes it with defineQuery.`);
 }
 
 /** The rows with the codecs of the module's columns applied where they stand (src/codecs.ts): one pass, where a column holds one. */
@@ -434,9 +487,24 @@ export type Wrappers = {
 };
 export const wrappers: Wrappers = { underneath, knex: (c, dialect, run) => (isKnex(c) ? onKnexConnection(c, dialect, run) : undefined) };
 
+/** A Drizzle database, transaction or savepoint over one of the dialect's drivers: Reylo runs on the driver's client underneath. */
+export const drizzleDriver: DriverClient = {
+  label: "a Drizzle database over one of them",
+  unwrap(c) {
+    const u = underneath(c);
+    return u === c ? undefined : u;
+  },
+};
+
+/** A Knex instance, transaction or savepoint over one of the dialect's drivers: Reylo runs on a connection it lends. */
+export const knexDriver: DriverClient = {
+  label: "a Knex instance over one of them",
+  lend: (c, dialect, run) => (isKnex(c) ? onKnexConnection(c, dialect, run) : undefined),
+};
+
 /** The synchronous path alone, for `runSync`: any other client is refused before anything runs. */
 export function executeSync<D extends Dialect>(client: SyncClientFor<D>, query: QueryModule<D>, params: ParamsInput = {}): unknown[] {
-  const c = query.runtime.wrappers?.underneath(client as unknown as AnyClient) ?? (client as unknown as AnyClient);
+  const c = unwrapped(query, client as unknown as AnyClient);
   if (!query.runtime.runSync) throw refuseSync(`a ${query.dialect} statement has none`);
   if (!query.runtime.answersAtOnce?.(c)) throw refuseSync("this client answers through a promise");
   const rows = syncRows(c, query, params);
@@ -456,7 +524,7 @@ function syncRows<D extends Dialect>(c: AnyClient, query: QueryModule<D>, params
   const rows = query.runtime.runSync!(c, query, statement(query, params));
   const plans = jsonPlans(query);
   if (!plans.length) return rows;
-  return Array.isArray(rows) ? inJson(rows, plans) : rows.then((r) => inJson(r, plans));
+  return Array.isArray(rows) ? inJson(query, rows, plans) : rows.then((r) => inJson(query, r, plans));
 }
 
 // A SQLite-backed Durable Object's `ctx.storage.sql`: exec() and databaseSize, and no prepare().
@@ -875,7 +943,7 @@ export function compile(query: QueryModule): { text: string; order: readonly str
   return { text: query.sql, order: query.params, marks: query.marks };
 }
 
-function unsupported(c: unknown, { dialect, runtime }: QueryModule): TypeError {
+function unsupported(c: unknown, { dialect, runtime, drivers }: QueryModule): TypeError {
   let seen: string;
   if (c === null || (typeof c !== "object" && typeof c !== "function")) seen = String(c);
   else {
@@ -903,5 +971,8 @@ function unsupported(c: unknown, { dialect, runtime }: QueryModule): TypeError {
           : dialect === "postgres" && (typeof c === "function" || typeof (o as { query?: unknown } | null)?.query === "function" || typeof (o as { unsafe?: unknown } | null)?.unsafe === "function")
               ? " It is none of those drivers' clients. A wrapper around one hands back the values its driver already converted, a Date for a timestamp and a string for a bigint, which reylo cannot read back: pass the driver's own pool, client or transaction, or keep the wrapper one of them, as a subclass or a proxy."
               : "";
-  return new TypeError(`reylo cannot run a ${dialect} statement on ${seen}. It takes a client with ${runtime.clients}.${hint}`);
+  // The drivers' own clients first, then the wrappers over them.
+  const labels = drivers && [...drivers.filter((d) => d.run), ...drivers.filter((d) => !d.run)].map((d) => d.label);
+  const takes = labels ? `It takes ${labels.join("; ")}. A module a build step writes runs on the drivers its project installs, found beside its .sql file: install the driver there and build it again.` : `It takes a client with ${runtime.clients}.`;
+  return new TypeError(`reylo cannot run a ${dialect} statement on ${seen}. ${takes}${hint}`);
 }

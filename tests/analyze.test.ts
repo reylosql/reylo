@@ -743,7 +743,7 @@ test("the module a build step emits carries the analysis and reads nothing at ru
     // file, the only one of the project's files that exists.
     assert.deepEqual(watched, [join(root, ".env")]);
     assert.equal(code, [
-      `import { defineSqliteQuery } from "reylo";`,
+      `import { defineSqliteQuery } from "reylo/module";`,
       `export const sql = "select id, name from users where id = ?";`,
       `export const raw = ${JSON.stringify(SELECT)};`,
       `export const params = ["id"];`,

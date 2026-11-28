@@ -9,12 +9,13 @@ import { dirname } from "node:path";
 import { Session } from "./analyze.ts";
 import { libraryProblem, sourceName } from "./project.ts";
 import { rowSource } from "./row.ts";
-import { columnKind, holdsRareKind } from "./values.ts";
+import { columnKind, holdsRareKind, READER_EXPORTS, scalarKinds } from "./values.ts";
 import { jsonNumbers } from "./render.ts";
 import { analysisWithBases, analysisWithNestedArrays, holdsWholeArrays, type EngineType } from "./engine-type.ts";
 import { planLibraries, planOf, type Codecs, type Library, type Plan } from "./codecs.ts";
 import type { Dialect } from "./execute.ts";
 import { DIAGNOSTIC, type Analysis, type Lexed } from "./engine-core.ts";
+import { installedDrivers } from "./installed-drivers.ts";
 
 export type SqlModule = {
   code: string;
@@ -37,7 +38,7 @@ function warnUnverified(line: string): void {
 
 export async function sqlModule(path: string, sql: string): Promise<SqlModule> {
   const { input, entry, session } = await moduleInputOf(path, sql);
-  return { code: moduleCode(input), entry, watched: session.project.watched.filter((f) => existsSync(f)) };
+  return { code: moduleCode(input), entry, watched: [...session.project.watched.filter((f) => existsSync(f)), ...(input.driversWatched ?? [])] };
 }
 
 /**
@@ -88,6 +89,9 @@ export async function moduleInputOf(path: string, sql: string): Promise<{ input:
   // as another value (src/execute.ts, `QueryModule`).
   const marks = await marksOf(analysis, trimmedStatement(analysis.rewritten.sql), dialect, (region) => session.lex(region));
   const input: ModuleInput = { analysis, raw: sql, params, marks, source: sourceName(path), dialect, codecs: session.project.codecs, sqlcommenter: session.project.sqlcommenter, allowNestedArrays: session.project.allowNestedArrays };
+  // The drivers the project installs, which the module passes, so that an app bundles theirs alone.
+  const installed = installedDrivers(dialect, dirname(path));
+  if (installed) Object.assign(input, { drivers: installed.drivers, driversWatched: installed.watched });
   // The libraries a codec builds values with are imported from the app's own install beside the
   // `.sql` file.
   for (const library of moduleLibraries(input)) {
@@ -113,6 +117,10 @@ export type ModuleInput = {
   codecs: Codecs;
   sqlcommenter: boolean;
   allowNestedArrays: boolean;
+  /** The drivers the module passes, as "reylo/module" exports them, in the order they are tried (src/installed-drivers.ts); undefined for a dialect whose module names none yet. */
+  drivers?: readonly string[];
+  /** The `package.json` files that say which drivers the project installs, which a bundler watches. */
+  driversWatched?: readonly string[];
 };
 
 /**
@@ -148,19 +156,24 @@ export function moduleLibraries(m: ModuleInput): Set<Library> {
   return libraries;
 }
 
+/** Where each column's JSON holds what the run time reads inside its document (src/render.ts, `jsonNumbers`), by position beside its columns; `null` for a column that holds none. */
+function moduleNonFinite({ analysis, dialect, allowNestedArrays }: ModuleInput): (ReturnType<typeof jsonNumbers> | null)[] {
+  return dialect === "clickhouse" ? [] : (dialect === "postgres" && allowNestedArrays ? analysisWithNestedArrays(analysis) : analysis).columns.map((c) => jsonNumbers(c.type, false, dialect) ?? null);
+}
+
 /** The text of a statement's module: its imports, its exports, and the definition of its query, field by field. */
 export function moduleCode(m: ModuleInput): string {
-  const { checked, coded, typed, imports } = moduleImports(m);
+  const { pieces, imports } = moduleImports(m);
   const define = DEFINE[m.dialect];
   return [
-    `import { ${define}${checked ? ", checks" : ""}${coded ? ", codecRuntime" : ""}${typed ? ", postgresTypes" : ""} } from "reylo";`,
+    `import { ${[define, ...pieces].join(", ")} } from "reylo/module";`,
     ...imports,
     // `sql` is the compiled statement and `raw` the file as written. The comment naming the file
     // (src/sqlcommenter.ts) is added where the statement is sent, so `sql` leaves it out.
     `export const sql = ${JSON.stringify(compiledText(m))};`,
     `export const raw = ${JSON.stringify(m.raw)};`,
     `export const params = ${JSON.stringify(m.params)};`,
-    `export default ${define}(${moduleDefinition(m, { raw: "raw", sql: "sql", params: "params", checks: "checks", codecRuntime: "codecRuntime", postgresTypes: "postgresTypes" })});`,
+    `export default ${define}(${moduleDefinition(m, { raw: "raw", sql: "sql", params: "params", piece: (name) => name })});`,
     ``,
   ].join("\n");
 }
@@ -177,11 +190,13 @@ export function trimmedStatement(sql: string): string {
 }
 
 /**
- * What a statement's module imports besides its dialect's define function: whether it needs
- * reylo's `checks` and its `codecRuntime`, and each library a codec builds its values with, by the
- * names the module's definition calls them (`ReyloDecimal`, `ReyloIpAddress`).
+ * What a statement's module imports besides its dialect's define function: the pieces of the run
+ * time from "reylo/module" its statement uses (`checks`, `codecRuntime`, `postgresTypes`, and on
+ * Postgres the reader of each kind its columns hold whose text is not the value, by kind), and each
+ * library a codec builds its values with, by the names the module's definition calls them
+ * (`ReyloDecimal`, `ReyloIpAddress`).
  */
-export function moduleImports(m: ModuleInput): { checked: boolean; coded: boolean; typed: boolean; imports: string[] } {
+export function moduleImports(m: ModuleInput): { checked: boolean; coded: boolean; typed: boolean; readers: (readonly [kind: string, piece: string])[]; pieces: string[]; imports: string[] } {
   const { analysis } = m;
   // A decimal library's class by a default import, which every version gives as its class, and
   // ip-address whole.
@@ -204,7 +219,14 @@ export function moduleImports(m: ModuleInput): { checked: boolean; coded: boolea
   // literal (`postgresValue`).
   const kind = (t: EngineType) => columnKind(t, "postgres");
   const typed = m.dialect === "postgres" && (analysis.columns.some((c) => holdsRareKind(kind(c.type))) || analysis.params.some((p) => (p.members === undefined ? holdsRareKind(kind(p.type)) || holdsWholeArrays(p.type) : /\bmoney\b/.test(kind(p.type)))));
-  return { checked, coded, typed, imports };
+  // On Postgres, the reader of each kind the columns hold, anywhere in their values, whose text is
+  // not the value itself (src/values.ts, `allReaders`), so that an app bundles the readers its
+  // statements use and no other.
+  const kinds = new Set<string>();
+  if (m.dialect === "postgres") for (const c of analysis.columns) scalarKinds(kind(c.type), kinds);
+  const readers = [...kinds].filter((k) => Object.hasOwn(READER_EXPORTS, k)).sort().map((k) => [k, READER_EXPORTS[k]!] as const);
+  const pieces = [...(checked ? ["checks"] : []), ...(coded ? ["codecRuntime"] : []), ...(typed ? ["postgresTypes"] : []), ...new Set(readers.map(([, piece]) => piece)), ...(moduleNonFinite(m).some((at) => at !== null) ? ["jsonNumbers"] : []), ...(m.drivers ?? [])];
+  return { checked, coded, typed, readers, pieces, imports };
 }
 
 /**
@@ -214,7 +236,7 @@ export function moduleImports(m: ModuleInput): { checked: boolean; coded: boolea
  * `checks`, `codecRuntime` and `postgresTypes`. A field whose source is its own name is written as a shorthand. `multiline` puts each
  * field on a line of its own, for a file that is read and diffed.
  */
-export function moduleDefinition(m: ModuleInput, names: { raw: string; sql: string; params: string; checks: string; codecRuntime: string; postgresTypes: string }, multiline = false): string {
+export function moduleDefinition(m: ModuleInput, names: { raw: string; sql: string; params: string; piece: (name: string) => string }, multiline = false): string {
   const { analysis, dialect } = m;
   const inputs = moduleInputs(m);
   // Each output column's name and kind, from the table the declared types come from: what the run
@@ -230,12 +252,12 @@ export function moduleDefinition(m: ModuleInput, names: { raw: string; sql: stri
   // gives as that number, or a Postgres array it holds to one level (src/render.ts, `jsonNumbers`),
   // by position beside `columns`: two columns may share a name, each with its own type. Under
   // `allow_nested_arrays: true` a Postgres array nests there too, held to no depth.
-  const nonFinite = dialect === "clickhouse" ? [] : (dialect === "postgres" && m.allowNestedArrays ? analysisWithNestedArrays(analysis) : analysis).columns.map((c) => jsonNumbers(c.type, false, dialect) ?? null);
+  const nonFinite = moduleNonFinite(m);
   const codecs = moduleCodecs(m);
   const libraries = moduleLibraries(m);
   const library = [...libraries].find((l) => l !== "ip-address");
   const handed = [...(library === undefined ? [] : ["decimal: ReyloDecimal"]), ...(libraries.has("ip-address") ? ["inet: ReyloIpAddress"] : [])];
-  const { checked, coded, typed } = moduleImports(m);
+  const { checked, coded, typed, readers } = moduleImports(m);
   const text = compiledText(m);
   // A structured parameter's lists, at JavaScript's offsets into the statement (the engine's are
   // UTF-8 bytes).
@@ -257,23 +279,26 @@ export function moduleDefinition(m: ModuleInput, names: { raw: string; sql: stri
     ["columns", literal(columns)],
     ["codecs", Object.keys(codecs).length ? literal(codecs) : undefined],
     ["libraries", handed.length ? `{ ${handed.join(", ")} }` : undefined],
-    ["codecRuntime", coded ? names.codecRuntime : undefined],
-    ["postgresTypes", typed ? names.postgresTypes : undefined],
+    ["codecRuntime", coded ? names.piece("codecRuntime") : undefined],
+    ["postgresTypes", typed ? names.piece("postgresTypes") : undefined],
+    ["readers", readers.length ? `{ ${readers.map(([k, piece]) => `${k}: ${names.piece(piece)}`).join(", ")} }` : undefined],
     ["row", columns.length ? rowSource(columns.map(([name]) => name as string)) : undefined],
     ["nonFinite", nonFinite.some((at) => at !== null) ? literal(nonFinite) : undefined],
+    ["jsonNumbers", nonFinite.some((at) => at !== null) ? names.piece("jsonNumbers") : undefined],
     ["key", analysis.key && JSON.stringify(analysis.key)],
     ["ordered", analysis.ordered ? "true" : undefined],
     ["structured", structured.length ? literal(structured) : undefined],
     ["source", JSON.stringify(m.source)],
     ["sqlcommenter", m.sqlcommenter ? "true" : undefined],
     ["nestedArrays", m.allowNestedArrays && dialect === "postgres" ? "true" : undefined],
-    ["checks", checked ? names.checks : undefined],
+    ["checks", checked ? names.piece("checks") : undefined],
+    ["drivers", m.drivers && `[${m.drivers.map(names.piece).join(", ")}]`],
   ];
   const written = fields.flatMap(([name, value]) => (value === undefined ? [] : [value === name ? name : `${name}: ${value}`]));
   return multiline ? `{\n${written.map((f) => `  ${f},\n`).join("")}}` : `{ ${written.join(", ")} }`;
 }
 
-/** The define function from "reylo" a module of each dialect calls (src/index.ts). */
+/** The define function from "reylo/module" a module of each dialect calls (src/index.ts). */
 export const DEFINE: Record<Dialect, string> = { postgres: "definePostgresQuery", mysql: "defineMysqlQuery", sqlite: "defineSqliteQuery", clickhouse: "defineClickhouseQuery" };
 
 /**

@@ -25,7 +25,7 @@ async function checkMoney(c: AnyClient, query: QueryModule<"postgres">, name: st
   if (moneyLocales.has(key)) return;
   let written: unknown;
   try {
-    const rows = await query.runtime.run(c, { dialect: "postgres", runtime: query.runtime, sql: MONEY_CHECK, params: [], text: MONEY_CHECK, order: [], marks: [], columns: [["m", "text"]] }, { text: MONEY_CHECK, values: [], names: [], marks: [] });
+    const rows = await query.runtime.run(c, { dialect: "postgres", runtime: query.runtime, drivers: query.drivers, sql: MONEY_CHECK, params: [], text: MONEY_CHECK, order: [], marks: [], columns: [["m", "text"]] }, { text: MONEY_CHECK, values: [], names: [], marks: [] });
     // A client that is none of the drivers' is refused when the statement itself runs.
     if (rows === undefined) return;
     written = (rows[0] as { m?: unknown } | undefined)?.m;

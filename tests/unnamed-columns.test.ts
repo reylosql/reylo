@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { sqlModule } from "../src/loader.ts";
 import { defineQuery } from "../src/index.ts";
-import { DRIVERS, INDEX, closeSessions, driver, mysqlDatabase, mysqlLive, pgLive, postgresDatabase, transform } from "./helpers.ts";
+import { DRIVERS, INDEX, MODULE, closeSessions, driver, mysqlDatabase, mysqlLive, pgLive, postgresDatabase, transform } from "./helpers.ts";
 
 // A statement whose one column is an expression with no alias gives that column's values, since the
 // only name it has is one the database makes up. Among several columns such a name is an error where
@@ -31,7 +31,7 @@ async function built(root: string, name: string, sql: string) {
   writeFileSync(file, sql);
   const { code } = await sqlModule(file, sql);
   const out = join(root, `${name}.mjs`);
-  writeFileSync(out, code.replace(`from "reylo"`, `from ${JSON.stringify(INDEX)}`));
+  writeFileSync(out, code.replace(`from "reylo/module"`, `from ${JSON.stringify(MODULE)}`));
   return (await import(pathToFileURL(out).href)).default;
 }
 

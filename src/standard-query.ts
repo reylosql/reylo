@@ -13,10 +13,10 @@
 // mysql2's binary protocol drops trailing zeros (`.000`) that `.run()` writes back from the
 // column's metadata. A ClickHouse query alone maps no values: it binds none in a list and reads
 // none raw, so its `encode`, `decode` and `output` throw and it has no `columns` (`standardQuery`).
-import { codecsOf, compile, rawStatement, sentText, type Dialect, type QueryModule } from "./execute.ts";
+import { codecsOf, compile, jsonNumbersOf, rawStatement, sentText, type Dialect, type QueryModule } from "./execute.ts";
 import type { StandardTypedV1 } from "./standard.ts";
 import { rowOf, type RowBuilder } from "./row.ts";
-import { DecodeError, numbersInJson } from "./values.ts";
+import { DecodeError } from "./values.ts";
 
 /** The Standard Query interface: a statement a driver can execute, as a typed function from an input to an output. */
 export interface StandardQueryV1<Input = unknown, Output = Input, D extends StandardQueryV1.Dialect = StandardQueryV1.Dialect>
@@ -162,9 +162,10 @@ export function standardQuery<D extends Dialect, Output>(module: QueryModule<D>,
   const decodersOf = () =>
     (decoders ??= module.columns!.map(([name, kind, delim], i): ((v: never) => unknown) => {
       const at = module.nonFinite?.[i] ?? undefined;
-      const read = module.runtime.decoder(name, kind, delim, at, module.nestedArrays);
-      // Postgres's decoder reads a document's plan itself; on MySQL and SQLite it is read here, as `.run()` reads it.
-      const decode = at === undefined || dialect === "postgres" ? read : (v: never) => numbersInJson(read(v), at, name);
+      const inJson = at === undefined ? undefined : (v: unknown) => jsonNumbersOf(module)(v, at, name);
+      // Postgres's decoder reads a document's plan itself, before an array's dimensions; on MySQL and SQLite it is read here, as `.run()` reads it.
+      const read = module.runtime.decoder(name, kind, delim, dialect === "postgres" ? inJson : undefined, module.nestedArrays);
+      const decode = inJson === undefined || dialect === "postgres" ? read : (v: never) => inJson(read(v));
       // A family the project file's `js.codecs` gives another type takes it here too, as in `.run()` (src/codecs.ts).
       const plan = module.codecs?.[name];
       return plan === undefined ? decode : (v) => codecsOf(module).decodePlan(plan, decode(v), name, module.libraries);

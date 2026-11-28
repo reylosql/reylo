@@ -14,7 +14,7 @@ import { columnKind, kindType, ParameterError } from "../src/values.ts";
 import type { EngineType } from "../src/engine-type.ts";
 import type { StandardQueryV1 } from "../src/standard-query.ts";
 import type { Dialect } from "../src/execute.ts";
-import { closeSessions, declarations, DRIVERS, handWritten, PG, pgLive, INDEX, transform } from "./helpers.ts";
+import { closeSessions, declarations, DRIVERS, handWritten, PG, pgLive, INDEX, MODULE, transform } from "./helpers.ts";
 
 // Every import is a Standard Query: `~standard.query` holds the statement, its database, and the
 // two mappings a driver calls, `encode` (the input to the values it binds, each in the database's
@@ -443,7 +443,7 @@ async function built(root: string, name: string, sql: string) {
   writeFileSync(file, sql);
   const { code } = await sqlModule(file, sql);
   const out = join(root, `${name}.mjs`);
-  writeFileSync(out, code.replace(`from "reylo"`, `from ${JSON.stringify(INDEX)}`));
+  writeFileSync(out, code.replace(`from "reylo/module"`, `from ${JSON.stringify(MODULE)}`));
   return (await import(`${pathToFileURL(out).href}?${Math.random()}`)).default;
 }
 

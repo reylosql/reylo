@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { sqlModule } from "../src/loader.ts";
 import { reyloImport } from "../src/module-types.ts";
-import { closeSessions, declarations, driver, DRIVERS, INDEX, mysqlDatabase, mysqlLive, pgLive, postgresDatabase, ROOT } from "./helpers.ts";
+import { closeSessions, declarations, driver, DRIVERS, INDEX, MODULE, mysqlDatabase, mysqlLive, pgLive, postgresDatabase, ROOT, linkDriver } from "./helpers.ts";
 
 // A `json` or `jsonb` value that nothing in the schema or the statement gives a shape is any JSON
 // value, `Json`, which `reylo` exports and a module imports where one of its types names it; so is
@@ -120,7 +120,7 @@ function project(url: string, driver: string): string {
   writeFileSync(join(root, "package.json"), "{}");
   writeFileSync(join(root, ".env"), `DATABASE_URL=${url}\n`);
   mkdirSync(join(root, "node_modules"));
-  symlinkSync(join(DRIVERS, driver), join(root, "node_modules", driver));
+  linkDriver(join(root, "node_modules"), driver);
   return root;
 }
 
@@ -132,7 +132,7 @@ async function built(root: string, name: string, raw: string): Promise<Built> {
   writeFileSync(file, raw);
   const { code } = await sqlModule(file, raw);
   const out = join(root, `${name}.mjs`);
-  writeFileSync(out, code.replace(`from "reylo"`, `from ${JSON.stringify(INDEX)}`));
+  writeFileSync(out, code.replace(`from "reylo/module"`, `from ${JSON.stringify(MODULE)}`));
   return ((await import(pathToFileURL(out).href)) as { default: Built }).default;
 }
 

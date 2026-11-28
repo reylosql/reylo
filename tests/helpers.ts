@@ -1,8 +1,8 @@
 // What the loader's tests share: the test databases `REYLO_TEST_PG`, `REYLO_TEST_MYSQL` and `REYLO_TEST_CLICKHOUSE` name and a database of a test's own on each, the drivers `lab/drivers` installs, a statement written by hand compiled by the engine's lexer, and the content mapper run over its JSON-RPC protocol, as the type check runs it.
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, symlinkSync } from "node:fs";
 import { createRequire } from "node:module";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { pathToFileURL } from "node:url";
 import { reportedDiagnostics } from "../src/mapper-diagnostics.ts";
@@ -14,6 +14,29 @@ export const ROOT = join(import.meta.dirname, "..");
 export const DRIVERS = join(ROOT, "lab", "drivers", "node_modules");
 export const MAPPER = join(ROOT, "src", "mapper.ts");
 export const INDEX = pathToFileURL(join(ROOT, "src", "index.ts")).href;
+/** The Postgres drivers the lab installs, and Slonik and Effect from the root's install: every one a test runs a Postgres module on. */
+const POSTGRES_DRIVERS: readonly (readonly [from: string, name: string])[] = [
+  ...["pg", "postgres", "pg-promise", "@electric-sql/pglite", "@neondatabase/serverless", "drizzle-orm", "knex"].map((name) => [DRIVERS, name] as const),
+  ...["slonik", "effect"].map((name) => [join(ROOT, "node_modules"), name] as const),
+];
+
+/**
+ * Links `driver` from lab/drivers into a test project's `node_modules`, and where it is a Postgres
+ * driver, every Postgres driver a test runs the project's modules on: a module passes the drivers
+ * its project installs (src/installed-drivers.ts), as an app installs the ones it runs on.
+ */
+export function linkDriver(nodeModules: string, driver: string): void {
+  const names = POSTGRES_DRIVERS.some(([, name]) => name === driver) ? POSTGRES_DRIVERS : [[DRIVERS, driver] as const];
+  for (const [from, name] of names) {
+    const to = join(nodeModules, name);
+    if (existsSync(to) || !existsSync(join(from, name))) continue;
+    mkdirSync(dirname(to), { recursive: true });
+    symlinkSync(join(from, name), to);
+  }
+}
+
+/** What a module a build step writes imports, "reylo/module", as a test that writes one outside the repository reaches it. */
+export const MODULE = pathToFileURL(join(ROOT, "src", "module.ts")).href;
 export const PG = process.env.REYLO_TEST_PG;
 export const MYSQL = process.env.REYLO_TEST_MYSQL;
 /** The HTTP interface of a throwaway ClickHouse, as `http://127.0.0.1:28123`, whose user may create databases. */

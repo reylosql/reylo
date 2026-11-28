@@ -29,7 +29,8 @@
     "./turbopack": "./src/turbopack.ts",
     "./next": "./src/next.ts",
     "./jest": "./src/jest.ts",
-    "./effect": "./src/effect.ts"
+    "./effect": "./src/effect.ts",
+    "./module": "./src/module.ts"
   },
   "sideEffects": [
     "./src/cli.ts",

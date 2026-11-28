@@ -27,9 +27,9 @@ function run(bin: string, args: string[], nodeOptions = "", cwd = lab) {
 const cache = mkdtempSync(join(tmpdir(), "reylo-jest-"));
 const jest = (args: string[], nodeOptions?: string) => run("jest/bin/jest.js", ["--ci", `--cacheDirectory=${cache}`, ...args], nodeOptions);
 
-test("reylo/jest makes CommonJS of every import a module writes: its define function, with checks, codecRuntime and postgresTypes", () => {
-  const code = `import { definePostgresQuery, checks, codecRuntime, postgresTypes } from "reylo";\nexport const sql = "select 1";\nexport default definePostgresQuery({ sql, checks, codecRuntime, postgresTypes });\n`;
-  assert.equal(commonJs("q.sql", code), `Object.defineProperty(exports, "__esModule", { value: true });\nconst { definePostgresQuery, checks, codecRuntime, postgresTypes } = require("reylo");\nconst sql = exports.sql = "select 1";\nexports.default = definePostgresQuery({ sql, checks, codecRuntime, postgresTypes });\n`);
+test("reylo/jest makes CommonJS of every import a module writes: its define function, with checks, codecRuntime, postgresTypes, its readers and its drivers", () => {
+  const code = `import { definePostgresQuery, checks, codecRuntime, postgresTypes, readInt8, pgDriver } from "reylo/module";\nexport const sql = "select 1";\nexport default definePostgresQuery({ sql, checks, codecRuntime, postgresTypes, readers: { int8: readInt8 }, drivers: [pgDriver] });\n`;
+  assert.equal(commonJs("q.sql", code), `Object.defineProperty(exports, "__esModule", { value: true });\nconst { definePostgresQuery, checks, codecRuntime, postgresTypes, readInt8, pgDriver } = require("reylo/module");\nconst sql = exports.sql = "select 1";\nexports.default = definePostgresQuery({ sql, checks, codecRuntime, postgresTypes, readers: { int8: readInt8 }, drivers: [pgDriver] });\n`);
 });
 
 test("setup", { skip }, () => {

@@ -127,7 +127,7 @@ export async function generate(inputs: string[], out: string, base: string): Pro
   const from = inputs.map((input) => shown(dirname(out), resolve(base, input))).map((p) => (p === "." ? "its own directory" : p));
   const text = [
     `${MARK} from ${from.join(", ")}: edit the queries and run it again, never this file.`,
-    `import * as reylo from "reylo";`,
+    `import * as reylo from "reylo/module";`,
     reyloImport(...queries.flatMap((q) => q.types)),
     ...new Set(queries.flatMap((q) => q.imports)),
     ...queries.map((q) => `\n${q.text}`),
@@ -167,7 +167,7 @@ async function queryOf(name: string, file: string, base: string): Promise<Query 
   const types = moduleTypes(sql, input.analysis, input.dialect, lexed, project.strictParams, projectFile, project.codecs, project.allowNestedArrays && input.dialect === "postgres");
   if (types.diagnostics.length) return types.diagnostics.map((d) => `${where}:${place(sql, d.start)}: ${d.message}`);
   const { imports } = moduleImports(input);
-  const definition = moduleDefinition(input, { raw: JSON.stringify(input.raw), sql: JSON.stringify(compiledText(input)), params: JSON.stringify(input.params), checks: "reylo.checks", codecRuntime: "reylo.codecRuntime", postgresTypes: "reylo.postgresTypes" }, true);
+  const definition = moduleDefinition(input, { raw: JSON.stringify(input.raw), sql: JSON.stringify(compiledText(input)), params: JSON.stringify(input.params), piece: (name) => `reylo.${name}` }, true);
   const standard = [types.columns === undefined ? "" : `readonly columns: ${types.columns}`, input.analysis.ordered ? "readonly ordered: true" : ""].filter(Boolean);
   // The literal types go in the Query type directly rather than through the namespace's aliases,
   // so a hover shows the row's shape, as the content mapper declares it.

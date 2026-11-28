@@ -1194,26 +1194,61 @@ export function postgresLiteral(t: EngineType, v: unknown, fail: (message: strin
 /** A MySQL SET from its text, its members joined by commas (`a,c`), none for an empty one. */
 const members = (x: string): Set<string> => new Set(x === "" ? [] : x.split(","));
 
-const TEXT_DECODERS: Readonly<Record<Exclude<ScalarKind, RareKind>, Decoder>> = {
-  bool: (x) => x === "t",
-  int: number,
-  float: number,
-  int8: (x) => BigInt(x),
-  decimal: identity,
-  text: identity,
-  date,
-  timestamp,
-  timestamptz: instant,
-  interval: duration,
-  json: (x) => JSON.parse(x),
-  bytes: bytea,
-  // pgvector prints the shortest text of each float, `[1,2.5,1e-07]`, which JSON reads exactly.
-  vector: (x) => JSON.parse(x),
-  enum: identity,
-  set: (x) => members(x),
-  geometry: identity,
-  unknown: identity,
-};
+/** Postgres's readers of the kinds whose text is not the value itself, each its own export, so that a module imports the ones its columns read (src/loader.ts, `moduleReaders`). */
+export const readBool: Decoder = (x) => x === "t";
+export const readNumber: Decoder = number;
+export const readInt8: Decoder = (x) => BigInt(x);
+export const readDate: Decoder = date;
+export const readTimestamp: Decoder = timestamp;
+export const readTimestamptz: Decoder = instant;
+export const readInterval: Decoder = duration;
+export const readJson: Decoder = (x) => JSON.parse(x);
+export const readBytes: Decoder = bytea;
+// pgvector prints the shortest text of each float, `[1,2.5,1e-07]`, which JSON reads exactly.
+export const readVector: Decoder = (x) => JSON.parse(x);
+export const readSet: Decoder = (x) => members(x);
+
+/** The kinds whose text is not the value itself, each read by its own reader (`allReaders`). */
+export const READ_KINDS = /^(?:bool|int|float|int8|date|timestamp|timestamptz|interval|json|bytes|vector|set)$/;
+
+/** Readers by kind: each kind whose text is not its value, with its reader. A kind left out is read as its text. */
+export type Readers = Readonly<Partial<Record<Kind, Decoder>>>;
+
+/** Every reader, by kind, which `defineQuery` passes and a module that reads none of them never names. */
+export const allReaders: Readers = { bool: readBool, int: readNumber, float: readNumber, int8: readInt8, date: readDate, timestamp: readTimestamp, timestamptz: readTimestamptz, interval: readInterval, json: readJson, bytes: readBytes, vector: readVector, set: readSet };
+
+/** The export of each reader, by its kind, which a module imports (src/loader.ts). */
+export const READER_EXPORTS: Readonly<Record<string, string>> = { bool: "readBool", int: "readNumber", float: "readNumber", int8: "readInt8", date: "readDate", timestamp: "readTimestamp", timestamptz: "readTimestamptz", interval: "readInterval", json: "readJson", bytes: "readBytes", vector: "readVector", set: "readSet" };
+
+/**
+ * The readers the queries of this process passed, by kind: a define function installs each
+ * query's, so that a value of a kind no query declares (a column a migration added under
+ * `select *`) is read as its text, as one no reader names is.
+ */
+const readers: Record<Kind, Decoder> = {};
+
+/** A query's readers, for every query of the process (src/index.ts, `define`). */
+export function installReaders(r: Readers): void {
+  Object.assign(readers, r);
+}
+
+/** The kinds a kind holds a scalar of: itself, an array's or a whole array's elements, a row value's fields, a range's bounds, and an either's members. */
+export function scalarKinds(kind: Kind, into = new Set<Kind>()): Set<Kind> {
+  const whole = wholeArrayKind(kind);
+  if (whole !== undefined) return scalarKinds(whole, into);
+  if (kind.endsWith("[]")) return scalarKinds(elementKind(kind), into);
+  if (isRowKind(kind)) {
+    for (const [, k] of rowFields(kind)) scalarKinds(k, into);
+    return into;
+  }
+  if (isRangeKind(kind) || isMultirangeKind(kind)) return scalarKinds(subtypeKind(kind), into);
+  if (kind.includes("|")) {
+    for (const k of kind.split("|")) scalarKinds(k, into);
+    return into;
+  }
+  into.add(kind);
+  return into;
+}
 
 /** Postgres's kinds whose readers come with its rarer types (`postgresTypes`): the geometric types, hstore and money. */
 type RareKind = Geometric | "hstore" | "money";
@@ -1378,7 +1413,12 @@ export function textDecoder(kind: Kind, delim = ","): Decoder {
     return isRowKind(elementKind(kind)) && delim === "," ? rare(kind, (types) => types.rowsDecoder(element)) : (x) => parseArray(x, element, delim);
   }
   if (isRareKind(kind)) return rare(kind, (types) => types.decoder(kind));
-  return TEXT_DECODERS[kind as Exclude<ScalarKind, RareKind>] ?? identity;
+  // A kind with a reader no query of the process has installed yet is looked up again as it reads:
+  // a decoder built for a result's type, which a driver's table keeps by oid, would otherwise read
+  // its text for good, past the module a later import defines.
+  const reader = readers[kind];
+  if (reader) return reader;
+  return READ_KINDS.test(kind) ? (x) => (readers[kind] ?? identity)(x) : identity;
 }
 
 /**
