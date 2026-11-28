@@ -125,6 +125,17 @@ test("postgres: after a migration adds a column under select *, a created type t
     } finally {
       await freshPayload.end();
     }
+    // A row value's column replaced by a text column, the result as wide as before: by its type.
+    await admin.unsafe(`create table replaced (id int primary key, payload pair); insert into replaced values (1, row(1, 'a'))`);
+    const replaced = await built("replaced", "select * from replaced");
+    await admin.unsafe(`alter table replaced drop column payload; alter table replaced add column note text; update replaced set note = '42'`);
+    const freshReplaced = new pg.Client({ connectionString: own.url });
+    await freshReplaced.connect();
+    try {
+      assert.deepEqual(await replaced.run(freshReplaced), [{ id: 1, note: "42" }]);
+    } finally {
+      await freshReplaced.end();
+    }
     // A column renamed and another added under a name like it: the new one is no declared column.
     await admin.unsafe(`create table moods (id int primary key, mood_list mood[]); insert into moods values (1, '{sad}')`);
     const moods = await built("moods", "select * from moods");

@@ -61,9 +61,8 @@ const ARRAY_OIDS = new Map<number, number>([
   [5039, 5038], [6150, 4451], [6151, 4532], [6152, 4533], [6153, 4534], [6155, 4535], [6157, 4536], [6442, 6437], [6491, 6490],
 ]);
 const BOX_ARRAY = 1020;
-/** `record` and `record[]`, the oids of a row value of any shape. */
-const RECORD = 2249;
-const RECORD_ARRAY = 2287;
+/** The built-in types whose value is their text: text, varchar, char, name, uuid, the network and bit-string types, time and timetz, tsvector, tsquery and xml. */
+const TEXT_OIDS = new Set([18, 19, 25, 142, 650, 774, 829, 869, 1042, 1043, 1083, 1266, 1560, 1562, 2950, 3614, 3615]);
 
 /** A built-in type's kind and its array delimiter; undefined for a type the database created. */
 function builtin(oid: number): { kind: Kind; delim: string } | undefined {
@@ -229,26 +228,24 @@ async function fieldDecoders(fields: Field[], columns: Columns | undefined, key:
  */
 function declaredColumn(fields: readonly Field[], columns: Columns | undefined, rename?: (name: string) => string): (f: Field, i: number) => Columns[number] | undefined {
   if (!columns?.length) return () => undefined;
-  if (columns.length === fields.length) return (_f, i) => columns[i];
+  // A field of a built-in type whose kind is not the declared one (a column a migration retyped or
+  // replaced) is read by its type. Postgres gives an array of every rank one oid, so an array's kind
+  // is compared without its rank. A built-in type Reylo doesn't list (`record`, a catalog table's
+  // row type) says nothing of the value's kind.
+  const rankless = (kind: Kind) => kind.replace(/(?:\[\])+$/, "[]");
+  const fits = (f: Field, c: Columns[number] | undefined) => {
+    if (c === undefined) return undefined;
+    const b = SCALAR_OIDS[f.oid] !== undefined || ARRAY_OIDS.has(f.oid) || TEXT_OIDS.has(f.oid) ? builtin(f.oid) : undefined;
+    return b === undefined || rankless(b.kind) === rankless(c[1]) ? c : undefined;
+  };
+  if (columns.length === fields.length) return (f, i) => fits(f, columns[i]);
   const byName = new Map(lastOfEach(columns).map((c) => [rename ? rename(c[0]) : c[0], c] as const));
   // A name more than one field has (a column a migration added under a name the statement gives
   // another, or one a renaming makes the same) says nothing of which field a declaration is: none of
   // them takes a declared kind, and each is read by its type, or as its text, never by a guess.
   const count = new Map<string, number>();
   for (const f of fields) count.set(f.name, (count.get(f.name) ?? 0) + 1);
-  // A field of a built-in type whose kind is not the declared one (a column a migration retyped) is
-  // read by its type. Postgres gives an array of every rank one oid, so an array's kind is compared
-  // without its rank.
-  const rankless = (kind: Kind) => kind.replace(/(?:\[\])+$/, "[]");
-  // `record` and its array are every row's, and say nothing of its fields.
-  const fits = (f: Field, c: Columns[number]) => {
-    const b = f.oid === RECORD || f.oid === RECORD_ARRAY ? undefined : builtin(f.oid);
-    return b === undefined || rankless(b.kind) === rankless(c[1]);
-  };
-  return (f) => {
-    const c = count.get(f.name) === 1 ? byName.get(f.name) : undefined;
-    return c && fits(f, c) ? c : undefined;
-  };
+  return (f) => fits(f, count.get(f.name) === 1 ? byName.get(f.name) : undefined);
 }
 
 // ---------------------------------------------------------------------------------------------
