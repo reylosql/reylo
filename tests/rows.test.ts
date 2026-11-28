@@ -208,6 +208,9 @@ test("a jsonb[] member's element is any JSON but an array, which Postgres would 
   assert.equal(bound([null, { toJSON: (key: string) => (keys.push(key), { k: 1, nested: { toJSON: () => ++calls } }) }]), '[{"docs":[null,{"k":1,"nested":1}]}]');
   assert.deepEqual(keys, ["1"]);
   assert.equal(bound([{ toJSON: () => ({ ok: true, toJSON: () => [1, 2] }) }, { toJSON: () => Object.assign(new Number(7), { toJSON: () => 99 }) }]), '[{"docs":[{"ok":true},7]}]');
+  // One that writes no JSON value, or whose toJSON() throws, is refused with its place.
+  assert.throws(() => bound([{ toJSON: () => undefined }]), /"docs" element 1 is jsonb, which holds a JSON value; got/);
+  assert.throws(() => bound([{ toJSON: () => { throw new Error("nope"); } }]), /"docs" element 1 is jsonb, which holds a JSON value: nope\./);
   // Reylo's own writer keeps a number past 2^53 exact and refuses NaN.
   assert.equal(bound([{ big: 9007199254740993n }]), '[{"docs":[{"big":9007199254740993}]}]');
   assert.throws(() => bound([{ n: NaN }]), /"docs" element 1 is .*NaN/);

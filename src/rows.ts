@@ -131,9 +131,17 @@ function jsonMember(f: RowField, v: unknown, dialect: Dialect, fail: (message: s
  */
 function jsonElement(v: unknown, index: number, written: string, fail: (message: string) => never): Raw | null {
   const key = String(index);
-  const text = writeJson({ [key]: v }, "postgres", (message) => fail(`is ${message}`));
-  // `{}` where it writes nothing, as JSON.stringify writes null for such an element of an array.
-  const element = text === undefined || text === "{}" ? "null" : text.slice(`{${JSON.stringify(key)}:`.length, -1);
+  const of = written.replace(/\s*\[\s*\]\s*$/, "");
+  let text: string | undefined;
+  try {
+    text = writeJson({ [key]: v }, "postgres", (message) => fail(`is ${message}`));
+  } catch (e) {
+    if (e instanceof ParameterError) throw e;
+    return fail(`is ${of}, which holds a JSON value: ${(e as Error).message}.`);
+  }
+  // `{}` where it writes no value at all, as for a toJSON() that returns undefined: a member holds JSON, never nothing.
+  if (text === undefined || text === "{}") return fail(`is ${of}, which holds a JSON value; got ${describe(v)}.`);
+  const element = text.slice(`{${JSON.stringify(key)}:`.length, -1);
   if (element.startsWith("[")) fail(`is a JSON array, which an element of ${written} can't be: Postgres reads it as one more dimension of the array. Pass the array as one value of a jsonb column, or wrap it in an object.`);
   return element === "null" ? null : new Raw(element);
 }
