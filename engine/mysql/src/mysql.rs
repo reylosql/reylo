@@ -46,6 +46,28 @@ thread_local! {
     /// The names a call written without a schema reaches no built-in of in the session of the
     /// analysis running on this thread ([`not_builtin`]), which [`builtin`] reads.
     static NOT_BUILTIN: std::cell::RefCell<HashSet<String>> = std::cell::RefCell::new(HashSet::new());
+    /// Whether the server of the analysis running on this thread merges a YEAR with a TINYINT into
+    /// a TINYINT ([`merges_year`]), and whether the session or the statement reaches a YEAR at all
+    /// ([`YEARS_QUERY`]), which [`cut_years`] and a document's leaves read.
+    static MERGES_YEAR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static YEAR_REACHED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether the session sees a stored function that returns a YEAR, in any schema but Reylo
+/// Migrate's other shadows, which any call may reach. Asked once a session, for what [`cut_years`]
+/// cannot trace, beside what the statement reads ([`Keys::years`]).
+const YEARS_QUERY: &str = "select 1 from information_schema.routines where data_type = 'year' and (routine_schema = database() or left(routine_schema, 13) <> 'reylo_shadow_') limit 1";
+
+/// The server [`crate::structured::MYSQL_SERVER_QUERY`] answered for (`None` where it has not):
+/// whether it is MariaDB, and its major and minor version where its text gives them.
+fn server_version(server: Option<&[Vec<Value>]>) -> (bool, Option<(u32, u32)>) {
+    let version = server.and_then(|rows| rows.first()).and_then(|row| row.first()).and_then(as_str).unwrap_or_default();
+    let mut parts = version.split(|c: char| !c.is_ascii_digit());
+    let at = match (parts.next().and_then(|p| p.parse().ok()), parts.next().and_then(|p| p.parse().ok())) {
+        (Some(major), Some(minor)) => Some((major, minor)),
+        _ => None,
+    };
+    (version.to_ascii_lowercase().contains("mariadb"), at)
 }
 
 /// The names, in lower case, that a call written without a schema reaches no built-in of on the
@@ -54,16 +76,24 @@ thread_local! {
 /// narrow a type, so reading one as no built-in where the component answers only claims less.
 /// MariaDB has all three, and a version not read takes every move.
 fn not_builtin(server: Option<&[Vec<Value>]>) -> HashSet<String> {
-    let version = server.and_then(|rows| rows.first()).and_then(|row| row.first()).and_then(as_str).unwrap_or_default();
-    if version.to_ascii_lowercase().contains("mariadb") {
+    let (mariadb, at) = server_version(server);
+    if mariadb {
         return HashSet::new();
     }
-    let mut parts = version.split(|c: char| !c.is_ascii_digit());
-    let at = match (parts.next().and_then(|p| p.parse().ok()), parts.next().and_then(|p| p.parse().ok())) {
-        (Some(major), Some(minor)) => (major, minor),
-        _ => (u32::MAX, u32::MAX),
-    };
+    let at = at.unwrap_or((u32::MAX, u32::MAX));
     MOVED_OUT.iter().filter(|(from, _)| at >= *from).flat_map(|(_, moved)| moved.iter().map(|n| n.to_string())).collect()
+}
+
+/// Whether the server merges a YEAR with a TINYINT into a TINYINT. MySQL before 9.2 does, in
+/// COALESCE, IFNULL, IF, CASE, GREATEST and LEAST and in a UNION's column, where 9.2 merges them
+/// into a SMALLINT (measured on 8.4.13 and 9.7.2). The binary protocol sends a TINYINT in one byte,
+/// so 2026 arrives as -22, and a UNION stores 127; a document holds the whole year. A version not
+/// read, and MariaDB's, are taken to merge them so.
+fn merges_year(server: Option<&[Vec<Value>]>) -> bool {
+    match server_version(server) {
+        (false, Some(at)) => at < (9, 2),
+        _ => true,
+    }
 }
 
 /// One row per column of every unique index of a table, in key order, with the column's type.
@@ -223,6 +253,7 @@ pub fn analyze(sql: &str, lexed: &Lexed, text: Option<MysqlText>, host: &Host, m
     // Asked in one round: the prepare, the mode where it decides the reading, and the columns of
     // the tables a parameter is written to.
     let raw = host.describe(&rewritten.sql);
+    let years = host.query(YEARS_QUERY, Vec::new(), Scope::Session);
     let misread = match text {
         Some(_) => misread(sql, lexed, host),
         None => Some((Some("the server did not say its sql_mode, which decides how it reads this statement's strings and double quotes, so nothing bounds its rows".into()), false)),
@@ -253,7 +284,10 @@ pub fn analyze(sql: &str, lexed: &Lexed, text: Option<MysqlText>, host: &Host, m
         crate::mysql_params::prefetch(statement, &names, host);
         crate::errors::prefetch(kind(Some(statement)), &crate::mysql_params::tables(statement), &rewritten.sql, crate::mysql_params::reads_by_schema(statement), host);
     }
-    let (raw, (misread, ignore_space), pipes, _) = (raw?, misread?, pipes?, server?);
+    let (raw, (misread, ignore_space), pipes, server, years) = (raw?, misread?, pipes?, server?, years?);
+    let years = years.map_or(true, |rows| !rows.is_empty());
+    let merges = merges_year(server.as_deref().ok());
+    MERGES_YEAR.with(|cell| cell.set(merges));
     let misread = misread.or_else(|| pipes.clone().err());
     // The tree again where the session reads `||` or a spaced built-in otherwise than the default.
     let session = SessionDialect(dialect.0, !matches!(pipes, Ok(false)), ignore_space);
@@ -423,6 +457,25 @@ pub fn analyze(sql: &str, lexed: &Lexed, text: Option<MysqlText>, host: &Host, m
     // What the engine knows of each column being NULL: the server's flags, read where merging
     // could make them wrong with every derived table materialized, and what the engine proves
     // beyond them.
+    // Whether a YEAR may reach the statement: one its code names, a stored function that returns
+    // one, or one among what it reads ([`Keys::years`]), where the engine reads it; asked beside
+    // the copy's probes, and awaited after them.
+    let reads_year = match &parsed {
+        Some(Statement::Query(q)) => match catalog(host, q) {
+            // A name the statement reads resolves in the session, to a TEMPORARY table that may
+            // hide one the catalog lists: asked of the session too, where a TINYINT or a document
+            // may hold a merged YEAR. A name the catalog does not list already counts, and MySQL
+            // refuses to show one it does not hold only as it runs, which would stop the analysis.
+            Some(keys) if !keys.years && raw.columns.iter().any(|c| matches!(c.r#type, 1 | 245)) => {
+                let listed = crate::mysql_keys::tables_anywhere(q, None).into_iter().filter(|t| keys.columns.keys().any(|k| k.eq_ignore_ascii_case(t)));
+                let shown: Vec<Lazy<bool>> = listed.map(|table| session_year(&table, host)).collect();
+                shown.into_iter().collect::<Option<Vec<bool>>>().map(|shown| shown.contains(&true))
+            }
+            keys => keys.map(|keys| keys.years),
+        },
+        _ => Some(true),
+    };
+    YEAR_REACHED.with(|cell| cell.set(merges && (years || names_year(sql, lexed) || reads_year.unwrap_or(true))));
     let proven = match &parsed {
         Some(Statement::Query(q)) => {
             // The views of every schema, which the copy reads through derived tables of their
@@ -436,6 +489,7 @@ pub fn analyze(sql: &str, lexed: &Lexed, text: Option<MysqlText>, host: &Host, m
         _ if unread => Proven { flags: vec![false; raw.columns.len()], ..Proven::default() },
         _ => Proven { flags: raw.columns.iter().map(|c| c.flags & 1 != 0).collect(), ..Proven::default() },
     };
+    reads_year?;
     // The unique keys, columns and views of the tables the query reads, which its cardinality
     // reads, and whose views' own calls the flags below may miss.
     let keys = match &parsed {
@@ -465,6 +519,8 @@ pub fn analyze(sql: &str, lexed: &Lexed, text: Option<MysqlText>, host: &Host, m
         }
         _ => Vec::new(),
     };
+    // A TINYINT that may hold a YEAR cut to its low byte ([`cut_years`]).
+    let years = cut_years(parsed.as_ref(), &raw, views.as_ref(), host)?;
     // A JSON column a CHECK holds to a JSON Schema: the values the schema lets in.
     let documents = documents(parsed.as_ref(), &raw, host)?;
     // The truth values: what the statement computes as 1 or 0, by the engine's reading of it, and
@@ -516,7 +572,7 @@ pub fn analyze(sql: &str, lexed: &Lexed, text: Option<MysqlText>, host: &Host, m
                 (None, Some(labelled)) if matches!(ty.label.as_deref(), Some("enum" | "set")) => labelled,
                 _ => ty,
             };
-            let ty = if bits.contains(&position) { Type::unknown() } else { ty };
+            let ty = if bits.contains(&position) || years.contains(&position) { Type::unknown() } else { ty };
             let ty = match literals.get(position) {
                 Some(Some(written)) => reylo_engine_core::literal::narrow(&ty, written).unwrap_or(ty),
                 _ => ty,
@@ -1507,19 +1563,7 @@ fn uncorrelated(q: &Query, columns: &crate::mysql_shape::Columns) -> bool {
 /// names the table's for a table's own column read the same way.
 fn bit_results(q: &Query, raw: &MysqlDescribe, views: Option<&HashSet<String>>, host: &Host) -> Lazy<Vec<usize>> {
     const BIT: u32 = 16;
-    /// Whether `e` reads a column and computes nothing.
-    fn reads_column(e: &Expr) -> bool {
-        match e {
-            Expr::Nested(inner) => reads_column(inner),
-            Expr::Identifier(_) | Expr::CompoundIdentifier(_) => true,
-            _ => false,
-        }
-    }
-    // A host that reports no schema says only whether the column names a table that is no view.
-    let computed_elsewhere = |i: usize| {
-        let c = &raw.columns[i];
-        c.r#type == BIT && !c.schema.as_deref().map_or_else(|| table_column(c, views), |schema| !schema.is_empty())
-    };
+    let computed_elsewhere = |i: usize| raw.columns[i].r#type == BIT && computed(&raw.columns[i], views);
     /// The results of an IF or a CASE, through the ones that are an IF or a CASE themselves;
     /// false where `e` is neither.
     fn results<'e>(e: &'e Expr, out: &mut Vec<&'e Expr>) -> bool {
@@ -1550,12 +1594,7 @@ fn bit_results(q: &Query, raw: &MysqlDescribe, views: Option<&HashSet<String>>, 
             _ => false,
         }
     }
-    // A query in parentheses is the query inside them: its columns and their values are the same.
-    let mut q = q;
-    while let SetExpr::Query(inner) = q.body.as_ref() {
-        q = &**inner;
-    }
-    let SetExpr::Select(select) = q.body.as_ref() else { return Some(Vec::new()) };
+    let Some((q, select)) = top_select(q) else { return Some(Vec::new()) };
     if select.projection.len() != raw.columns.len() {
         // A wildcard's columns, which the select list's own expressions are not told from.
         return Some((0..raw.columns.len()).filter(|&i| computed_elsewhere(i)).collect());
@@ -1570,7 +1609,7 @@ fn bit_results(q: &Query, raw: &MysqlDescribe, views: Option<&HashSet<String>>, 
             }
             continue;
         };
-        if raw.columns[i].r#type == BIT && (bit_digits(e) || reads_column(e) && computed_elsewhere(i)) {
+        if raw.columns[i].r#type == BIT && (bit_digits(e) || is_column(e) && computed_elsewhere(i)) {
             bits.push(i);
             continue;
         }
@@ -1580,34 +1619,213 @@ fn bit_results(q: &Query, raw: &MysqlDescribe, views: Option<&HashSet<String>>, 
             found.extend(of.into_iter().filter(|e| !matches!(e, Expr::Value(_))).map(|e| (i, e)));
         }
     }
-    for aggregated in [false, true] {
-        let part: Vec<&(usize, &Expr)> = found.iter().filter(|(_, e)| calls_aggregate(e) == aggregated).collect();
-        if part.is_empty() {
-            continue;
-        }
-        let mut probe = (**select).clone();
-        probe.projection = part.iter().map(|(_, e)| SelectItem::UnnamedExpr((*e).clone())).collect();
-        probe.having = None;
-        probe.distinct = None;
-        let with = q.with.as_ref().map(|w| format!("{w} ")).unwrap_or_default();
-        // A result that reads a key beside an aggregate (`sum(v) * k`) prepares only under the
-        // query's own GROUP BY, and one whose key is an alias or a position of the select list
-        // only without it: under it first, for the results that aggregate.
-        let grouped = format!("{with}{probe}");
-        probe.group_by = GroupByExpr::Expressions(Vec::new(), Vec::new());
-        let ungrouped = format!("{with}{probe}");
-        let mut outcome = host.describe(if aggregated { &grouped } else { &ungrouped })?;
-        if aggregated && outcome.is_err() && ungrouped != grouped {
-            outcome = host.describe(&ungrouped)?;
-        }
-        match outcome {
-            Ok(d) if d.columns.len() == part.len() => bits.extend(part.iter().zip(&d.columns).filter(|(_, c)| c.r#type == BIT).map(|((i, _), _)| *i)),
-            // Another statement's columns, as a host that answers every prepare alike gives, say nothing.
-            Ok(_) => {}
-            Err(_) => bits.extend(part.iter().map(|(i, _)| *i)),
+    let prepared = prepare_each(q, &[(select, found.clone())], host)?.pop().unwrap_or_default();
+    bits.extend(found.iter().zip(&prepared).filter(|(_, p)| match p {
+        Prepared::Column(c) => c.r#type == BIT,
+        Prepared::Silent => false,
+        Prepared::Refused => true,
+    }).map(|((i, _), _)| *i));
+    Some(bits)
+}
+
+/// The query and its SELECT, where its body is one: a query in parentheses is the query inside
+/// them, whose columns and their values are the same.
+fn top_select(mut q: &Query) -> Option<(&Query, &Select)> {
+    while let SetExpr::Query(inner) = q.body.as_ref() {
+        q = &**inner;
+    }
+    match q.body.as_ref() {
+        SetExpr::Select(select) => Some((q, select)),
+        _ => None,
+    }
+}
+
+/// Whether `e` reads a column and computes nothing.
+fn is_column(e: &Expr) -> bool {
+    match e {
+        Expr::Nested(inner) => is_column(inner),
+        Expr::Identifier(_) | Expr::CompoundIdentifier(_) => true,
+        _ => false,
+    }
+}
+
+/// Whether a result column is computed: an expression, here or in a view, a derived table or a
+/// WITH query it is read from. The prepare names no schema for one, where it names the table's for
+/// a table's own column read the same way; a host that reports no schema says only whether the
+/// column names a table that is no view.
+fn computed(c: &crate::api::MysqlColumn, views: Option<&HashSet<String>>) -> bool {
+    !c.schema.as_deref().map_or_else(|| table_column(c, views), |schema| !schema.is_empty())
+}
+
+/// What the server prepares an expression as ([`prepare_each`]).
+enum Prepared {
+    Column(crate::api::MysqlColumn),
+    /// The host answered with another statement's columns, as one that answers every prepare alike
+    /// does: nothing is known.
+    Silent,
+    /// The server would not prepare the statement that holds it.
+    Refused,
+}
+
+/// What the server prepares each expression of each group as, each group a SELECT and expressions
+/// of its list: each a column of a statement over the same rows, which names its type. A group's
+/// expressions that call an aggregate are prepared in one statement, grouped as the query is or
+/// not at all, the others in another, not grouped. Every statement is asked in one round, and the
+/// retries in one more. In the order of the groups and of their expressions.
+fn prepare_each(q: &Query, groups: &[(&Select, Vec<(usize, &Expr)>)], host: &Host) -> Lazy<Vec<Vec<Prepared>>> {
+    struct Part {
+        group: usize,
+        members: Vec<usize>,
+        aggregated: bool,
+        grouped: String,
+        ungrouped: String,
+    }
+    let with = q.with.as_ref().map(|w| format!("{w} ")).unwrap_or_default();
+    let mut parts = Vec::new();
+    for (group, (select, exprs)) in groups.iter().enumerate() {
+        for aggregated in [false, true] {
+            let members: Vec<usize> = (0..exprs.len()).filter(|&k| calls_aggregate(exprs[k].1) == aggregated).collect();
+            if members.is_empty() {
+                continue;
+            }
+            let mut probe = (*select).clone();
+            probe.projection = members.iter().map(|&k| SelectItem::UnnamedExpr(exprs[k].1.clone())).collect();
+            probe.having = None;
+            probe.distinct = None;
+            // An expression that reads a key beside an aggregate (`sum(v) * k`) prepares only under
+            // the query's own GROUP BY, and one whose key is an alias or a position of the select
+            // list only without it: under it first, for the expressions that aggregate.
+            let grouped = format!("{with}{probe}");
+            probe.group_by = GroupByExpr::Expressions(Vec::new(), Vec::new());
+            let ungrouped = format!("{with}{probe}");
+            parts.push(Part { group, members, aggregated, grouped, ungrouped });
         }
     }
-    Some(bits)
+    let asked: Vec<_> = parts.iter().map(|p| host.describe(if p.aggregated { &p.grouped } else { &p.ungrouped })).collect();
+    let mut outcomes = asked.into_iter().collect::<Option<Vec<_>>>()?;
+    let retried: Vec<_> = parts.iter().zip(&outcomes).map(|(p, o)| (p.aggregated && o.is_err() && p.ungrouped != p.grouped).then(|| host.describe(&p.ungrouped))).collect();
+    for (k, retry) in retried.into_iter().enumerate() {
+        if let Some(retry) = retry {
+            outcomes[k] = retry?;
+        }
+    }
+    let mut out: Vec<Vec<Option<Prepared>>> = groups.iter().map(|(_, exprs)| exprs.iter().map(|_| None).collect()).collect();
+    for (p, outcome) in parts.iter().zip(outcomes) {
+        let slots = &mut out[p.group];
+        match outcome {
+            Ok(d) if d.columns.len() == p.members.len() => {
+                for (&k, c) in p.members.iter().zip(d.columns) {
+                    slots[k] = Some(Prepared::Column(c));
+                }
+            }
+            Ok(_) => p.members.iter().for_each(|&k| slots[k] = Some(Prepared::Silent)),
+            Err(_) => p.members.iter().for_each(|&k| slots[k] = Some(Prepared::Refused)),
+        }
+    }
+    Some(out.into_iter().map(|g| g.into_iter().map(|p| p.expect("every expression is prepared")).collect()).collect())
+}
+
+/// The positions of the columns that may hold a YEAR cut to its low byte ([`merges_year`]): the
+/// ones the server prepares as a TINYINT that are computed ([`computed`]). The prepare describes a
+/// YEAR's merge with a TINYINT as it does a TINYINT's with a TINYINT, so each such item of the
+/// select list, or of every side of a set operation, is followed to the values it merges
+/// ([`merged`]), each prepared as a column over the same rows without the query's grouping
+/// ([`prepare_each`]). A YEAR among them makes the column of no known type. So does a value that is
+/// itself a computed TINYINT, as one a view, a derived table or a WITH query computes, or that
+/// would not prepare, and an item the engine cannot follow (a wildcard's column, a VALUES or TABLE
+/// side, a query it does not read), where the session or the statement reaches a YEAR at all
+/// ([`YEARS_QUERY`]). A table's own column that a ROLLUP makes computed is the table's.
+fn cut_years(parsed: Option<&Statement>, raw: &MysqlDescribe, views: Option<&HashSet<String>>, host: &Host) -> Lazy<Vec<usize>> {
+    const TINY: u32 = 1;
+    const YEAR: u32 = 13;
+    let candidates: Vec<usize> = raw.columns.iter().enumerate().filter(|(_, c)| c.r#type == TINY && computed(c, views)).map(|(i, _)| i).collect();
+    if candidates.is_empty() || !MERGES_YEAR.with(std::cell::Cell::get) {
+        return Some(Vec::new());
+    }
+    let reached = YEAR_REACHED.with(std::cell::Cell::get);
+    let untraced = || if reached { candidates.clone() } else { Vec::new() };
+    /// The SELECTs whose rows the body returns: itself, or each side of a set operation; `None`
+    /// where a side is something else, or a query in parentheses with a WITH of its own.
+    fn sides<'q>(body: &'q SetExpr, out: &mut Vec<&'q Select>) -> Option<()> {
+        match body {
+            SetExpr::Select(select) => out.push(select),
+            SetExpr::SetOperation { left, right, .. } => {
+                sides(left, out)?;
+                sides(right, out)?;
+            }
+            SetExpr::Query(inner) if inner.with.is_none() => sides(&inner.body, out)?,
+            _ => return None,
+        }
+        Some(())
+    }
+    let Some(Statement::Query(q)) = parsed else { return Some(untraced()) };
+    let mut selects = Vec::new();
+    if sides(&q.body, &mut selects).is_none() || selects.iter().any(|s| s.projection.len() != raw.columns.len()) {
+        return Some(untraced());
+    }
+    let mut cut = Vec::new();
+    let mut groups: Vec<(&Select, Vec<(usize, &Expr)>)> = Vec::new();
+    for select in selects {
+        let mut found: Vec<(usize, &Expr)> = Vec::new();
+        for &i in &candidates {
+            match &select.projection[i] {
+                SelectItem::UnnamedExpr(e) | SelectItem::ExprWithAlias { expr: e, .. } => {
+                    let mut values = Vec::new();
+                    merged(e, &mut values);
+                    found.extend(values.into_iter().map(|v| (i, v)));
+                }
+                _ if reached => cut.push(i),
+                _ => {}
+            }
+        }
+        groups.push((select, found));
+    }
+    let prepared = prepare_each(q, &groups, host)?;
+    for ((_, found), prepared) in groups.iter().zip(&prepared) {
+        cut.extend(found.iter().zip(prepared).filter(|(_, p)| match p {
+            Prepared::Column(c) => c.r#type == YEAR || reached && c.r#type == TINY && computed(c, views),
+            Prepared::Silent => false,
+            Prepared::Refused => reached,
+        }).map(|((i, _), _)| *i));
+    }
+    cut.sort_unstable();
+    cut.dedup();
+    Some(cut)
+}
+
+/// The values an expression's type is merged from, through the calls whose type is their
+/// arguments' merged: COALESCE, IFNULL, GREATEST and LEAST, an IF's and a CASE's results, NULLIF's
+/// first argument, an aggregate or a window function that returns one of the values it reads
+/// (`max`, `min`, `any_value`, `first_value`, `last_value`, `nth_value`), and `lag` and `lead` with
+/// their default. A literal and a placeholder are no YEAR, and anything else is a value.
+fn merged<'e>(e: &'e Expr, out: &mut Vec<&'e Expr>) {
+    match e {
+        Expr::Nested(inner) => merged(inner, out),
+        Expr::Value(_) => {}
+        Expr::Case { conditions, else_result, .. } => {
+            for c in conditions {
+                merged(&c.result, out);
+            }
+            if let Some(e) = else_result.as_deref() {
+                merged(e, out);
+            }
+        }
+        Expr::Function(f) => {
+            let (args, _) = call_args(f);
+            let values: Vec<&Expr> = match (builtin(f).as_str(), args.as_slice()) {
+                ("coalesce" | "ifnull" | "greatest" | "least", _) => args.clone(),
+                ("if", [_, then, otherwise]) => vec![*then, *otherwise],
+                ("nullif" | "max" | "min" | "any_value" | "first_value" | "last_value" | "nth_value", [first, ..]) => vec![*first],
+                ("lag" | "lead", [first, _, default, ..]) => vec![*first, *default],
+                ("lag" | "lead", [first, ..]) => vec![*first],
+                _ => return out.push(e),
+            };
+            for v in values {
+                merged(v, out);
+            }
+        }
+        _ => out.push(e),
+    }
 }
 
 /// The functions that, given BITs alone, are prepared as a BIT and return the decimal digits of its
@@ -1623,9 +1841,9 @@ pub(crate) fn bit_digits(e: &Expr) -> bool {
     }
 }
 
-/// Whether the statement's code, outside its strings, names and comments, calls IF or writes a
-/// CASE, either of which may return a BIT's bytes under another type ([`bit_results`]).
-fn branches(sql: &str, lexed: &Lexed) -> bool {
+/// The words of the statement's code, outside its strings, names and comments, in lower case: each
+/// with whether a parenthesis follows it.
+fn code_words(sql: &str, lexed: &Lexed) -> Vec<(String, bool)> {
     let mut code = String::with_capacity(sql.len());
     let mut at = 0;
     for &(start, end) in &lexed.opaque {
@@ -1636,19 +1854,27 @@ fn branches(sql: &str, lexed: &Lexed) -> bool {
     code.push_str(&sql[at..]);
     let lower = code.to_ascii_lowercase();
     let word = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '$';
+    let mut words = Vec::new();
     let mut rest = lower.as_str();
     while let Some(start) = rest.find(word) {
         let tail = &rest[start..];
         let end = tail.find(|c: char| !word(c)).unwrap_or(tail.len());
-        let after = tail[end..].trim_start();
-        match &tail[..end] {
-            "case" => return true,
-            "if" if after.starts_with('(') => return true,
-            _ => {}
-        }
+        words.push((tail[..end].to_string(), tail[end..].trim_start().starts_with('(')));
         rest = &tail[end..];
     }
-    false
+    words
+}
+
+/// Whether the statement's code, outside its strings, names and comments, calls IF or writes a
+/// CASE, either of which may return a BIT's bytes under another type ([`bit_results`]).
+fn branches(sql: &str, lexed: &Lexed) -> bool {
+    code_words(sql, lexed).iter().any(|(word, call)| word == "case" || word == "if" && *call)
+}
+
+/// Whether the statement's code names a YEAR, as `year(d)`, which is one, and `cast(… as year)`
+/// do ([`cut_years`]).
+fn names_year(sql: &str, lexed: &Lexed) -> bool {
+    code_words(sql, lexed).iter().any(|(word, _)| word == "year")
 }
 
 /// The positions of the columns that are an aggregate called as a window function over a frame
@@ -2799,6 +3025,10 @@ fn resolve(shape: &Shape, outcomes: &[Option<MysqlDescribe>], plan: &crate::mysq
             // A truth value is an integer to the server, so no other type is in doubt.
             Some(c) => {
                 let ty = if unconverted.get(*probe).and_then(|u| u.get(*index)) == Some(&true) { column_type(c) } else { defined_type(c, Some(views), None) };
+                // A computed TINYINT that may be a YEAR's merge with one, where the session or the
+                // statement reaches a YEAR ([`YEARS_QUERY`]), holds the whole year in a document:
+                // the SMALLINT MySQL 9.2 merges them into.
+                let ty = if c.r#type == 1 && computed(c, Some(views)) && YEAR_REACHED.with(std::cell::Cell::get) { crate::mysql_types::of(2, c.flags, c.charset, c.length) } else { ty };
                 let ty = flows.get(*probe).and_then(|f| f.get(*index)).and_then(|reached| widened(&ty, *reached)).unwrap_or(ty);
                 // A JSON column a CHECK holds to a JSON Schema: the values it admits.
                 let ty = match documents.get(*probe).and_then(|d| d.get(*index)).cloned().flatten() {
@@ -2853,6 +3083,10 @@ pub(crate) struct Keys {
     pub(crate) rebound: crate::mysql_derived::Rebound,
     /// The names the catalog's rows of each name asked came back under ([`Keys::name`]).
     answers: crate::mysql_names::Answers,
+    /// Whether a YEAR may be among what the query reads ([`cut_years`]): a table's or a view's
+    /// YEAR column, a view whose definition names the word or is empty to the account, a name the
+    /// catalog lists no columns of, as a temporary table, or a table of another schema.
+    pub(crate) years: bool,
 }
 
 /// What a value compares as. MySQL compares a string with a number as two doubles, so `'01'`,
@@ -3066,18 +3300,31 @@ fn unconverted(statement: Option<&Statement>, raw: &MysqlDescribe, views: &HashS
     )
 }
 
-/// Each column of a table, in lower case, with its character set, empty for none, as the session's
-/// own `SHOW FULL COLUMNS` has it, which reads the table the name resolves to: `information_schema`
-/// lists none of a TEMPORARY table's columns, and lists those of a table one of the same name hides.
-/// Asked only of a table the catalog lists, which the session can show. `None` where it is not read.
-fn session_charsets(table: &str, host: &Host) -> Lazy<Option<HashMap<String, String>>> {
+/// A table's columns as the session's own `SHOW FULL COLUMNS` has them (`Field`, `Type`,
+/// `Collation`, …), which reads the table the name resolves to: `information_schema` lists none of
+/// a TEMPORARY table's columns, and lists those of a table one of the same name hides. `None` where
+/// they are not read.
+fn session_columns(table: &str, host: &Host) -> Lazy<Option<Vec<Vec<Value>>>> {
     // A host writes a value at each `?` of a catalog query, so a name holding one cannot be asked about.
     if table.contains('?') {
         return Some(None);
     }
     let sql = format!("SHOW FULL COLUMNS FROM `{}`", table.replace('`', "``"));
-    let Ok(rows) = host.query(&sql, Vec::new(), Scope::Statement)? else { return Some(None) };
-    // `Field`, `Type`, `Collation`, …: a collation's name opens with its character set's.
+    Some(host.query(&sql, Vec::new(), Scope::Statement)?.ok())
+}
+
+/// Whether the table a name resolves to in the session may hold a YEAR ([`session_columns`]): one
+/// of its columns is one, or its columns are not read.
+fn session_year(table: &str, host: &Host) -> Lazy<bool> {
+    Some(session_columns(table, host)?.is_none_or(|rows| rows.iter().any(|row| row.get(1).and_then(as_str).is_some_and(|ty| ty.to_ascii_lowercase().starts_with("year")))))
+}
+
+/// Each column of a table, in lower case, with its character set, empty for none
+/// ([`session_columns`]). Asked only of a table the catalog lists, which the session can show.
+/// `None` where it is not read.
+fn session_charsets(table: &str, host: &Host) -> Lazy<Option<HashMap<String, String>>> {
+    let Some(rows) = session_columns(table, host)? else { return Some(None) };
+    // A collation's name opens with its character set's.
     Some(Some(
         rows.iter()
             .filter_map(|row| {
@@ -3273,7 +3520,8 @@ fn check_documents(clause: &str) -> Vec<(String, String)> {
 /// views read in turn: a round for each level of views.
 fn catalog(host: &Host, q: &Query) -> Lazy<Keys> {
     let mut keys = Keys::default();
-    let mut names = crate::mysql_keys::tables_anywhere(q, None);
+    let (mut names, others) = crate::mysql_keys::tables_and_others(q, None);
+    keys.years |= others;
     // Each name as written: where the server keeps case, `K` and `k` are two tables, each fetched.
     let mut seen: HashSet<String> = names.iter().cloned().collect();
     while !names.is_empty() {
@@ -3290,13 +3538,16 @@ fn catalog(host: &Host, q: &Query) -> Lazy<Keys> {
         keys.answers.extend(answers);
         for row in columns {
             if let (Some(table), Some(column), Some(ty)) = (row.first().and_then(as_str), row.get(1).and_then(as_str), row.get(2).and_then(as_str)) {
+                keys.years |= ty.eq_ignore_ascii_case("year");
                 answered.entry(table.to_string()).or_default().push((column.to_ascii_lowercase(), class_of(ty)));
             }
         }
+        keys.years |= names.iter().any(|name| !answered.keys().any(|table| table.eq_ignore_ascii_case(name)));
         keys.columns.extend(answered);
         let mut next = Vec::new();
         for row in views.unwrap_or_default() {
             let (Some(name), Some(definition), Some(schema)) = (row.first().and_then(as_str), row.get(1).and_then(as_str), row.get(2).and_then(as_str)) else { continue };
+            keys.years |= definition.trim().is_empty() || definition.to_ascii_lowercase().contains("year");
             // A definition the session may not read is empty, and reads as nothing. One the parser
             // does not read keeps its text, which may still name a call.
             let Ok(mut parsed) = parse(&SessionDialect::default(), definition) else {
@@ -3305,7 +3556,9 @@ fn catalog(host: &Host, q: &Query) -> Lazy<Keys> {
             };
             let Some(Statement::Query(view)) = parsed.pop() else { continue };
             keys.schema = Some(schema.to_string());
-            for table in crate::mysql_keys::tables_anywhere(&view, Some(schema)) {
+            let (tables, others) = crate::mysql_keys::tables_and_others(&view, Some(schema));
+            keys.years |= others;
+            for table in tables {
                 if seen.insert(table.clone()) {
                     next.push(table);
                 }
@@ -4112,7 +4365,7 @@ mod tests {
                         asked = true;
                         (id, json!({ "rows": [[mode]] }))
                     }
-                    crate::api::Need::Query { id, sql, .. } if sql == VIEWS_QUERY || sql == VIEW_DEFINITIONS_QUERY => (id, json!({ "rows": [] })),
+                    crate::api::Need::Query { id, sql, .. } if sql == VIEWS_QUERY || sql == VIEW_DEFINITIONS_QUERY || sql == YEARS_QUERY => (id, json!({ "rows": [] })),
                     crate::api::Need::Query { id, sql, .. } if sql == KEY_COLUMNS_QUERY => (id, json!({ "rows": [["users", "id", "int"], ["users", "email", "varchar"], ["users", "name", "varchar"]] })),
                     crate::api::Need::Query { id, .. } => (id, json!({ "rows": [["users", "PRIMARY", "id", "int"], ["users", "email", "email", "varchar"]] })),
                 };
@@ -4650,6 +4903,7 @@ mod tests {
                 let (id, answer) = match need {
                     crate::api::Need::Describe { id, .. } => (id, json!({ "mysql": described })),
                     crate::api::Need::Query { id, sql, .. } if sql == VIEWS_QUERY => (id, json!({ "rows": [["recent"]] })),
+                    crate::api::Need::Query { id, sql, .. } if sql == KEY_COLUMNS_QUERY => (id, json!({ "rows": [["recent", "active", "tinyint"]] })),
                     crate::api::Need::Query { id, .. } => (id, json!({ "rows": [] })),
                 };
                 answers.insert(id, serde_json::from_value(answer).unwrap());
@@ -4793,6 +5047,11 @@ mod tests {
     /// Analyzes with a host that describes each statement as `describe` says, answers the mode
     /// query with the default mode and any other query with no rows.
     fn analyzed_by(sql: &str, describe: &dyn Fn(&str) -> Value) -> Analysis {
+        analyzed_with(sql, describe, &|_| None)
+    }
+
+    /// As [`analyzed_by`], with the rows `query` gives for a query where it gives any.
+    fn analyzed_with(sql: &str, describe: &dyn Fn(&str) -> Value, query: &dyn Fn(&str) -> Option<Value>) -> Analysis {
         let mut answers: HashMap<String, crate::api::Answer> = HashMap::new();
         for _ in 0..16 {
             let host = Host::new(&answers);
@@ -4803,12 +5062,97 @@ mod tests {
                 let (id, answer) = match need {
                     crate::api::Need::Describe { id, sql } => (id, json!({ "mysql": describe(&sql) })),
                     crate::api::Need::Query { id, sql, .. } if sql == SQL_MODE_QUERY => (id, json!({ "rows": [["ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION"]] })),
-                    crate::api::Need::Query { id, .. } => (id, json!({ "rows": [] })),
+                    crate::api::Need::Query { id, sql, .. } => (id, json!({ "rows": query(&sql).unwrap_or_else(|| json!([])) })),
                 };
                 answers.insert(id, serde_json::from_value(answer).unwrap());
             }
         }
         panic!("the analysis never settled")
+    }
+
+    #[test]
+    fn a_tinyint_that_merges_a_year_is_of_no_known_type() {
+        // As 8.4.13 prepares them: a YEAR's merge with a TINYINT is a TINYINT that names no
+        // schema, like a TINYINT's with a TINYINT, and a table's own column names its schema.
+        let column = |name: &str, ty: u32, schema: &str| json!({ "name": name, "type": ty, "flags": 0, "length": 4, "schema": schema, "org_table": if schema.is_empty() { "" } else { "x" }, "org_name": if schema.is_empty() { "" } else { name } });
+        let describe = |sql: &str| {
+            let columns = if let Some(list) = sql.strip_prefix("SELECT ").and_then(|rest| rest.split(" FROM ").next()).filter(|_| sql.starts_with("SELECT ")) {
+                // A probe of the values a column merges: each a table's column, or a YEAR cast.
+                list.split(", ").map(|v| match v {
+                    "y" => column("y", 13, "app"),
+                    // A view's column, which it computes.
+                    "v" => column("v", 1, ""),
+                    _ if v.to_ascii_lowercase().starts_with("cast(") || v.starts_with("year(") => column("c", 13, ""),
+                    _ => column(v, 1, "app"),
+                }).collect()
+            } else {
+                vec![column("v", 1, "")]
+            };
+            json!({ "columns": columns, "params": [] })
+        };
+        // The catalog's columns of the tables the statements read, with a YEAR column or without.
+        let columns = |year: bool| {
+            let mut rows = vec![json!(["x", "ti", "tinyint"]), json!(["x", "tu", "tinyint"]), json!(["x", "d", "date"]), json!(["vw", "v", "tinyint"])];
+            if year {
+                rows.push(json!(["x", "y", "year"]));
+            }
+            Value::Array(rows)
+        };
+        let years = |year: bool| move |sql: &str| (sql == KEY_COLUMNS_QUERY).then(|| columns(year));
+        let version = |v: &'static str| move |sql: &str| match sql {
+            _ if sql == KEY_COLUMNS_QUERY => Some(columns(true)),
+            _ if sql == crate::structured::MYSQL_SERVER_QUERY => Some(json!([[v, "utf8mb4", "utf8mb4_0900_ai_ci"]])),
+            _ => None,
+        };
+        let ty = |sql: &str, query: &dyn Fn(&str) -> Option<Value>| analyzed_with(sql, &describe, query).columns[0].ty.short();
+        let some = years(true);
+        assert_eq!(ty("select coalesce(y, ti) as v from x", &some), "unknown");
+        assert_eq!(ty("select if(id > 0, ti, y) as v from x", &some), "unknown");
+        assert_eq!(ty("select max(coalesce(ti, y)) as v from x", &some), "unknown");
+        // Two TINYINTs merge into one, which holds either.
+        assert_eq!(ty("select coalesce(ti, tu) as v from x", &some), "tinyint");
+        assert_eq!(ty("select max(ti) as v from x", &some), "tinyint");
+        // A column computed in a view, a derived table or a WITH query may be either, and a
+        // table's own column that a ROLLUP makes computed is the table's.
+        assert_eq!(ty("select v from vw", &some), "unknown");
+        assert_eq!(ty("select ti from x group by ti with rollup", &some), "tinyint");
+        // Each side of a UNION is followed to its values.
+        assert_eq!(ty("select y as v from x union all select ti from x", &some), "unknown");
+        assert_eq!(ty("select ti as v from x union all select tu from x", &some), "tinyint");
+        // Every side is prepared in one round, so a long UNION settles.
+        let long = vec!["select ti as v from x"; 40].join(" union all ");
+        assert_eq!(ty(&long, &some), "tinyint");
+        // A YEAR among the values is found whatever the session holds, where a column computed
+        // elsewhere is cut only where a YEAR may reach it; a server that merges them into a
+        // SMALLINT cuts nothing.
+        let none = years(false);
+        assert_eq!(ty("select coalesce(y, ti) as v from x", &none), "unknown");
+        assert_eq!(ty("select coalesce(year(d), ti) as v from x", &none), "unknown");
+        assert_eq!(ty("select coalesce(cast(2026 as year), ti) as v from x", &none), "unknown");
+        assert_eq!(ty("select v from vw", &none), "tinyint");
+        // A table the catalog lists no columns of, as a temporary table, may hold a YEAR.
+        assert_eq!(ty("select v from (select max(ti) as v from scratch) d", &none), "unknown");
+        // So may a table of another schema, and one the session shows a YEAR column of, as a
+        // TEMPORARY table that hides one of its name.
+        assert_eq!(ty("select v from (select max(ti) as v from other.x) d", &none), "unknown");
+        let shadowed = |sql: &str| match sql {
+            _ if sql == KEY_COLUMNS_QUERY => Some(columns(false)),
+            _ if sql.starts_with("SHOW FULL COLUMNS FROM `x`") => Some(json!([["y", "year", null], ["ti", "tinyint", null]])),
+            _ => None,
+        };
+        assert_eq!(ty("select v from (select max(ti) as v from x) d", &shadowed), "unknown");
+        assert_eq!(ty("select v from (select max(ti) as v from x) d", &none), "tinyint");
+        assert_eq!(ty("select coalesce(y, ti) as v from x", &version("9.7.2")), "tinyint");
+        assert_eq!(ty("select coalesce(y, ti) as v from x", &version("8.4.13")), "unknown");
+    }
+
+    #[test]
+    fn a_statement_names_a_year_in_its_code() {
+        let named = |sql: &str| names_year(sql, &lex::lex(sql, Dialect::Mysql).unwrap());
+        assert!(named("select cast(d as year) from t"));
+        assert!(named("select convert(d, YEAR) from t"));
+        assert!(named("select year(d) from t"));
+        assert!(!named("select 'year' as `year` from t"));
     }
 
     #[test]
