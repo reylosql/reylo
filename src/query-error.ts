@@ -365,8 +365,9 @@ function mysqlNames(errno: number, message: string) {
     case 1292: // ER_TRUNCATED_WRONG_VALUE
     case 1366: // ER_TRUNCATED_WRONG_VALUE_FOR_FIELD
     case 1406: // ER_DATA_TOO_LONG
-      // A value no column holds, as a cast's, is named `(null)`.
-      if ((m = / for column '([\s\S]*)' at row \d+$/.exec(message)) && m[1] !== "(null)") names.column = m[1];
+      // A value no column holds, as a cast's, is named `(null)`. The value itself comes first in
+      // some of these messages, and may hold the same words, so the column is the last match.
+      if ((m = /^[\s\S]* for column '([\s\S]*)' at row \d+$/.exec(message)) && m[1] !== "(null)") names.column = m[1];
       break;
   }
   return { key: names.key, constraint: names.constraint, table: names.table, column: names.column };
