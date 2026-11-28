@@ -1,11 +1,15 @@
 create table new_l (id integer primary key, v int unique);
 create table new_m (id integer primary key, lid integer references new_l (id));
+create table new_y (id integer primary key, mid integer references new_m (id), lref int);
 insert into new_l (id, v) select id, v from l;
 insert into new_m (id, lid) select id, lid from m;
+insert into new_y (id, mid, lref) select id, mid, lref from y;
+drop table y;
 drop table m;
 drop table l;
 alter table new_l rename to l;
 alter table new_m rename to m;
+alter table new_y rename to y;
 create table new_y (id integer primary key, mid int, lref int references l (id));
 insert into new_y (id, mid, lref) select id, mid, lref from y;
 drop table y;

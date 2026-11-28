@@ -1850,11 +1850,13 @@ pub fn plan_with(from: &Schema, to: &Schema, alterer: &dyn Alterer, renames_stat
                 }
                 // An alter after the changes of what stops depending on it (a column moved to
                 // another enum, before the one it leaves is made again), but for what moves to an
-                // object the change makes again.
+                // object the change makes again, and where its database needs nothing of that
+                // change first (a SQLite rebuild that makes the table again with it).
                 if matches!(op, Op::Alter(_)) {
                     for dependent in dependents.get(id.as_str()).into_iter().flatten() {
                         let leaves = from.objects[*dependent].deps.contains(id) && to.objects.get(*dependent).is_some_and(|d| !d.deps.contains(id) && !d.deps.iter().any(|x| taken_by.get(x) == Some(id)));
-                        if let Some(j) = find(Op::Alter(dependent.to_string())).filter(|_| leaves) {
+                        let needless = to.objects.get(*dependent).is_some_and(|d| alterer.runs_before(o, &from.objects[*dependent], d));
+                        if let Some(j) = find(Op::Alter(dependent.to_string())).filter(|_| leaves && !needless) {
                             after[k].insert(j);
                         }
                     }

@@ -55,9 +55,11 @@ async fn run(db: &mut Db, plan: &Plan, keys: bool) -> Option<String> {
         }
     }
     if failed.is_none() {
-        let broken = db.rows("pragma foreign_key_check").await.unwrap();
-        if !broken.is_empty() {
-            failed = Some(format!("{} rows break a foreign key after the plan", broken.len()));
+        // A foreign key that names no key of its parent fails the check itself.
+        match db.rows("pragma foreign_key_check").await {
+            Ok(broken) if !broken.is_empty() => failed = Some(format!("{} rows break a foreign key after the plan", broken.len())),
+            Ok(_) => {}
+            Err(e) => failed = Some(format!("pragma foreign_key_check: {e}")),
         }
     }
     db.exec(if failed.is_some() { "rollback" } else { "commit" }).await.unwrap();

@@ -738,22 +738,8 @@ impl Alterer for SqliteAlterer {
         let schemas = self.schemas.borrow();
         let Some((f, t)) = schemas.as_ref() else { return Vec::new() };
         // Every table whose change makes it again, read off what that change writes.
-        let tables: Vec<&String> = f.objects.values().filter(|o| o.kind == Some(Kind::Table) && o.id != from.id && t.objects.contains_key(&o.id)).map(|o| &o.id).collect();
-        let mut out: Vec<String> = tables.iter().filter(|p| self.makes_again(p, &from.id)).map(|p| (*p).clone()).collect();
-        // A table that stops referencing one this change drops stops first: but for one it makes
-        // again, one that comes to reference one of them, which waits for this change already, and
-        // one whose own change drops a table one of these stops referencing, which no order serves.
-        let made = |by: &String| -> Vec<&String> { tables.iter().copied().chain(std::iter::once(&from.id)).filter(|m| self.makes_again(by, m)).collect() };
-        let stops = |a: &str, b: &str| f.objects.get(a).zip(t.objects.get(a)).is_some_and(|(was, is)| was.deps.contains(b) && !is.deps.contains(b));
-        let mine = made(&from.id);
-        for y in tables.iter().copied().filter(|y| !mine.contains(y)) {
-            let comes = t.objects.get(y).is_some_and(|is| mine.iter().any(|m| is.deps.contains(*m)));
-            let theirs = made(y);
-            let crossed = mine.iter().any(|x| theirs.iter().any(|w| stops(x, w)));
-            if mine.iter().any(|m| stops(y, m)) && !comes && !crossed && !out.contains(y) {
-                out.push(y.clone());
-            }
-        }
+        let tables = f.objects.values().filter(|o| o.kind == Some(Kind::Table) && o.id != from.id && t.objects.contains_key(&o.id));
+        let mut out: Vec<String> = tables.filter(|p| self.makes_again(&p.id, &from.id)).map(|p| p.id.clone()).collect();
         let decided = |name: &str| self.decided.of(name);
         if rebuilt_by(f, t, &from.id, &decided).as_deref() == Some(from.id.as_str()) {
             let circling = circle(f, t, &from.id);
@@ -1074,6 +1060,17 @@ fn alter_table(from: &Object, to: &Object, decided: Renamed, schemas: Option<&(S
     for (x, y) in &family {
         for item in x.goes.iter().filter(|i| !kept(i, y) && is_key(&i.3)) {
             if !replaced.iter().any(|(_, create)| *create == item.3) {
+                replaced.push((item.4, item.3.clone()));
+            }
+        }
+        // And one the plan makes that a copied row looks up, which stands for the copy as well,
+        // where no other on those columns does.
+        let unnamed = |create: &str| {
+            let tokens = tokenize(create, Dialect::Sqlite);
+            unique_index(&tokens).map(|(name, _)| rewrite(create, &tokens, |k, _| (k == name).then(String::new)))
+        };
+        for item in y.goes.iter().filter(|i| !x.goes.iter().any(|g| g.0 == i.0) && is_key(&i.3)) {
+            if !replaced.iter().any(|(_, create)| unnamed(create) == unnamed(&item.3)) {
                 replaced.push((item.4, item.3.clone()));
             }
         }
@@ -1594,8 +1591,10 @@ fn qualifier(t: &Token) -> Option<String> {
     matches!(t.kind, TokenKind::Word | TokenKind::Quoted | TokenKind::Str).then(|| fold(&unquote(t)))
 }
 
-/// The tables of `from` that reference the table `id`, at any depth, and still do in `to`, each with
-/// itself in `to`: one the plan drops is no part of a rebuild, since the plan drops it first.
+/// The tables of `from` that reference the table `id`, at any depth, before the plan or after it,
+/// each with itself in `to`: one the plan drops is no part of a rebuild, since the plan drops it
+/// first. One that comes to reference it, or stops, is made again with it as it was, so that no
+/// row of a table the rebuild leaves references one it drops, and its own change follows.
 fn children_of<'a>(from: &'a Schema, to: &'a Schema, id: &str) -> Vec<(&'a Object, &'a Object)> {
     let table = |o: &&Object| o.kind == Some(Kind::Table) && !Info::of(o).virtual_table && to.objects.contains_key(&o.id);
     let mut family: Vec<(&Object, &Object)> = Vec::new();
@@ -1604,10 +1603,8 @@ fn children_of<'a>(from: &'a Schema, to: &'a Schema, id: &str) -> Vec<(&'a Objec
     while k < seen.len() {
         let parent = seen[k].clone();
         k += 1;
-        // One that stops referencing it changes first, the planner's order for what stops
-        // depending on a table, so it no longer references it when the rebuild runs.
-        let still = |o: &&Object| to.objects.get(&o.id).is_some_and(|t| t.deps.contains(&parent));
-        for o in from.objects.values().filter(table).filter(|o| o.deps.contains(&parent)).filter(still) {
+        let references = |o: &&Object| o.deps.contains(&parent) || to.objects.get(&o.id).is_some_and(|t| t.deps.contains(&parent));
+        for o in from.objects.values().filter(table).filter(references) {
             if !seen.contains(&o.id) {
                 seen.push(o.id.clone());
                 family.push((o, &to.objects[&o.id]));
@@ -1617,15 +1614,17 @@ fn children_of<'a>(from: &'a Schema, to: &'a Schema, id: &str) -> Vec<(&'a Objec
     family
 }
 
-/// The tables that table `id` references and that reference it back, at any depth, as the target
-/// has them, `id` among them, in the order of their ids: tables on both sides, which a rebuild takes
-/// to the target together, references they come to have included.
+/// The tables that table `id` references and that reference it back, at any depth, before the plan
+/// or after it (as `children_of` reads a rebuild's family), `id` among them, in the order of their
+/// ids: tables on both sides, whose rebuilds would each make the others again, so one rebuild takes
+/// them to the target together.
 fn circle(from: &Schema, to: &Schema, id: &str) -> Vec<String> {
     let table = |x: &str| from.objects.get(x).zip(to.objects.get(x)).is_some_and(|(a, b)| b.kind == Some(Kind::Table) && !Info::of(a).virtual_table && !Info::of(b).virtual_table);
+    let references = |o: &str, d: &str| [from, to].iter().any(|s| s.objects.get(o).is_some_and(|o| o.deps.contains(d)));
     let reach = |up: bool| -> BTreeSet<String> {
         let (mut seen, mut queue) = (BTreeSet::from([id.to_string()]), vec![id.to_string()]);
         while let Some(x) = queue.pop() {
-            let next: Vec<String> = if up { to.objects.get(&x).map(|o| o.deps.iter().cloned().collect()).unwrap_or_default() } else { to.objects.values().filter(|o| o.deps.contains(&x)).map(|o| o.id.clone()).collect() };
+            let next: Vec<String> = if up { [from, to].iter().flat_map(|s| s.objects.get(&x).into_iter().flat_map(|o| o.deps.iter().cloned())).collect() } else { from.objects.keys().filter(|o| references(o, &x)).cloned().collect() };
             for n in next.into_iter().filter(|n| table(n)) {
                 if seen.insert(n.clone()) {
                     queue.push(n);
