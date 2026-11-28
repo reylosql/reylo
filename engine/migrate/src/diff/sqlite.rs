@@ -741,15 +741,13 @@ impl Alterer for SqliteAlterer {
         let tables = f.objects.values().filter(|o| o.kind == Some(Kind::Table) && o.id != from.id && t.objects.contains_key(&o.id));
         let mut out: Vec<String> = tables.filter(|p| self.makes_again(&p.id, &from.id)).map(|p| p.id.clone()).collect();
         let decided = |name: &str| self.decided.of(name);
-        if rebuilt_by(f, t, &from.id, &decided).as_deref() == Some(from.id.as_str()) {
-            let circling = circle(f, t, &from.id);
-            for m in circling.iter().filter(|m| **m != from.id && self.makes_again(&from.id, m)) {
-                let Some(target) = t.objects.get(m) else { continue };
+        if !defers(f, t, &from.id, &decided) {
+            for (m, target) in t.objects.iter().filter(|(m, _)| **m != from.id && self.makes_again(&from.id, m)) {
                 let carried = f.objects.get(m).is_some_and(|x| m.strip_prefix("table ").and_then(|name| shape(x, target, decided(name))).is_some_and(|s| s.rebuild));
                 let text = target.create.first().map_or("", String::as_str);
-                let wanted = |d: &str| t.objects.get(d).is_some_and(|o| o.kind == Some(Kind::Table) && new_key(text, f, o));
+                let wanted = |d: &str| d != from.id.as_str() && !self.makes_again(&from.id, d) && t.objects.get(d).is_some_and(|o| o.kind == Some(Kind::Table) && new_key(text, f, o));
                 if carried {
-                    out.extend(target.deps.iter().filter(|d| !circling.contains(*d) && !out.contains(*d) && wanted(d)).cloned().collect::<Vec<_>>());
+                    out.extend(target.deps.iter().filter(|d| !out.contains(*d) && wanted(d.as_str())).cloned().collect::<Vec<_>>());
                 }
             }
         }
@@ -768,7 +766,9 @@ impl Alterer for SqliteAlterer {
         if made.is_empty() {
             return Vec::new();
         }
-        f.objects.values().filter(|o| o.kind == Some(Kind::Table) && !t.objects.contains_key(&o.id) && made.iter().any(|m| o.deps.contains(&m.id))).map(|o| o.id.clone()).collect()
+        // But for one that one of them references, whose drop waits for that one's change.
+        let doomed = |o: &&Object| o.kind == Some(Kind::Table) && !t.objects.contains_key(&o.id);
+        f.objects.values().filter(doomed).filter(|o| made.iter().any(|m| o.deps.contains(&m.id)) && !made.iter().any(|m| m.deps.contains(&o.id))).map(|o| o.id.clone()).collect()
     }
 
     /// A table's change, or a table made, needs the change of a table it references first only
@@ -947,9 +947,9 @@ fn alter_table(from: &Object, to: &Object, decided: Renamed, schemas: Option<&(S
         out.extend(s.adds.iter().map(|p| format!("alter table {table} add column {p}")));
         return Some(out);
     }
-    // Of tables that reference each other, the first by name whose change is a rebuild makes the
-    // others as the target has them, so that no rebuild makes one again as it was after its own.
-    if schemas.and_then(|(f, t)| rebuilt_by(f, t, &from.id, decided)).is_some_and(|by| by != from.id) {
+    // Another's rebuild that makes it again makes it as the target has it, so that no rebuild makes
+    // it again as it was after its own.
+    if schemas.is_some_and(|(f, t)| defers(f, t, &from.id, decided)) {
         return Some(Vec::new());
     }
 
@@ -966,11 +966,11 @@ fn alter_table(from: &Object, to: &Object, decided: Renamed, schemas: Option<&(S
             }
         }
     }
-    // Each of them as it is made again: its text, the columns its rows copy and every column it names. One it
-    // references back whose own change is a rebuild is made as the target has it, and the rest as they are.
+    // Each of them as it is made again: its text, the columns its rows copy and every column it names. One
+    // whose own change is a rebuild is made as the target has it, and the rest as they are.
     let mut carried: Vec<(String, Vec<String>, Vec<String>, Option<Shape>)> = Vec::new();
     for (x, y) in &children {
-        let own = if circling.contains(&x.id) { x.id.strip_prefix("table ").and_then(|name| shape(x, y, decided(name))).filter(|s| s.rebuild) } else { None };
+        let own = x.id.strip_prefix("table ").and_then(|name| shape(x, y, decided(name))).filter(|s| s.rebuild);
         carried.push(match own {
             Some(own) => (own.target.clone(), own.copied(), own.named(), Some(own)),
             None => {
@@ -1652,11 +1652,30 @@ fn circle(from: &Schema, to: &Schema, id: &str) -> Vec<String> {
     reach(true).intersection(&reach(false)).cloned().collect()
 }
 
-/// The table whose rebuild takes table `id` to the target, where its own change is a rebuild or one
-/// of the tables it references back rebuilds: of those (`circle`), the first whose change is one.
-fn rebuilt_by(from: &Schema, to: &Schema, id: &str, decided: Renamed) -> Option<String> {
-    let rebuilds = |t: &str| -> Option<bool> { Some(shape(from.objects.get(t)?, to.objects.get(t)?, decided(t.strip_prefix("table ")?))?.rebuild) };
-    circle(from, to, id).into_iter().find(|t| rebuilds(t) == Some(true))
+/// Whether table `id`'s change, a rebuild, is made by another's instead, which makes it again at its
+/// target with the rest: the first by name of the tables it references back (`circle`) whose change
+/// is a rebuild, where that is not `id`, or any table it references, at any depth, outside them
+/// whose change is one. Its own change then writes nothing, and no rebuild makes it again as it was.
+fn defers(from: &Schema, to: &Schema, id: &str, decided: Renamed) -> bool {
+    let rebuilds = |t: &str| -> bool { from.objects.get(t).zip(to.objects.get(t)).zip(t.strip_prefix("table ")).and_then(|((a, b), name)| shape(a, b, decided(name))).is_some_and(|s| s.rebuild) };
+    if !rebuilds(id) {
+        return false;
+    }
+    let circling = circle(from, to, id);
+    if circling.iter().find(|t| rebuilds(t)).is_some_and(|by| by != id) {
+        return true;
+    }
+    // The tables it references, at any depth, before the plan or after it, as `children_of` walks.
+    let table = |x: &str| from.objects.get(x).zip(to.objects.get(x)).is_some_and(|(a, b)| b.kind == Some(Kind::Table) && !Info::of(a).virtual_table && !Info::of(b).virtual_table);
+    let (mut seen, mut queue) = (BTreeSet::from([id.to_string()]), vec![id.to_string()]);
+    while let Some(x) = queue.pop() {
+        for d in [from, to].iter().flat_map(|s| s.objects.get(&x).into_iter().flat_map(|o| o.deps.iter())) {
+            if table(d) && seen.insert(d.clone()) {
+                queue.push(d.clone());
+            }
+        }
+    }
+    seen.iter().any(|r| !circling.contains(r) && rebuilds(r))
 }
 
 /// What copies a table's rows into its rebuild, named `scratch`: the columns `copied` names, its
