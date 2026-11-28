@@ -1957,7 +1957,9 @@ fn leftover_filter(statement: &str) -> Option<String> {
                 if WHERE.is_match(rest) {
                     return None;
                 }
-                Some(format!(r"{on} and c.relname ~ '_idx[0-9]*$' and (starts_with(c.relname, (select t.relname from pg_class t where t.oid = i.indrelid) || '_') or octet_length(c.relname) >= 56) and i.indisunique = {unique} and i.indpred is null and i.indnkeyatts = {} and i.indexprs is null and string_to_array(i.indkey::text, ' ')::int2[] = array[{}]::int2[]", keys.len(), picked.join(", ")))
+                static NULLS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)(?:^|[ \t\n\r\x0B\x0C)])nulls[ \t\n\r\x0B\x0C]+not[ \t\n\r\x0B\x0C]+distinct(?:[ \t\n\r\x0B\x0C]|$)").expect("a valid pattern"));
+                let distinct = NULLS.is_match(rest);
+                Some(format!(r"{on} and c.relname ~ '_idx[0-9]*$' and (starts_with(c.relname, (select t.relname from pg_class t where t.oid = i.indrelid) || '_') or octet_length(c.relname) >= 56) and i.indisunique = {unique} and coalesce((to_jsonb(i) ->> 'indnullsnotdistinct')::boolean, false) = {distinct} and i.indpred is null and i.indnkeyatts = {} and i.indexprs is null and string_to_array(i.indkey::text, ' ')::int2[] = array[{}]::int2[]", keys.len(), picked.join(", ")))
             }
         };
     }
@@ -1990,7 +1992,7 @@ fn leftover_filter(statement: &str) -> Option<String> {
     // name to fit 63 bytes.
     let base = r"regexp_replace(c.relname, '_cc(new|old)[0-9]*$', '')";
     Some(format!(
-        r"c.relname ~ '_cc(new|old)[0-9]*$' and exists (select 1 from pg_index o join pg_class oc on oc.oid = o.indexrelid where o.indrelid = i.indrelid and oc.oid <> c.oid and {originals} and {base} <> '' and (oc.relname = {base} or (starts_with(oc.relname, {base}) and octet_length(c.relname) >= 60)) and o.indkey = i.indkey and o.indclass = i.indclass and o.indcollation = i.indcollation and o.indoption = i.indoption and o.indisunique = i.indisunique and o.indnkeyatts = i.indnkeyatts and coalesce(pg_get_expr(o.indexprs, o.indrelid), '') = coalesce(pg_get_expr(i.indexprs, i.indrelid), '') and coalesce(pg_get_expr(o.indpred, o.indrelid), '') = coalesce(pg_get_expr(i.indpred, i.indrelid), ''))"
+        r"c.relname ~ '_cc(new|old)[0-9]*$' and exists (select 1 from pg_index o join pg_class oc on oc.oid = o.indexrelid where o.indrelid = i.indrelid and oc.oid <> c.oid and {originals} and {base} <> '' and (oc.relname = {base} or (starts_with(oc.relname, {base}) and octet_length(c.relname) >= 60)) and o.indkey = i.indkey and o.indclass = i.indclass and o.indcollation = i.indcollation and o.indoption = i.indoption and o.indisunique = i.indisunique and coalesce((to_jsonb(o) ->> 'indnullsnotdistinct')::boolean, false) = coalesce((to_jsonb(i) ->> 'indnullsnotdistinct')::boolean, false) and oc.relam = c.relam and o.indnkeyatts = i.indnkeyatts and coalesce(pg_get_expr(o.indexprs, o.indrelid), '') = coalesce(pg_get_expr(i.indexprs, i.indrelid), '') and coalesce(pg_get_expr(o.indpred, o.indrelid), '') = coalesce(pg_get_expr(i.indpred, i.indrelid), ''))"
     ))
 }
 
@@ -12165,6 +12167,7 @@ mod tests {
         assert_eq!(super::leftover_filter("create index concurrently on t (U&\"col\")"), None);
         assert_eq!(super::leftover_filter("create index concurrently on t (a) where a > 0"), None);
         assert!(f("create index concurrently on t (a, b) include (c)").contains("i.indnkeyatts = 2"));
+        assert!(f("create unique index concurrently on t (a) nulls not distinct").contains("'indnullsnotdistinct')::boolean, false) = true"));
         // The table as `only (t)` and `t*` write it.
         assert!(f("create index concurrently i on only (orders) (x)").starts_with("i.indrelid = to_regclass('orders') and"));
         assert!(f("create index concurrently i on orders* (x)").starts_with("i.indrelid = to_regclass('orders') and"));
