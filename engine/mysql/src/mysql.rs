@@ -461,7 +461,18 @@ pub fn analyze(sql: &str, lexed: &Lexed, text: Option<MysqlText>, host: &Host, m
     // one, or one among what it reads ([`Keys::years`]), where the engine reads it; asked beside
     // the copy's probes, and awaited after them.
     let reads_year = match &parsed {
-        Some(Statement::Query(q)) => catalog(host, q).map(|keys| keys.years),
+        Some(Statement::Query(q)) => match catalog(host, q) {
+            // A name the statement reads resolves in the session, to a TEMPORARY table that may
+            // hide one the catalog lists: asked of the session too, where a TINYINT or a document
+            // may hold a merged YEAR. A name the catalog does not list already counts, and MySQL
+            // refuses to show one it does not hold only as it runs, which would stop the analysis.
+            Some(keys) if !keys.years && raw.columns.iter().any(|c| matches!(c.r#type, 1 | 245)) => {
+                let listed = crate::mysql_keys::tables_anywhere(q, None).into_iter().filter(|t| keys.columns.keys().any(|k| k.eq_ignore_ascii_case(t)));
+                let shown: Vec<Lazy<bool>> = listed.map(|table| session_year(&table, host)).collect();
+                shown.into_iter().collect::<Option<Vec<bool>>>().map(|shown| shown.contains(&true))
+            }
+            keys => keys.map(|keys| keys.years),
+        },
         _ => Some(true),
     };
     YEAR_REACHED.with(|cell| cell.set(merges && (years || names_year(sql, lexed) || reads_year.unwrap_or(true))));
@@ -3073,8 +3084,8 @@ pub(crate) struct Keys {
     /// The names the catalog's rows of each name asked came back under ([`Keys::name`]).
     answers: crate::mysql_names::Answers,
     /// Whether a YEAR may be among what the query reads ([`cut_years`]): a table's or a view's
-    /// YEAR column, a view whose definition names the word or is empty to the account, or a name
-    /// the catalog lists no columns of, as a temporary table or another schema's.
+    /// YEAR column, a view whose definition names the word or is empty to the account, a name the
+    /// catalog lists no columns of, as a temporary table, or a table of another schema.
     pub(crate) years: bool,
 }
 
@@ -3289,18 +3300,31 @@ fn unconverted(statement: Option<&Statement>, raw: &MysqlDescribe, views: &HashS
     )
 }
 
-/// Each column of a table, in lower case, with its character set, empty for none, as the session's
-/// own `SHOW FULL COLUMNS` has it, which reads the table the name resolves to: `information_schema`
-/// lists none of a TEMPORARY table's columns, and lists those of a table one of the same name hides.
-/// Asked only of a table the catalog lists, which the session can show. `None` where it is not read.
-fn session_charsets(table: &str, host: &Host) -> Lazy<Option<HashMap<String, String>>> {
+/// A table's columns as the session's own `SHOW FULL COLUMNS` has them (`Field`, `Type`,
+/// `Collation`, …), which reads the table the name resolves to: `information_schema` lists none of
+/// a TEMPORARY table's columns, and lists those of a table one of the same name hides. `None` where
+/// they are not read.
+fn session_columns(table: &str, host: &Host) -> Lazy<Option<Vec<Vec<Value>>>> {
     // A host writes a value at each `?` of a catalog query, so a name holding one cannot be asked about.
     if table.contains('?') {
         return Some(None);
     }
     let sql = format!("SHOW FULL COLUMNS FROM `{}`", table.replace('`', "``"));
-    let Ok(rows) = host.query(&sql, Vec::new(), Scope::Statement)? else { return Some(None) };
-    // `Field`, `Type`, `Collation`, …: a collation's name opens with its character set's.
+    Some(host.query(&sql, Vec::new(), Scope::Statement)?.ok())
+}
+
+/// Whether the table a name resolves to in the session may hold a YEAR ([`session_columns`]): one
+/// of its columns is one, or its columns are not read.
+fn session_year(table: &str, host: &Host) -> Lazy<bool> {
+    Some(session_columns(table, host)?.is_none_or(|rows| rows.iter().any(|row| row.get(1).and_then(as_str).is_some_and(|ty| ty.to_ascii_lowercase().starts_with("year")))))
+}
+
+/// Each column of a table, in lower case, with its character set, empty for none
+/// ([`session_columns`]). Asked only of a table the catalog lists, which the session can show.
+/// `None` where it is not read.
+fn session_charsets(table: &str, host: &Host) -> Lazy<Option<HashMap<String, String>>> {
+    let Some(rows) = session_columns(table, host)? else { return Some(None) };
+    // A collation's name opens with its character set's.
     Some(Some(
         rows.iter()
             .filter_map(|row| {
@@ -3496,7 +3520,8 @@ fn check_documents(clause: &str) -> Vec<(String, String)> {
 /// views read in turn: a round for each level of views.
 fn catalog(host: &Host, q: &Query) -> Lazy<Keys> {
     let mut keys = Keys::default();
-    let mut names = crate::mysql_keys::tables_anywhere(q, None);
+    let (mut names, others) = crate::mysql_keys::tables_and_others(q, None);
+    keys.years |= others;
     // Each name as written: where the server keeps case, `K` and `k` are two tables, each fetched.
     let mut seen: HashSet<String> = names.iter().cloned().collect();
     while !names.is_empty() {
@@ -3531,7 +3556,9 @@ fn catalog(host: &Host, q: &Query) -> Lazy<Keys> {
             };
             let Some(Statement::Query(view)) = parsed.pop() else { continue };
             keys.schema = Some(schema.to_string());
-            for table in crate::mysql_keys::tables_anywhere(&view, Some(schema)) {
+            let (tables, others) = crate::mysql_keys::tables_and_others(&view, Some(schema));
+            keys.years |= others;
+            for table in tables {
                 if seen.insert(table.clone()) {
                     next.push(table);
                 }
@@ -5105,6 +5132,16 @@ mod tests {
         assert_eq!(ty("select v from vw", &none), "tinyint");
         // A table the catalog lists no columns of, as a temporary table, may hold a YEAR.
         assert_eq!(ty("select v from (select max(ti) as v from scratch) d", &none), "unknown");
+        // So may a table of another schema, and one the session shows a YEAR column of, as a
+        // TEMPORARY table that hides one of its name.
+        assert_eq!(ty("select v from (select max(ti) as v from other.x) d", &none), "unknown");
+        let shadowed = |sql: &str| match sql {
+            _ if sql == KEY_COLUMNS_QUERY => Some(columns(false)),
+            _ if sql.starts_with("SHOW FULL COLUMNS FROM `x`") => Some(json!([["y", "year", null], ["ti", "tinyint", null]])),
+            _ => None,
+        };
+        assert_eq!(ty("select v from (select max(ti) as v from x) d", &shadowed), "unknown");
+        assert_eq!(ty("select v from (select max(ti) as v from x) d", &none), "tinyint");
         assert_eq!(ty("select coalesce(y, ti) as v from x", &version("9.7.2")), "tinyint");
         assert_eq!(ty("select coalesce(y, ti) as v from x", &version("8.4.13")), "unknown");
     }

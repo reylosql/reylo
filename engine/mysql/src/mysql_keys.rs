@@ -1327,7 +1327,17 @@ fn grouped_by<'a>(s: &'a Select, g: &'a Expr) -> Option<&'a Expr> {
 /// Every table a query reads anywhere in its FROM trees, as written: every name but one that each
 /// server reads as a WITH query ([`crate::mysql_names::with_query`]).
 pub(crate) fn tables_anywhere(q: &Query, schema: Option<&str>) -> Vec<String> {
-    fn query(q: &Query, ctes: &mut Vec<String>, schema: Option<&str>, out: &mut Vec<String>) {
+    tables_and_others(q, schema).0
+}
+
+/// [`tables_anywhere`], and whether the query also reads a table it leaves out, one named with a
+/// schema other than `schema`, or with any where there is none.
+pub(crate) fn tables_and_others(q: &Query, schema: Option<&str>) -> (Vec<String>, bool) {
+    struct Out {
+        tables: Vec<String>,
+        others: bool,
+    }
+    fn query(q: &Query, ctes: &mut Vec<String>, schema: Option<&str>, out: &mut Out) {
         let depth = ctes.len();
         if let Some(w) = &q.with {
             for c in &w.cte_tables {
@@ -1345,7 +1355,7 @@ pub(crate) fn tables_anywhere(q: &Query, schema: Option<&str>) -> Vec<String> {
         body(&q.body, ctes, schema, out);
         ctes.truncate(depth);
     }
-    fn body(b: &SetExpr, ctes: &mut Vec<String>, schema: Option<&str>, out: &mut Vec<String>) {
+    fn body(b: &SetExpr, ctes: &mut Vec<String>, schema: Option<&str>, out: &mut Out) {
         match b {
             SetExpr::Select(s) => {
                 for twj in &s.from {
@@ -1375,13 +1385,14 @@ pub(crate) fn tables_anywhere(q: &Query, schema: Option<&str>) -> Vec<String> {
             _ => {}
         }
     }
-    fn factor(f: &TableFactor, ctes: &mut Vec<String>, schema: Option<&str>, out: &mut Vec<String>) {
+    fn factor(f: &TableFactor, ctes: &mut Vec<String>, schema: Option<&str>, out: &mut Out) {
         match f {
             TableFactor::Table { name, args: None, .. } => match name.0.as_slice() {
-                [ObjectNamePart::Identifier(t)] if !matches!(crate::mysql_names::with_query(ctes.iter().map(String::as_str), &t.value), Reads::With(_)) => out.push(t.value.clone()),
+                [ObjectNamePart::Identifier(t)] if !matches!(crate::mysql_names::with_query(ctes.iter().map(String::as_str), &t.value), Reads::With(_)) => out.tables.push(t.value.clone()),
+                [ObjectNamePart::Identifier(_)] => {}
                 // The view's own schema as it is spelled ([`From::factor`]).
-                [ObjectNamePart::Identifier(s), ObjectNamePart::Identifier(t)] if schema == Some(s.value.as_str()) => out.push(t.value.clone()),
-                _ => {}
+                [ObjectNamePart::Identifier(s), ObjectNamePart::Identifier(t)] if schema == Some(s.value.as_str()) => out.tables.push(t.value.clone()),
+                _ => out.others = true,
             },
             TableFactor::Derived { subquery, .. } => query(subquery, ctes, schema, out),
             TableFactor::NestedJoin { table_with_joins, .. } => {
@@ -1393,9 +1404,9 @@ pub(crate) fn tables_anywhere(q: &Query, schema: Option<&str>) -> Vec<String> {
             _ => {}
         }
     }
-    let mut out = Vec::new();
+    let mut out = Out { tables: Vec::new(), others: false };
     query(q, &mut Vec::new(), schema, &mut out);
-    out.sort();
-    out.dedup();
-    out
+    out.tables.sort();
+    out.tables.dedup();
+    (out.tables, out.others)
 }
