@@ -806,7 +806,7 @@ where role = coalesce(:role::nullable(user_role), role)
 
 **Written to a nullable column**
 
-Written directly into a column that accepts `NULL`, with no cast. A column accepts it unless it's `NOT NULL`, its domain is `not null`, or a `check (… is not null)` covers it.
+Written directly into a column that accepts `NULL`, with no cast. A column accepts it unless it's `NOT NULL`, its domain is `not null`, or a check is false wherever it's `NULL`, as `check (… is not null)` is. It also refuses `NULL` when a `NOT NULL` generated column is `NULL` wherever it is, as `… + 1` is.
 
 <InferenceCard>
 

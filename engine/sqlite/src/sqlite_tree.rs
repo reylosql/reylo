@@ -22,7 +22,7 @@ static LOCK: Mutex<()> = Mutex::new(());
 /// The version of the tree's format, which the walker writes as the tree's first member
 /// (`REYLO_TREE_VERSION` in `csrc/reylo_sqlite.c`): a tree of another is refused, by both numbers,
 /// before anything in it is read. A change to what either side reads or writes moves both.
-pub const TREE_VERSION: u32 = 3;
+pub const TREE_VERSION: u32 = 4;
 
 #[derive(Debug, Deserialize)]
 #[serde(remote = "Self", rename_all = "camelCase", deny_unknown_fields)]
@@ -118,6 +118,8 @@ pub struct TableInfo {
     /// The PRIMARY KEY or a UNIQUE of the table is declared ON CONFLICT REPLACE: a write that
     /// breaks it, with no OR clause of its own, deletes the row it conflicts with.
     pub replaces: bool,
+    /// The table's CHECKs.
+    pub checks: Vec<Node>,
     pub columns: Vec<ColumnInfo>,
     pub unique_keys: Vec<Vec<String>>,
 }
@@ -129,10 +131,10 @@ pub struct ColumnInfo {
     pub declared: String,
     pub affinity: String,
     pub not_null: bool,
-    /// A CHECK of the table tests the column IS NOT NULL among its conjuncts: a write of NULL fails.
-    pub checked_not_null: bool,
     /// A generated column, which no INSERT writes.
     pub generated: bool,
+    /// A generated column's expression; null for any other column.
+    pub expression: Option<Node>,
     /// The column declares a DEFAULT other than the bare `NULL`, which an INSERT that leaves it out
     /// writes.
     pub has_default: bool,
@@ -357,6 +359,9 @@ pub struct Node {
     /// A window call with a FILTER.
     #[serde(default)]
     pub filter: bool,
+    /// A `truth` node's: `x IS NOT TRUE` or `x IS NOT FALSE`, the test of `x` against its `right`.
+    #[serde(default)]
+    pub is_not: bool,
     // The operands: `left` a cast's, an IN's, a BETWEEN's, a CASE's, a row value's and a
     // select_column's, null where it has none; `list` an IN's (or `select`), a BETWEEN's, a CASE's
     // and a row value's; `select` a subquery's. Any other operator writes the operands it has.
@@ -454,6 +459,7 @@ impl Members for Node {
             "between" | "case" | "vector" => members.extend(["left", "list"]),
             "select" | "exists" => members.push("select"),
             "select_column" => members.extend(["index", "left"]),
+            "truth" => members.extend(["isNot", "left", "right"]),
             _ => {}
         }
         members

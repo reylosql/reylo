@@ -737,7 +737,7 @@ impl Trust {
         self.overloads.as_ref().map(|o| Check { kind, name: name.to_string(), args, overloads: Some(o.clone()) })
     }
 
-    fn cast(&self, name: &str) -> bool {
+    pub(crate) fn cast(&self, name: &str) -> bool {
         self.cast_targets.as_ref().is_none_or(|t| t.contains(name))
     }
 }
