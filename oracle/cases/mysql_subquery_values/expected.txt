@@ -7,11 +7,13 @@ distinct_random_where.sql: many () -> { id: bigint }
 distinct_random_with.sql: many () -> { id: bigint }
 distinct_random_with_escaped.sql: many () -> { id: bigint }
 distinct_random_with_shadowed.sql: many () -> { id: bigint }
+distinct_stored_function_exists.sql: at_most_one () -> { v: bigint | int? }
 distinct_stored_function_folded.sql: many () -> { v: int | bigint? }
 distinct_stored_function_in.sql: many () -> { v: bigint | int? }
 distinct_stored_function_limit.sql: at_most_one () -> { v: int | bigint? }
 distinct_stored_function_nested.sql: many () -> { v: bigint? }
 distinct_stored_function_parenthesized.sql: many () -> { v: int | bigint? }
+distinct_stored_function_wrapped_with.sql: many () -> { v: int | bigint? }
 dual.sql: one (n: varchar) -> { n: varchar? }
 dual_where.sql: at_most_one (n: varchar, ok: int32) -> { n: varchar? }
 group_random.sql: many () -> { id: bigint, n: bigint }

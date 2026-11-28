@@ -773,7 +773,9 @@ fn calls_unvouched(e: &Expr) -> bool {
         Expr::Tuple(items) => items.iter().any(calls_unvouched),
         // The server folds a subquery of no table into the query around it (`(select pick())` is
         // `pick()`, `pick() in (select 1)` is `pick() = 1`), and then merges as if it were not there.
-        Expr::Subquery(q) | Expr::Exists { subquery: q, .. } => lists_unvouched(q),
+        Expr::Subquery(q) => lists_unvouched(q),
+        // EXISTS reads no value of its subquery's select list, only whether a row passes.
+        Expr::Exists { subquery, .. } => plain(subquery).is_some_and(|s| s.selection.iter().chain(s.having.iter()).any(calls_unvouched)),
         Expr::InSubquery { expr, subquery, .. } => calls_unvouched(expr) || lists_unvouched(subquery),
         Expr::MatchAgainst { .. } => false,
         _ => true,
@@ -802,6 +804,9 @@ fn materialized(q: &Query) -> bool {
 /// Whether a query, or a derived table or WITH query inside it, lists a value [`calls_unvouched`]
 /// makes: the server may merge each level into the one around it.
 fn lists_unvouched(q: &Query) -> bool {
+    if q.with.iter().flat_map(|w| &w.cte_tables).any(|c| lists_unvouched(&c.query)) {
+        return true;
+    }
     if let SetExpr::Query(inner) = q.body.as_ref() {
         return lists_unvouched(inner);
     }
@@ -812,8 +817,7 @@ fn lists_unvouched(q: &Query) -> bool {
             _ => false,
         }
     }
-    q.with.iter().flat_map(|w| &w.cte_tables).any(|c| lists_unvouched(&c.query))
-        || plain(q).is_some_and(|s| {
+    plain(q).is_some_and(|s| {
             s.projection.iter().any(|item| matches!(item, SelectItem::UnnamedExpr(e) | SelectItem::ExprWithAlias { expr: e, .. } if calls_unvouched(e)))
                 || s.from.iter().any(|twj| factor(&twj.relation) || twj.joins.iter().any(|j| factor(&j.relation)))
         })
