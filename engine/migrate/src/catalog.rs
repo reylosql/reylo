@@ -58,6 +58,8 @@ pub const OTHER_HISTORY_TABLES: &[&str] = &[
     "__EFMigrationsHistory",
     // Atlas, on Postgres in a schema of its own of the same name.
     "atlas_schema_revisions",
+    // Wrangler, on Cloudflare D1.
+    "d1_migrations",
 ];
 
 /// Every history table's name in lowercase as a SQL list: Reylo's own and other tools'.
@@ -114,6 +116,22 @@ pub const NOT_LIBSQL_VECTOR_OWN: &str = "name not in (\
 select v.name || '_shadow' from sqlite_schema v where v.type = 'index' and v.sql like '%libsql_vector_idx%' \
 union all select v.name || '_shadow_idx' from sqlite_schema v where v.type = 'index' and v.sql like '%libsql_vector_idx%' \
 union all select m.name from sqlite_schema m where m.name = 'libsql_vector_meta_shadow' and m.sql = 'CREATE TABLE libsql_vector_meta_shadow ( name TEXT PRIMARY KEY, metadata BLOB ) WITHOUT ROWID')";
+
+/// A condition on a `sqlite_schema` or `pragma_table_list` row, whose own name is in `name` and its
+/// table's in `tbl`, that holds for every object of the project's and for none that SQLite, a
+/// platform or another tool keeps for itself: SQLite's own (`sqlite_` and anything after it, in any
+/// case, which SQLite refuses to make), Cloudflare's (`_cf_`, which D1 and a Durable Object keep in
+/// every database, and refuse to make), Turso's engine's, a libSQL vector index's, and a history
+/// table and what comes with it. Every catalog, diff, dump and wipe of a SQLite database reads its
+/// objects through this one condition, so that none of them reads one the others leave out. In a
+/// pattern `_` stands for any character, so each prefix is matched with it escaped: a table of the
+/// project's named `sqlites` is its own.
+pub(crate) fn sqlite_project(tbl: &str) -> String {
+    format!(
+        r"name not like 'sqlite\_%' escape '\' and {tbl} not like 'sqlite\_%' escape '\' and name not like '\_cf\_%' escape '\' and {tbl} not like '\_cf\_%' escape '\' and name {NOT_TURSO_OWN} and {tbl} {NOT_TURSO_OWN} and {} and {NOT_LIBSQL_VECTOR_OWN}",
+        not_history(tbl)
+    )
+}
 
 /// What follows a column of names to hold for every name but those Turso's engine keeps for itself:
 /// `__turso_internal_` and anything after it, in any case, the prefix the engine reserves beside
@@ -2189,7 +2207,7 @@ const SQLITE_TABLE_CONSTRAINT: &[&str] = &["constraint", "primary", "unique", "c
 
 async fn sqlite(db: &mut Db) -> Result<Vec<String>, Error> {
     let mut lines = Vec::new();
-    let rows = db.rows(&format!("select type, name, tbl_name as tbl, sql from sqlite_schema where name not like 'sqlite_%' and {} and name {NOT_TURSO_OWN} and tbl_name {NOT_TURSO_OWN} and {NOT_LIBSQL_VECTOR_OWN}", not_history("tbl_name"))).await?;
+    let rows = db.rows(&format!("select type, name, tbl_name as tbl, sql from sqlite_schema where {}", sqlite_project("tbl_name"))).await?;
     let options: BTreeMap<String, Row> = db.rows("select name, strict, wr from pragma_table_list where schema = 'main'").await?.into_iter().map(|r| (r.text("name").to_string(), r)).collect();
     for r in rows {
         let Some(sql) = r.get("sql") else { continue };

@@ -1345,7 +1345,8 @@ async fn init_writes_and_records_the_baseline(mut p: P) {
 
 /// Another migration tool's history: a table of Prisma Migrate's with a check, one of Knex's whose
 /// key is a counter (a sequence the table owns on Postgres), Liquibase's lock in its capitals, and
-/// on Postgres Drizzle Kit's, in a schema of its own, and on MySQL a trigger on Prisma's.
+/// on Postgres Drizzle Kit's, in a schema of its own, on MySQL a trigger on Prisma's, and on SQLite
+/// Wrangler's, as `wrangler d1 migrations apply` makes it on D1.
 fn other_tools_history(p: &P) -> String {
     let text = p.t.text;
     let knex_id = match p.d {
@@ -1361,7 +1362,7 @@ fn other_tools_history(p: &P) -> String {
     match p.d {
         Dialect::Postgres => sql.push_str("create schema drizzle; create table drizzle.__drizzle_migrations (id serial primary key, hash text not null); insert into drizzle.__drizzle_migrations (hash) values ('h'); select setval('knex_migrations_id_seq', 100);"),
         Dialect::Mysql => sql.push_str("create trigger prisma_named before insert on _prisma_migrations for each row set new.migration_name = trim(new.migration_name);"),
-        Dialect::Sqlite => {}
+        Dialect::Sqlite => sql.push_str("CREATE TABLE d1_migrations(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL); insert into d1_migrations (name) values ('0001_users.sql');"),
     }
     sql
 }
@@ -1380,7 +1381,7 @@ async fn the_dump_leaves_out_another_tools_history() {
     p.exec(&format!("create table users (id bigint primary key, email text not null);{}", other_tools_history(&p))).await;
     let text = introspect(&p.opts()).await;
     assert!(text.contains("CREATE TABLE public.users"), "{text}");
-    assert!(!has(&text, "(?i)prisma|knex|drizzle|databasechangelog"), "{text}");
+    assert!(!has(&text, "(?i)prisma|knex|drizzle|databasechangelog|d1_migrations"), "{text}");
 }
 
 async fn leaves_out_another_tools_history(mut p: P, app: &str) {
@@ -1389,9 +1390,9 @@ async fn leaves_out_another_tools_history(mut p: P, app: &str) {
     p.output();
     let schema = std::fs::read_to_string(p.dir.join("schema.sql")).unwrap();
     assert!(has(&schema, "(?i)create table .*users"), "{schema}");
-    assert!(!has(&schema, "(?i)prisma|knex|drizzle|databasechangelog"), "{schema}");
+    assert!(!has(&schema, "(?i)prisma|knex|drizzle|databasechangelog|d1_migrations"), "{schema}");
     assert_eq!(std::fs::read_to_string(p.dir.join("migrations/init.sql")).unwrap(), schema);
-    assert!(!has(&introspect(&p.opts()).await, "(?i)prisma|knex|drizzle|databasechangelog"));
+    assert!(!has(&introspect(&p.opts()).await, "(?i)prisma|knex|drizzle|databasechangelog|d1_migrations"));
     assert_eq!(p.dry_run().await, 0, "{}", p.peek());
     // Another database that still holds the old tool's history matches init.sql, and keeps it.
     let q = P::new(p.d).await.unwrap();
@@ -1404,6 +1405,9 @@ async fn leaves_out_another_tools_history(mut p: P, app: &str) {
     assert_eq!(p.run(async |o, log| reylo_migrate::db_wipe(o, false, log).await).await, 0, "{}", p.peek());
     assert_eq!(q.rows("select * from _prisma_migrations").await.len(), 1);
     assert_eq!(q.rows("select * from DATABASECHANGELOGLOCK").await.len(), 1);
+    if p.d == Dialect::Sqlite {
+        assert_eq!(q.rows("select * from d1_migrations").await.len(), 1);
+    }
     q.exec("insert into knex_migrations (name) values ('two.js')").await;
     assert_eq!(q.rows("select id from knex_migrations where name = 'two.js'").await[0].text("id"), "101");
     // A migration that drops it later is no change to the schema, and replays on a database that
@@ -9918,6 +9922,41 @@ create trigger kids_note after insert on kids begin update parents set name = na
         }
         assert_eq!(p.dev().await, 0, "{}", p.peek());
     }
+}
+
+/// What Cloudflare keeps in every D1 database and Durable Object, its `_cf_` tables, which both
+/// refuse to make, is not the project's: init leaves it out, a comparison never sees it, and a wipe
+/// leaves its rows. A table of the project's whose name only starts like SQLite's own is the
+/// project's.
+#[tokio::test(flavor = "current_thread")]
+async fn init_leaves_out_cloudflares_own_tables() {
+    let Some(mut p) = P::new(Dialect::Sqlite).await else { return };
+    let cloudflare = "CREATE TABLE _cf_METADATA (key INTEGER PRIMARY KEY, value BLOB); insert into _cf_METADATA values (1, x'00');
+        CREATE TABLE _cf_KV (key TEXT PRIMARY KEY, value BLOB) WITHOUT ROWID; create index _cf_kv_value on _cf_KV (value);";
+    let app = "create table users (id integer primary key, name text not null); create table sqlites (id integer primary key autoincrement, users_id integer references users (id));
+        create index sqliteidx on sqlites (users_id); insert into users values (1, 'a'); insert into sqlites (users_id) values (1);";
+    p.exec(&format!("{cloudflare}{app}")).await;
+    assert_eq!(p.run(async |o, log| reylo_migrate::init(o, &[], log).await).await, 0, "{}", p.peek());
+    p.output();
+    let schema = std::fs::read_to_string(p.dir.join("schema.sql")).unwrap();
+    assert!(has(&schema, r"(?i)create table users\b") && has(&schema, r"(?i)create table sqlites\b") && has(&schema, r"(?i)create index sqliteidx\b"), "{schema}");
+    assert!(!has(&schema, "(?i)_cf_"), "{schema}");
+    assert_eq!(std::fs::read_to_string(p.dir.join("migrations/init.sql")).unwrap(), schema);
+    assert!(!has(&introspect(&p.opts()).await, "(?i)_cf_"));
+    assert_eq!(p.dry_run().await, 0, "{}", p.peek());
+    // Another database that holds Cloudflare's tables, as every D1 database does, matches init.sql.
+    let q = P::new(p.d).await.unwrap();
+    q.exec(&format!("{cloudflare}{app}")).await;
+    let url = std::mem::replace(&mut p.url, q.url.clone());
+    assert_eq!(p.history_push().await, 0, "{}", p.peek());
+    assert_eq!(q.history().await, ["init.sql"]);
+    assert_eq!(p.dry_run().await, 0, "{}", p.peek());
+    // A wipe empties the project's tables alone.
+    p.url = url;
+    assert_eq!(p.run(async |o, log| reylo_migrate::db_wipe(o, false, log).await).await, 0, "{}", p.peek());
+    assert_eq!(p.rows("select * from _cf_METADATA").await.len(), 1);
+    assert_eq!(p.rows("select * from sqlites").await.len(), 0);
+    assert_eq!(p.rows("select * from users").await.len(), 0);
 }
 
 // reylo run on a SQLite file that isn't there refuses, as the migrations' commands do, rather than

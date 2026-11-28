@@ -64,7 +64,7 @@ async fn run(db: &mut Db, plan: &Plan) -> Option<String> {
 }
 
 async fn counts(db: &mut Db) -> Vec<(String, String)> {
-    let tables = db.rows("select name from pragma_table_list where schema = 'main' and type in ('table', 'virtual') and name not like 'sqlite_%' order by name").await.unwrap();
+    let tables = db.rows("select name from pragma_table_list where schema = 'main' and type in ('table', 'virtual') and name not like 'sqlite\\_%' escape '\\' order by name").await.unwrap();
     let mut out = Vec::new();
     for t in tables {
         let name = t.text("name").to_string();
@@ -80,7 +80,7 @@ async fn counts(db: &mut Db) -> Vec<(String, String)> {
 
 /// Each table's rows, as text, column by column, sorted: `(table, column names, rows)`.
 async fn values(db: &mut Db) -> Vec<(String, Vec<String>, Vec<Vec<String>>)> {
-    let tables = db.rows("select name from pragma_table_list where schema = 'main' and type = 'table' and name not like 'sqlite_%' order by name").await.unwrap();
+    let tables = db.rows("select name from pragma_table_list where schema = 'main' and type = 'table' and name not like 'sqlite\\_%' escape '\\' order by name").await.unwrap();
     let mut out = Vec::new();
     for t in tables {
         let name = t.text("name").to_string();
@@ -133,7 +133,7 @@ async fn counters(db: &mut Db) -> Vec<(String, i64)> {
 
 /// Deletes every table's rows.
 async fn empty(db: &mut Db) {
-    let tables = db.rows("select name from pragma_table_list where schema = 'main' and type = 'table' and name not like 'sqlite_%'").await.unwrap();
+    let tables = db.rows("select name from pragma_table_list where schema = 'main' and type = 'table' and name not like 'sqlite\\_%' escape '\\'").await.unwrap();
     db.exec("pragma foreign_keys = off").await.unwrap();
     for t in tables {
         db.exec(&format!("delete from \"{}\"", t.text("name").replace('"', "\"\""))).await.unwrap();

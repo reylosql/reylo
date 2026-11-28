@@ -340,7 +340,7 @@ pub async fn read(db: &mut Db) -> Result<Schema, Error> {
     let list: BTreeMap<String, Row> = db.rows("select name, type, strict, wr from pragma_table_list where schema = 'main'").await?.into_iter().map(|r| (fold(r.text("name")), r)).collect();
     let shadow = |name: &str| list.get(&fold(name)).is_some_and(|r| r.text("type") == "shadow");
     let all: Vec<Row> = db
-        .rows(&format!("select type, name, tbl_name as tbl, sql from sqlite_schema where name not like 'sqlite_%' and {} and name {turso} and tbl_name {turso} and sql is not null and {} order by rowid", crate::catalog::not_history("tbl_name"), crate::catalog::NOT_LIBSQL_VECTOR_OWN, turso = crate::catalog::NOT_TURSO_OWN))
+        .rows(&format!("select type, name, tbl_name as tbl, sql from sqlite_schema where {} and sql is not null order by rowid", crate::catalog::sqlite_project("tbl_name")))
         .await?;
     // SQLite takes a table named as a full-text table's own (`docs_content`) for one, whoever made
     // it: one that an external-content index reads its text from is the project's, and so is one
