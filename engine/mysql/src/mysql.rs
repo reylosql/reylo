@@ -251,7 +251,7 @@ pub fn analyze(sql: &str, lexed: &Lexed, text: Option<MysqlText>, host: &Host, m
     let names = crate::mysql_params::names(&rewritten);
     if let Some(statement) = &read {
         crate::mysql_params::prefetch(statement, &names, host);
-        crate::errors::prefetch(kind(Some(statement)), &crate::mysql_params::tables(statement), &rewritten.sql, host);
+        crate::errors::prefetch(kind(Some(statement)), &crate::mysql_params::tables(statement), &rewritten.sql, crate::mysql_params::reads_by_schema(statement), host);
     }
     let (raw, (misread, ignore_space), pipes, _) = (raw?, misread?, pipes?, server?);
     let misread = misread.or_else(|| pipes.clone().err());

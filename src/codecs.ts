@@ -525,6 +525,12 @@ function mysqlTime(v: { sign: number; years: number; months: number; weeks: numb
   return `${v.sign < 0 ? "-" : ""}${Math.floor(seconds / 3600)}:${pad(Math.floor(seconds / 60) % 60)}:${pad(seconds % 60)}${fraction && `.${fraction}`}`;
 }
 
+/** A decimal's text, which on MySQL may be no NaN or infinity: a DECIMAL holds neither, and MySQL reads the text `NaN` as 0 with a warning. */
+function decimalText(text: string, name: string, dialect: Dialect): string {
+  if (dialect === "mysql" && !/^[+-]?\d/.test(text)) throw new ParameterError(`Parameter "${name}" is ${text}, which MySQL holds no value for.`);
+  return text;
+}
+
 /**
  * A value of `codec` as the driver binds it, the text or bytes its type reads: a Temporal value's
  * ISO 8601 text (a SQLite date and time with a space, as SQLite's own functions write it, and a
@@ -552,7 +558,7 @@ export function encodeCodec(codec: Codec, v: unknown, name: string, dialect: Dia
   switch (codec) {
     case "decimal:number":
       if (typeof v !== "number") throw refuse("a number");
-      return String(v);
+      return decimalText(String(v), name, dialect);
     case "inet:ip-address": {
       // Its text as given, which Postgres reads with its prefix: a value of the module's copy of
       // ip-address, or another's, told by its fields.
@@ -568,7 +574,7 @@ export function encodeCodec(codec: Codec, v: unknown, name: string, dialect: Dia
       // `toFixed()` with no digits writes every digit with no exponent, whatever the library's
       // display settings, where `toString()` writes 1e+40.
       if (!isDecimalValue(codec, libraries?.decimal, v)) throw refuse(`a ${DECIMAL_LIBRARIES[libraryOf(codec)].type} from ${libraryOf(codec)}`);
-      return v.toFixed();
+      return decimalText(v.toFixed(), name, dialect);
     }
     case "bytes:string": {
       if (typeof v !== "string" || !/^[A-Za-z0-9+/]*={0,2}$/.test(v) || v.length % 4 === 1) throw refuse("binary data as its base64");

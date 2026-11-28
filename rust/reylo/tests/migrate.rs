@@ -275,11 +275,14 @@ async fn mysql() {
     let server: String = sqlx::query_scalar(text("select @@global.sql_mode")).fetch_one(&app).await.unwrap();
     let name: String = sqlx::query_scalar(text("select name from users where id = 2")).fetch_one(&app).await.unwrap();
     assert_eq!(name, if server.contains("PIPES_AS_CONCAT") { "10" } else { "1" });
-    // Status hands its connection back with sqlx's settings as they were.
-    let before: String = sqlx::query_scalar(text("select @@session.sql_mode")).fetch_one(&app).await.unwrap();
-    assert!(before.contains("PIPES_AS_CONCAT"), "{before}");
+    // Status hands its connection back to the pool with the app's settings as they were: sqlx's
+    // sql_mode, and a time zone and quoting the app set itself, which the run changes.
+    sqlx::query(text("set session time_zone = '+02:00', sql_quote_show_create = 0")).execute(&app).await.unwrap();
+    let settings = "select concat_ws(' ', connection_id(), @@session.sql_mode, @@session.time_zone, @@session.sql_quote_show_create)";
+    let before: String = sqlx::query_scalar(text(settings)).fetch_one(&app).await.unwrap();
+    assert!(before.contains("PIPES_AS_CONCAT") && before.ends_with(" +02:00 0"), "{before}");
     p.migrator().status(&app).await.unwrap();
-    let after: String = sqlx::query_scalar(text("select @@session.sql_mode")).fetch_one(&app).await.unwrap();
+    let after: String = sqlx::query_scalar(text(settings)).fetch_one(&app).await.unwrap();
     assert_eq!(after, before);
 }
 

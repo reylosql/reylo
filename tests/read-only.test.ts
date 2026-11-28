@@ -131,6 +131,8 @@ test("on MySQL, only a SELECT with no lock, no INTO, no variable and no stored f
       ["select id from plain_view", true],
       ["select id from locking_view", false],
       ["select id from locking_again", false],
+      // A table named by its schema, its own included, is one the catalog's walk does not reach.
+      [`select id from ${new URL(db.url).pathname.slice(1)}.locking_view`, false],
     ];
     for (const [sql, expected] of cases) assert.equal(await readOnly(db.url, sql), expected, sql);
   } finally {

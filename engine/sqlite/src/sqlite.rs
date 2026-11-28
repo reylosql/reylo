@@ -17,6 +17,7 @@ use crate::fresh::Tables;
 use crate::host::{as_str, Host, Lazy};
 use crate::lex::{self, Lexed, Target};
 use crate::sqlite_tree::{self as tree, From, Node, Sel, Tree};
+use reylo_engine_core::refusal::{self, Cmp, Probe};
 use crate::types::{Cardinality, Field, FloatType, Kind, StatementKind, TextType, Type};
 
 /// What the analysis reasons in: a value's storage class by the affinity name SQLite gives it
@@ -1322,11 +1323,14 @@ fn strict_in(n: &Node, extras: &Extras) -> HashSet<(i64, String)> {
     }
 }
 
+/// The built-ins NULL for a NULL argument, and for `replace` one in its first two.
+const NULL_FOR_NULL: &[&str] = &["upper", "lower", "length", "abs", "trim", "ltrim", "rtrim", "substr", "substring", "replace", "round", "instr", "unicode", "sign", "octet_length"];
+
 /// The columns an expression answers NULL for: the column itself, and through arithmetic,
 /// concatenation, a cast, a COLLATE or a built-in that is NULL for a NULL argument (not one the
 /// host registers over it), every column an operand answers NULL for.
 fn nulls_with(n: &Node, extras: &Extras) -> HashSet<(i64, String)> {
-    const STRICT: &[&str] = &["upper", "lower", "length", "abs", "trim", "ltrim", "rtrim", "substr", "substring", "replace", "round", "instr", "unicode", "sign", "octet_length"];
+    const STRICT: &[&str] = NULL_FOR_NULL;
     match n.op.as_str() {
         "column" => n.column.clone().map(|c| HashSet::from([(n.cursor, c)])).unwrap_or_default(),
         "+" | "-" | "*" | "/" | "%" | "||" => n.left.iter().chain(n.right.iter()).flat_map(|x| nulls_with(x, extras)).collect(),
@@ -1340,6 +1344,78 @@ fn nulls_with(n: &Node, extras: &Extras) -> HashSet<(i64, String)> {
             n.args.iter().take(strict).flat_map(|x| nulls_with(x, extras)).collect()
         }
         _ => HashSet::new(),
+    }
+}
+
+/// A CHECK or a generated column's expression as [`refusal::with_null`] reads it, as SQLite
+/// evaluates it: a column by its name in lower case; NULL, TRUE and FALSE, an integer and any
+/// other literal; IS [NOT] NULL, IS [NOT] TRUE, IS [NOT] FALSE and IS [NOT]; AND, OR and NOT; a
+/// CASE without an operand; `coalesce`, `ifnull`, `iif`, `if` and `nullif`; a comparison, of two
+/// integers where neither side takes TEXT or BLOB affinity; and the operators and built-ins NULL
+/// for a NULL operand ([`nulls_with`]'s). A function the host registers over a built-in is none.
+fn probe(n: &Node, extras: &Extras) -> Probe {
+    let at = |n: &Option<Box<Node>>| n.as_deref().map_or(Probe::Unknown, |n| probe(n, extras));
+    let boxed = |n: &Option<Box<Node>>| Box::new(at(n));
+    let builtin = |name: &str| !n.agg && !n.window && extras.function(name, n.args.len()).is_none();
+    let textual = |n: &Option<Box<Node>>| n.as_deref().is_some_and(|n| matches!(n.aff.as_str(), "text" | "blob"));
+    let truth = |n: &Option<Box<Node>>| n.as_deref().filter(|n| n.op == "truefalse").and_then(|n| n.value.as_deref()).map(|v| v.eq_ignore_ascii_case("true"));
+    // `iif(c1, v1, c2, v2, …, else)` and a CASE's list, `when, then, …, else`, as arms.
+    let arms = |list: &[Node]| Probe::Case {
+        arms: list.chunks_exact(2).map(|pair| (probe(&pair[0], extras), probe(&pair[1], extras))).collect(),
+        otherwise: (list.len() % 2 == 1).then(|| Box::new(probe(&list[list.len() - 1], extras))),
+    };
+    match n.op.as_str() {
+        "null" => Probe::Null,
+        "integer" => n.value.as_deref().and_then(|v| v.parse().ok()).map_or(Probe::Value, Probe::Int),
+        "truefalse" => Probe::Int(n.value.as_deref().is_some_and(|v| v.eq_ignore_ascii_case("true")).into()),
+        "float" | "string" | "blob" => Probe::Value,
+        "column" => n.column.as_deref().map_or(Probe::Unknown, |c| Probe::Column(c.to_ascii_lowercase())),
+        "id" => n.value.as_deref().map_or(Probe::Unknown, |c| Probe::Column(c.to_ascii_lowercase())),
+        "collate" | "pos" => at(&n.left),
+        "isnull" => Probe::IsNull { arg: boxed(&n.left), not: false },
+        "notnull" => Probe::IsNull { arg: boxed(&n.left), not: true },
+        "truth" => match truth(&n.right) {
+            Some(true) => Probe::IsTrue { arg: boxed(&n.left), not: n.is_not },
+            Some(false) => Probe::IsFalse { arg: boxed(&n.left), not: n.is_not },
+            None => Probe::Unknown,
+        },
+        "is" | "is not" => Probe::Same { left: boxed(&n.left), right: boxed(&n.right), not: n.op == "is not", exact: !textual(&n.left) && !textual(&n.right) },
+        "=" | "!=" | "<" | "<=" | ">" | ">=" => {
+            let op = match n.op.as_str() {
+                "=" => Cmp::Eq,
+                "!=" => Cmp::NotEq,
+                "<" => Cmp::Lt,
+                "<=" => Cmp::LtEq,
+                ">" => Cmp::Gt,
+                _ => Cmp::GtEq,
+            };
+            Probe::Compare { op, left: boxed(&n.left), right: boxed(&n.right), exact: !textual(&n.left) && !textual(&n.right) }
+        }
+        "and" => Probe::And(boxed(&n.left), boxed(&n.right)),
+        "or" => Probe::Or(boxed(&n.left), boxed(&n.right)),
+        "not" => Probe::Not(boxed(&n.left)),
+        "neg" => match at(&n.left) {
+            Probe::Int(i) => i.checked_neg().map_or(Probe::Value, Probe::Int),
+            p => Probe::Strict(vec![p]),
+        },
+        "case" if n.left.is_none() => arms(&n.list),
+        "+" | "-" | "*" | "/" | "%" | "||" => Probe::Strict(vec![at(&n.left), at(&n.right)]),
+        "cast" => Probe::Strict(vec![at(&n.left)]),
+        "function" => match n.name.as_deref() {
+            Some("coalesce" | "ifnull") if builtin(n.name.as_deref().unwrap_or("")) && !n.args.is_empty() => Probe::Coalesce(n.args.iter().map(|a| probe(a, extras)).collect()),
+            Some(name @ ("iif" | "if")) if builtin(name) && n.args.len() >= 2 => arms(&n.args),
+            Some("nullif") if builtin("nullif") && n.args.len() == 2 => Probe::NullIf { value: Box::new(probe(&n.args[0], extras)), other: Box::new(probe(&n.args[1], extras)), exact: !matches!(n.args[0].aff.as_str(), "text" | "blob") && !matches!(n.args[1].aff.as_str(), "text" | "blob") },
+            Some(name @ ("likely" | "unlikely")) if builtin(name) && n.args.len() == 1 => probe(&n.args[0], extras),
+            Some(name) if builtin(name) && NULL_FOR_NULL.contains(&name) => {
+                let strict = match name {
+                    "replace" if !n.args.get(1).and_then(literal_text).is_some_and(|p| !p.is_empty()) => 2,
+                    _ => n.args.len(),
+                };
+                Probe::Strict(n.args.iter().take(strict).map(|a| probe(a, extras)).collect())
+            }
+            _ => Probe::Unknown,
+        },
+        _ => Probe::Unknown,
     }
 }
 
@@ -2719,11 +2795,30 @@ impl Analyzer<'_> {
         (params, refused)
     }
 
-    /// Whether a CHECK of the table refuses NULL in the column (`check (col is not null)`). A view
-    /// is no table here (its INSTEAD OF trigger says what a write takes), so a parameter written
-    /// to one has no target column and takes no NULL.
+    /// Whether the table refuses NULL in the column but by its NOT NULL: a CHECK false wherever it
+    /// is NULL ([`refusal::check_refuses`]), or a generated column that refuses NULL, by its NOT
+    /// NULL or a CHECK, and is NULL wherever it is ([`refusal::refused_by_generated`]). A view is
+    /// no table here (its INSTEAD OF trigger says what a write takes), so a parameter written to
+    /// one has no target column and takes no NULL.
     fn checked_not_null(&self, table: &str, column: &str) -> bool {
-        self.tree.tables.get(table).and_then(|info| info.columns.iter().find(|c| c.name.eq_ignore_ascii_case(column))).is_some_and(|c| c.checked_not_null)
+        let Some(info) = self.tree.tables.get(table) else { return false };
+        let column = column.to_ascii_lowercase();
+        let checks: Vec<Probe> = info.checks.iter().map(|c| probe(c, self.extras)).collect();
+        let checked = |c: &str| checks.iter().any(|check| refusal::check_refuses(check, c));
+        if checked(&column) {
+            return true;
+        }
+        let columns: Vec<String> = info.columns.iter().map(|c| c.name.to_ascii_lowercase()).collect();
+        let generated: Vec<(String, bool, Probe)> = info
+            .columns
+            .iter()
+            .filter_map(|c| {
+                let name = c.name.to_ascii_lowercase();
+                let refused = c.not_null || checked(&name);
+                c.expression.as_ref().map(|e| (name, refused, probe(e, self.extras)))
+            })
+            .collect();
+        !generated.is_empty() && refusal::refused_by_generated(&columns, &generated).contains(&column)
     }
 
     fn table_column(&self, table: &str, column: &str) -> Option<Fact> {
@@ -4528,6 +4623,31 @@ mod tests {
     }
 
     #[test]
+    fn a_check_false_for_null_or_a_generated_column_null_for_it_refuses_null() {
+        // A CHECK false wherever the column is NULL refuses NULL in it, by whatever test, and a
+        // generated column that refuses NULL, by its NOT NULL or a CHECK, refuses it in each
+        // column it is NULL wherever that column is NULL, through the generated columns it reads.
+        // SQLite compares what `coalesce` gives as it is: 10 is not below 9, so `k` refuses NULL.
+        let ddl = vec![
+            "create table checked (id integer primary key, a int check (coalesce(a, 0) > 0), b int check (b is 1), c int check (c is true), d int check (not (d is null)), e int check (ifnull(e, 0) > 0), f int check (coalesce(f, 1) > 0), g int check (g is not false), h int check (h is null or h > 0), i int, j int, k text check (coalesce(k, 10) < coalesce(k, 9) or k is not null), check (i is not null or j is not null))".to_string(),
+            "create table labels (id integer primary key, p int, gp int generated always as (iif(p is null, null, 1)) not null, q int, gq text generated always as (case when q > 0 then 'p' when q <= 0 then 'n' end) not null, r int, gr int generated always as (r + 1), gr2 int generated always as (gr * 2) stored not null, s int, gs int generated always as (iif(s > 0, s, 0)) not null, t int, gt int generated always as (t + 1) check (gt is not null), u int, gu int generated always as (coalesce(u, 0)) not null)".to_string(),
+            "create table lowered (id integer primary key, v text, gv text generated always as (lower(v)) not null)".to_string(),
+        ];
+        let types = |sql: &str| {
+            let a = analyze_ddl(sql, &ddl, &Extras::default()).analysis;
+            assert!(a.diagnostics.is_empty(), "{sql}: {:?}", a.diagnostics);
+            a.params.iter().map(|p| format!("{}{}", p.name, if p.nullable { "?" } else { "" })).collect::<Vec<_>>().join(" ")
+        };
+        assert_eq!(types("insert into checked (id, a, b, c, d, e, f, g, h, i, j, k) values (:id, :a, :b, :c, :d, :e, :f, :g, :h, :i, :j, :k)"), "id a b c d e f? g? h? i? j? k");
+        assert_eq!(types("insert into labels (id, p, q, r, s, t, u) values (:id, :p, :q, :r, :s, :t, :u)"), "id p q r s? t u?");
+        assert_eq!(types("insert into lowered (id, v) values (:id, :v)"), "id v");
+        // A function the host registers over a built-in may answer anything for NULL.
+        let extras = Extras { total: vec![TotalFunction { name: "lower".into(), arity: 1, returns: Affinity::Text }], host: None };
+        let a = analyze_ddl("insert into lowered (id, v) values (:id, :v)", &ddl, &extras).analysis;
+        assert_eq!(a.params.iter().map(|p| format!("{}{}", p.name, if p.nullable { "?" } else { "" })).collect::<Vec<_>>().join(" "), "id v?");
+    }
+
+    #[test]
     fn a_cast_parameter_is_its_casts_type_and_a_bare_one_its_columns() {
         // A `:name::type` cast compiles to `CAST(? AS type)`, and `::json` to `json(?)`: the
         // parameter is the cast's type and takes no NULL, written whole or not. A bare one written whole (an INSERT's values, every row of a
@@ -5907,7 +6027,7 @@ mod tests {
         let a = analyze_ddl(profile, &json_ddl(), &Extras::default()).analysis;
         assert_eq!((a.columns[0].ty.kind.name(), a.cardinality.as_str()), ("json", "at_most_one"));
         // Each value as SQLite writes it there: an INTEGER, a BIGINT column's too, as a number
-        // (which JSON.parse rounds past 2^53), a REAL, a TEXT, a NUMERIC as either, NULL as null,
+        // (which the run time refuses past 2^53 - 1, where JSON.parse rounds it), a REAL, a TEXT, a NUMERIC as either, NULL as null,
         // a truth value as 1 or 0 and a BOOLEAN column as what it holds. A BLOB is read as JSONB
         // (`x'01'` is `true`) or is an error, and a column of no type may hold one.
         assert_eq!(

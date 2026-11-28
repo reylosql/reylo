@@ -351,12 +351,13 @@ What changes inside JSON:
 
 **Values inside a document**
 
-Inside JSON, a value can differ from the same value in a column. A boolean is `1` or `0`, and integers past 2^53 lose precision in `JSON.parse`.
+Inside JSON, a value can differ from the same value in a column. A boolean is `1` or `0`. An integer past 2^53 throws an error naming its column, since `JSON.parse` rounds it. Cast it to text to read it exactly.
 
 <Pairs>
 
 - `json_object('a', 1 = 1)` → `{ a: 1 }`
-- `json_object('n', 9007199254740993)` → `{ n: 9007199254740992 }`
+- `json_object('n', 9007199254740993)` → `throws TypeError`
+- `json_object('n', cast(9007199254740993 as text))` → `{ n: "9007199254740993" }`
 
 </Pairs>
 
@@ -511,6 +512,8 @@ A parameter accepts the same values `.run()` returns for its type. You can pass 
 
 A `BLOB` parameter takes only a `Uint8Array`. It rejects base64 or hex text, which SQLite would store as `TEXT`. Decode the text into a `Uint8Array` first.
 
+SQLite stores `NaN` as `NULL`, so a parameter rejects `NaN`, inside JSON too.
+
 Where the query takes no null for a JSON parameter, `null` is JSON's `null`, the text `null`. A `coalesce` or a null test doesn't make a parameter take null, so write `coalesce(:doc::nullable(json), doc)` to keep `doc` for `null`.
 
 ### Parameters without a type
@@ -557,7 +560,7 @@ where name = coalesce(:name::nullable(text), name)
 
 **Written to a nullable column**
 
-Written directly into a column that accepts `NULL`, with no cast. A column accepts it unless it's `NOT NULL` or a `check (… is not null)` covers it.
+Written directly into a column that accepts `NULL`, with no cast. A column accepts it unless it's `NOT NULL`, or a check is false wherever it's `NULL`, as `check (… is not null)` is. It also refuses `NULL` when a `NOT NULL` generated column is `NULL` wherever it is, as `… + 1` is.
 
 <InferenceCard>
 
@@ -766,7 +769,7 @@ export default {
 };
 ```
 
-D1 rounds an integer past 2^53, so Reylo throws an error rather than return it, even for a `BIGINT` column. A whole number from 2^53 to 2^63 in a column with no type throws too, since it may be such an integer.
+D1 rounds an integer past 2^53, so Reylo throws an error rather than return it, even for a `BIGINT` column. A whole number from 2^53 to 2^63 in a column with no type throws too, since it may be such an integer. D1 sends each row as JSON, so a `REAL`'s infinity comes back as `null`, and -0 as 0.
 
 ### Durable Objects
 

@@ -95,6 +95,27 @@ test("SQLite: a value nothing types inside JSON the statement builds is Json, wh
   }
 });
 
+test("SQLite: a document `.run()` returns from JSON a statement builds goes back in as a JSON parameter unchanged, an infinity written as SQLite writes one, -0 as -0e0, and NaN, which SQLite holds none of, is refused", async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "reylo-json-")));
+  writeFileSync(join(root, "package.json"), "{}");
+  writeFileSync(join(root, ".env"), "DATABASE_URL=file:./app.db\n");
+  const lite = new DatabaseSync(join(root, "app.db"));
+  lite.exec("create table docs (id integer primary key, doc text not null)");
+  try {
+    const read = await built(root, "build", "select json_object('inf', 1e999, 'neg', -1e999) as doc\n");
+    const write = await built(root, "insert", "insert into docs (id, doc) values (:id, :doc::json)\n");
+    const { doc } = (await read.run(lite)) as { doc: Record<string, number> };
+    assert.deepEqual(doc, { inf: Infinity, neg: -Infinity });
+    await write.run(lite, { id: 1, doc: { ...doc, z: -0 } });
+    assert.deepEqual({ ...lite.prepare("select doc, doc ->> '$.inf' as inf, doc ->> '$.neg' as neg from docs").get() }, { doc: `{"inf":9e999,"neg":-9e999,"z":-0e0}`, inf: Infinity, neg: -Infinity });
+    assert.ok(Object.is(JSON.parse(String(lite.prepare("select doc from docs").get()!.doc)).z, -0));
+    await assert.rejects(async () => write.run(lite, { id: 2, doc: { n: NaN } }), /: Parameter "doc" at \/n is NaN, which SQLite holds no value for: write null or a string in its place\.$/);
+  } finally {
+    lite.close();
+    await closeSessions();
+  }
+});
+
 /** A project at a new directory on `url`, with `driver` from lab/drivers installed. */
 function project(url: string, driver: string): string {
   const root = mkdtempSync(join(tmpdir(), "reylo-json-"));
@@ -201,6 +222,124 @@ test("Postgres: a float or a numeric inside JSON is a number, NaN and the infini
     }
   } finally {
     await client.end();
+    await closeSessions();
+    await own.drop();
+  }
+});
+
+test("Postgres: a JSON parameter keeps the -0 `.run()` returns from JSON a statement builds, which `json` keeps as written, and refuses its NaN and infinities, which JSON holds no number for, on every driver", { skip: pgLive }, async () => {
+  const own = await postgresDatabase("reylo_json_back", "create table docs (id int primary key, j json not null, b jsonb not null)");
+  const root = project(own.url, "pg");
+  const build = `select json_build_object('z', '-0'::float8) as zero, json_build_object('nan', 'NaN'::float8, 'inf', 'Infinity'::numeric) as other\n`;
+  const insert = "insert into docs (id, j, b) values (:id, :j, :b)\n";
+  const pg = driver("pg");
+  const client = new pg.Client({ connectionString: own.url });
+  await client.connect();
+  try {
+    const [read, write] = [await built(root, "build", build), await built(root, "insert", insert)];
+    let id = 0;
+    for (const db of [own.sql, client]) {
+      const { zero, other } = (await read.run(db)) as { zero: { z: number }; other: object };
+      assert.ok(Object.is(zero.z, -0));
+      assert.deepEqual(other, { nan: NaN, inf: Infinity });
+      await write.run(db, { id: ++id, j: zero, b: zero });
+      await assert.rejects(async () => write.run(db, { id: 9, j: other, b: other }), /: Parameter "j" at \/nan is NaN, which JSON holds no number for: write null or a string in its place\.$/);
+    }
+    // json keeps the document as written; jsonb holds no -0.
+    const stored = await own.sql.unsafe(`select j::text as j, b::text as b from docs order by id`);
+    assert.deepEqual(stored.map((row: object) => ({ ...row })), [1, 2].map(() => ({ j: `{"z":-0}`, b: `{"z": 0}` })));
+  } finally {
+    await client.end();
+    await closeSessions();
+    await own.drop();
+  }
+});
+
+test("MySQL: a JSON parameter keeps -0, which MySQL's JSON reads from -0e0, and refuses NaN and the infinities, which MySQL holds none of, on mysql2 and mariadb", { skip: mysqlLive }, async () => {
+  const own = await mysqlDatabase("reylo_json_zero", "create table docs (id int primary key, j json not null)");
+  const root = project(own.url, "mysql2");
+  const u = new URL(own.url);
+  const mariadb = await driver("mariadb").createConnection({ host: u.hostname, port: Number(u.port), user: decodeURIComponent(u.username) || "root", password: decodeURIComponent(u.password), database: u.pathname.slice(1) });
+  try {
+    const write = await built(root, "insert", "insert into docs (id, j) values (:id, :j)\n");
+    const read = await built(root, "read", "select j from docs where id = :id\n");
+    let id = 0;
+    for (const db of [own.db, mariadb]) {
+      await write.run(db, { id: ++id, j: { z: -0, n: [-0, 1.5] } });
+      const { j } = (await read.run(db, { id })) as { j: { z: number; n: number[] } };
+      assert.ok(Object.is(j.z, -0) && Object.is(j.n[0], -0), JSON.stringify(j));
+      await assert.rejects(async () => write.run(db, { id: 9, j: { n: NaN } }), /: Parameter "j" at \/n is NaN, which MySQL holds no value for: write null or a string in its place\.$/);
+    }
+  } finally {
+    await mariadb.end();
+    await closeSessions();
+    await own.drop();
+  }
+});
+
+test("Postgres: a typed JSON parameter's integer takes a BigInt, written exactly, and JSON the statement builds refuses an integer JSON.parse would round, on every driver", { skip: pgLive }, async () => {
+  const own = await postgresDatabase("reylo_json_integers", "create table rounds (id int primary key, amount bigint not null)");
+  const root = project(own.url, "pg");
+  const insert = `insert into rounds (id, amount)
+select r.id, r.amount from jsonb_to_recordset(:rounds::jsonb('{
+  "type": "array",
+  "items": { "type": "object", "properties": { "id": { "type": "integer" }, "amount": { "type": "integer" } }, "required": ["id", "amount"] }
+}')) as r(id int, amount bigint)
+returning id, amount\n`;
+  const nested = `select json_agg(json_build_object('id', id, 'amount', amount) order by id) as rounds, jsonb_build_object('total', sum(amount)::bigint, 'n', count(*)) as summary from rounds where id <= :upto::int\n`;
+  const pg = driver("pg");
+  const client = new pg.Client({ connectionString: own.url });
+  await client.connect();
+  try {
+    const declared = await declarations(root, { "insert.sql": insert, "nested.sql": nested });
+    assert.ok(types(declared["insert.sql"]!).includes("export type Params = { rounds: { id: number | bigint; amount: number | bigint }[] };"));
+    assert.deepEqual(types(declared["nested.sql"]!).slice(-1), ["export type Row = { rounds: { id: number; amount: number }[] | null; summary: { total: number | null; n: number } };"]);
+    await closeSessions();
+    const write = await built(root, "insert", insert);
+    const read = await built(root, "nested", nested);
+    for (const [i, db] of [own.sql, client].entries()) {
+      const id = i * 10;
+      assert.deepEqual(((await write.run(db, { rounds: [{ id: id + 1, amount: 5 }, { id: id + 2, amount: 9007199254740993n }] })) as object[]).map((r) => ({ ...r })), [{ id: id + 1, amount: 5n }, { id: id + 2, amount: 9007199254740993n }]);
+      await assert.rejects(write.run(db, { rounds: [{ id: id + 3, amount: 9007199254740995 }] }), /Parameter "rounds" at \/0\/amount must be integer, and 9007199254740996 is past 2\^53 - 1/);
+    }
+    for (const db of [own.sql, client]) {
+      assert.deepEqual({ ...((await read.run(db, { upto: 1 })) as object) }, { rounds: [{ id: 1, amount: 5 }], summary: { total: 5, n: 1 } });
+      await assert.rejects(read.run(db, { upto: 2 }), /Column "rounds" holds, inside its JSON at \/1\/amount, the integer 9007199254740992, which is past 2\^53 - 1/);
+    }
+  } finally {
+    await client.end();
+    await closeSessions();
+    await own.drop();
+  }
+});
+
+test("MySQL: a typed JSON parameter's integer takes a BigInt, written exactly, and JSON the statement builds refuses an integer JSON.parse would round, on mysql2 and mariadb", { skip: mysqlLive }, async () => {
+  const own = await mysqlDatabase("reylo_json_integers", "create table rounds (id int primary key, amount bigint not null)");
+  const root = project(own.url, "mysql2");
+  const u = new URL(own.url);
+  const mariadb = await driver("mariadb").createConnection({ host: u.hostname, port: Number(u.port), user: decodeURIComponent(u.username) || "root", password: decodeURIComponent(u.password), database: u.pathname.slice(1) });
+  const insert = `insert into rounds (id, amount)
+select r.id, r.amount from json_table(:rounds::json('{
+  "type": "array",
+  "items": { "type": "object", "properties": { "id": { "type": "integer" }, "amount": { "type": "integer" } }, "required": ["id", "amount"] }
+}'), '$[*]' columns (id int path '$.id', amount bigint path '$.amount')) as r\n`;
+  const nested = `select (select json_arrayagg(json_object('id', id, 'amount', amount)) from rounds where id <= :upto) as rounds\n`;
+  try {
+    const write = await built(root, "insert", insert);
+    const read = await built(root, "nested", nested);
+    for (const [i, db] of [own.db, mariadb].entries()) {
+      const id = i * 10;
+      await write.run(db, { rounds: [{ id: id + 1, amount: 5 }, { id: id + 2, amount: 9007199254740993n }] });
+      await assert.rejects(write.run(db, { rounds: [{ id: id + 3, amount: 9007199254740995 }] }), /Parameter "rounds" at \/0\/amount must be integer, and 9007199254740996 is past 2\^53 - 1/);
+      await assert.rejects(write.run(db, { rounds: [{ id: id + 3, amount: 2n ** 64n }] }), /the BigInt 18446744073709551616, which MySQL reads from JSON as a float/);
+    }
+    assert.deepEqual(await own.rows("select id, cast(amount as char) as amount from rounds order by id"), [{ id: 1, amount: "5" }, { id: 2, amount: "9007199254740993" }, { id: 11, amount: "5" }, { id: 12, amount: "9007199254740993" }]);
+    for (const db of [own.db, mariadb]) {
+      assert.deepEqual({ ...((await read.run(db, { upto: 1 })) as object) }, { rounds: [{ id: 1, amount: 5 }] });
+      await assert.rejects(read.run(db, { upto: 2 }), /Column "rounds" holds, inside its JSON at \/1\/amount, the integer 9007199254740992, which is past 2\^53 - 1/);
+    }
+  } finally {
+    await mariadb.end();
     await closeSessions();
     await own.drop();
   }

@@ -1072,6 +1072,17 @@ import recordClick from "./record_click.sql";
 await recordClick.run(db, { payload: { x: 1.5, y: 20 } });
 ```
 
+An integer also takes a `bigint`, which stays exact past 2^53:
+
+```ts twoslash
+import recordClick from "./record_click.sql";
+
+await recordClick.run(db, { payload: { x: 9007199254740993n, y: 20 } });
+
+// .run() rejects a number past 2^53, which JavaScript has already rounded
+await recordClick.run(db, { payload: { x: 9007199254740993, y: 20 } });
+```
+
 A schema can nest objects and arrays, and check every value in them:
 
 <InferenceCard>

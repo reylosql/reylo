@@ -54,9 +54,22 @@ test("a value is checked against its column list, and written as the JSON the st
     [{ id: 1, ts: "2026-10-20T10:00:00Z", amount: "1.234" }, /keeps 2 digits after the point, so 1.234 would be rounded/],
     [{ id: 1, ts: "2026-10-20T10:00:00Z", amount: "12345678901" }, /at most 10 digits before the point/],
     [{ id: 1, ts: "2026-10-20T10:00:00Z", tags: ["a", 1] }, /"tags" element 2 is text, a string; got 1/],
-    [{ id: 1, ts: "2026-10-20T10:00:00Z", meta: { n: 1n } }, /holds a JSON value/],
+    [{ id: 1, ts: "2026-10-20T10:00:00Z", meta: () => 1 }, /holds a JSON value/],
   ];
   for (const [value, message] of refused) assert.throws(() => prepareRows("events", events, [value], "postgres", true), message, JSON.stringify(value, (_, v) => (typeof v === "bigint" ? `${v}n` : v)));
+  // A BigInt inside a JSON member is written as its digits, within the 64-bit integers SQLite reads from JSON.
+  const big = { id: 1, ts: "2026-10-20T10:00:00Z", meta: { source: "x", n: 9007199254740993n } };
+  assert.match(prepareRows("events", events, [big], "sqlite", true).value as string, /\{"source":"x","n":9007199254740993\}/);
+  assert.throws(() => prepareRows("events", events, [{ ...big, meta: { source: "x", n: 2n ** 63n } }], "sqlite", true), /the BigInt 9223372036854775808, which SQLite reads from JSON as a float/);
+  // A BigInt member is JSON whatever toJSON an app gives BigInt.
+  const proto = BigInt.prototype as unknown as { toJSON?: () => unknown };
+  proto.toJSON = () => undefined;
+  try {
+    const one = { fields: [{ name: "n", type: { kind: "json" }, written: "json", nullable: false, optional: false }], one: true } as unknown as Parameters<typeof prepareRows>[1];
+    assert.equal(prepareRows("one", one, { n: 9007199254740993n }, "sqlite", false).value, '{"n":9007199254740993}');
+  } finally {
+    delete proto.toJSON;
+  }
   assert.throws(() => prepareRows("events", events, { id: 1 }, "postgres", true), /pass an array of objects, one per row; got an object/);
   assert.throws(() => prepareRows("user", { ...events, one: true }, [], "postgres", true), /each row is an object/);
 });
@@ -89,6 +102,17 @@ test("NaN, an infinity and -0, which JSON has no number for, go in where the mem
   // A NUMERIC takes -0 as its float, which keeps the sign its integer would drop.
   assert.equal(prepareRows("t", reals, [{ x: Infinity, n: -Infinity }, { x: -Infinity }, { x: -0, n: -0 }, { x: 1, n: 2 }], "sqlite", false).value, `[{"x":9e999,"n":-9e999},{"x":-9e999},{"x":-0e0,"n":-0e0},{"x":1,"n":2}]`);
   assert.throws(() => prepareRows("t", reals, [{ x: NaN }], "sqlite", false), /"x" is real, a number other than NaN; got NaN\./);
+  // A JSON member, and a member of a type the run time has no rule for, hold their numbers as a
+  // JSON parameter does: as each database's JSON reads them, or refused where it holds none.
+  const docs = structured(false, [["doc", { kind: "json" }, "json", false, false], ["v", { kind: "unknown" }, "blob", true, true]]).rows;
+  assert.equal(prepareRows("d", docs, [{ doc: { z: -0, inf: Infinity } }], "sqlite", false).value, `[{"doc":{"z":-0e0,"inf":9e999}}]`);
+  assert.equal(prepareRows("d", docs, [{ doc: [-0] }], "mysql", false).value, `[{"doc":[-0e0]}]`);
+  assert.throws(() => prepareRows("d", docs, [{ doc: { n: [NaN] } }], "mysql", false), /^TypeError: Parameter "d": row 1: "doc" at \/n\/0 is NaN, which MySQL holds no value for/);
+  assert.throws(() => prepareRows("d", docs, [{ doc: 1, v: NaN }], "sqlite", false), /^TypeError: Parameter "d": at \/0\/v is NaN, which SQLite holds no value for/);
+  // A JSON member is written as it would be alone: its toJSON() takes the key a value alone has.
+  const { rawJSON } = JSON as unknown as { rawJSON(text: string): unknown };
+  const keyed = { toJSON: (key: string) => (key === "" ? { saved: true, big: rawJSON("12345678901234567890"), s: rawJSON(String.raw`"\u0061"`), z: -0 } : undefined) };
+  for (const dialect of ["mysql", "sqlite"] as const) assert.equal(prepareRows("d", docs, [{ doc: keyed }], dialect, false).value, String.raw`[{"doc":{"saved":true,"big":12345678901234567890,"s":"\u0061","z":-0e0}}]`);
 });
 
 test("a member is read from the row's own keys: a column named after a member of every object is left out when the row leaves it out, and a JSON member is written as JSON.stringify writes it", () => {

@@ -82,3 +82,40 @@ test("a pattern Unicode mode refuses and the plain mode reads is read plainly, a
   assert.equal(validate({ type: "string", pattern: "^.$" }, "😀"), undefined);
   assert.throws(() => validate({ type: "string", pattern: "(" }, "a"), SyntaxError);
 });
+
+test("an integer takes a BigInt, checked exactly, and refuses a number past 2^53 - 1, which may already be another one", () => {
+  // 2^62, a bound a double holds exactly.
+  const amount = { type: "integer", minimum: 0, maximum: 4611686018427387904 };
+  assert.equal(validate(amount, 9007199254740993n), undefined);
+  assert.equal(validate(amount, 4611686018427387904n), undefined);
+  assert.match(validate(amount, 4611686018427387905n)!.message, /must be at most 4611686018427387904/);
+  assert.match(validate(amount, -1n)!.message, /must be at least 0/);
+  assert.equal(validate(amount, 9007199254740991), undefined);
+  assert.match(validate({ type: "integer" }, 9007199254740996)!.message, /must be integer, and 9007199254740996 is past 2\^53 - 1, where a number stops being exact, so pass it as a BigInt/);
+  assert.match(validate({ type: ["integer", "null"] }, -9007199254740992)!.message, /-9007199254740992 is below -\(2\^53 - 1\)/);
+  // Inside `not` and `if` it is still the integer JSON Schema calls it.
+  assert.match(validate({ type: "number", not: { type: "integer" } }, 9007199254740996)!.message, /must not match its `not` schema/);
+  assert.equal(validate({ if: { type: "integer" }, then: { minimum: 0 }, else: { type: "string" } }, 9007199254740996), undefined);
+  // So it is in what `oneOf` and `maxContains` count: 1e20 is both an integer and a number.
+  assert.match(validate({ oneOf: [{ type: "integer" }, { type: "number" }] }, 1e20)!.message, /must match only one of its `oneOf` schemas/);
+  assert.match(validate({ oneOf: [{ type: "integer" }, { type: "string" }] }, 1e19)!.message, /is past 2\^53 - 1/);
+  assert.match(validate({ type: "array", contains: { type: "integer" }, maxContains: 1 }, [5, 1e20])!.message, /must contain at most 1 items/);
+  // One past what a 64-bit integer holds is a whole number no 64-bit column takes, which JSON Schema calls an integer.
+  assert.equal(validate({ type: "integer" }, 1.2e52), undefined);
+  // A number past 2^53 - 1 is still a number, and a BigInt is one too, as JSON writes it.
+  assert.equal(validate({ type: "number" }, 9007199254740996), undefined);
+  assert.equal(validate({ type: "number" }, 5n), undefined);
+  assert.match(validate({ type: "string" }, 5n)!.message, /must be string, got an integer, a BigInt/);
+  // Each keyword reads a BigInt by its value, as it reads the number it equals.
+  assert.equal(validate({ type: "integer", multipleOf: 3 }, 9007199254740993n), undefined);
+  assert.match(validate({ type: "integer", multipleOf: 2 }, 9007199254740995n)!.message, /must be a multiple of 2/);
+  assert.equal(validate({ type: "integer", multipleOf: 0.5 }, 3n), undefined);
+  assert.equal(validate({ enum: [1, 2] }, 2n), undefined);
+  assert.equal(validate({ const: 9007199254740992 }, 9007199254740992n), undefined);
+  assert.match(validate({ type: "array", uniqueItems: true }, [1, 1n])!.message, /must have no two equal items \(0 and 1\)/);
+  assert.equal(validate({ type: "integer", exclusiveMaximum: 10 }, 9n), undefined);
+  assert.match(validate({ type: "integer", exclusiveMinimum: 10 }, 10n)!.message, /must be more than 10/);
+  const rounds = { type: "array", items: { type: "object", properties: { lead: { type: "boolean" }, amount: { type: "integer" } }, required: ["amount"] } };
+  assert.equal(validate(rounds, [{ lead: true, amount: 9007199254740993n }, { amount: 1 }]), undefined);
+  assert.deepEqual(validate(rounds, [{ amount: 1 }, { amount: 9007199254740995 }]), { path: "/1/amount", message: "must be integer, and 9007199254740996 is past 2^53 - 1, where a number stops being exact, so pass it as a BigInt" });
+});

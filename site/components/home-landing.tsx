@@ -2,6 +2,7 @@ import { createContext, useContext, useRef, useState, type CSSProperties, type R
 import { createPortal } from 'react-dom';
 import data from 'virtual:home-examples';
 import { DATABASES, HOSTS } from './host-logos';
+import { Check, Chevron, DatabaseLogo, useDatabaseMenu } from './database-menu';
 import { Foot, Install, Nav } from './home-chrome';
 import { CompareTable } from './compare-table';
 import { HowItWorksDiagram } from './how-it-works-diagram';
@@ -196,15 +197,7 @@ function Card({ variant, dialects, dialect, onDialect, tabs }: { variant: HomeVa
       {tabs}
       <div className="rh-card-row">
         <div className="rh-card-label">Query</div>
-        {dialects.length > 1 && (
-          <div className="rh-switch" role="tablist" aria-label="Database">
-            {dialects.map((d) => (
-              <button key={d} type="button" role="tab" aria-selected={d === dialect} data-state={d === dialect ? 'active' : undefined} onClick={() => onDialect(d)}>
-                {DIALECT_NAMES[d]}
-              </button>
-            ))}
-          </div>
-        )}
+        {dialects.length > 1 && <Switch dialects={dialects} dialect={dialect} onDialect={onDialect} />}
         <pre className="rh-code">
           <Code lines={variant.sql} tables={variant.tables} />
         </pre>
@@ -223,6 +216,42 @@ function Card({ variant, dialects, dialect, onDialect, tabs }: { variant: HomeVa
           </pre>
         </div>
       </div>
+    </div>
+  );
+}
+
+/** The docs' database switch (components/database-menu.tsx), over the card's own choice of dialect. */
+function Switch({ dialects, dialect, onDialect }: { dialects: Dialect[]; dialect: Dialect; onDialect: (d: Dialect) => void }) {
+  const { open, shut, trigger, menu } = useDatabaseMenu();
+  return (
+    <div className="reylo-db-switch rh-switch" data-open={open ? '' : undefined}>
+      <span className="reylo-db-value">
+        <DatabaseLogo name={DIALECT_NAMES[dialect]} />
+        {DIALECT_NAMES[dialect]}
+      </span>
+      <Chevron />
+      <button type="button" className="reylo-db-hit" aria-label={`Database: ${DIALECT_NAMES[dialect]}`} {...trigger} />
+      {menu(
+        <div role="listbox" aria-label="Database" className="reylo-db-list">
+          {dialects.map((d) => (
+            <button
+              key={d}
+              type="button"
+              role="option"
+              aria-selected={d === dialect}
+              data-state={d === dialect ? 'active' : undefined}
+              onClick={(e) => {
+                onDialect(d);
+                shut(e);
+              }}
+            >
+              <DatabaseLogo name={DIALECT_NAMES[d]} />
+              <span>{DIALECT_NAMES[d]}</span>
+              <Check />
+            </button>
+          ))}
+        </div>,
+      )}
     </div>
   );
 }
