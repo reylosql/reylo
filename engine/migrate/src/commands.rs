@@ -5051,8 +5051,8 @@ async fn pending_findings(shadows: &mut Shadows<'_>, target: &mut Db, ran: &[Mig
     // read for a check only where none of it reaches the columns the check reads, and a check one
     // reaches is said to be left unchecked.
     let mut writes: Vec<Write> = Vec::new();
-    // The MySQL columns, `(table, column)`, whose type a pending migration so far changes, whose
-    // values then reach a later migration converted.
+    // The MySQL columns, `(table, column)`, whose type, generation or character set a pending
+    // migration so far changes, whose values then reach a later migration converted.
     let mut converted: BTreeSet<(String, String)> = BTreeSet::new();
     // The tables and columns a pending statement drops or renames, so that one made again under the
     // name holds none of the target's values: MySQL's catalog can show a column dropped and added
@@ -5112,7 +5112,8 @@ async fn pending_findings(shadows: &mut Shadows<'_>, target: &mut Db, ran: &[Mig
             let Some(is) = tables_now.get(table).filter(|is| oid(is) == oid(was) && !gone_tables.contains(&bare(table))) else { continue };
             let retyped: Vec<String> = was.columns.iter().filter(|(c, t)| is.columns.get(*c).is_some_and(|n| n != *t)).map(|(c, _)| c.clone()).collect();
             if d == Dialect::Mysql {
-                converted.extend(retyped.iter().filter(|c| is.columns.get(*c).zip(was.columns.get(*c)).is_some_and(|(n, t)| mysql_column(n).0 != mysql_column(t).0)).map(|c| (table.clone(), c.clone())));
+                let charset = |identity: &str| mysql_column(identity).1.split('_').next().unwrap_or_default().to_string();
+                converted.extend(retyped.iter().filter(|c| is.columns.get(*c).zip(was.columns.get(*c)).is_some_and(|(n, t)| mysql_column(n).0 != mysql_column(t).0 || charset(n) != charset(t))).map(|c| (table.clone(), c.clone())));
             }
             if !retyped.is_empty() {
                 writes.push(Write { by: m.name.clone(), table: Some(table.clone()), oid: Some(oid(is)).filter(|o| !o.is_empty()), columns: Some(retyped), retyped: true, reads: true });
@@ -5185,7 +5186,7 @@ async fn pending_findings(shadows: &mut Shadows<'_>, target: &mut Db, ran: &[Mig
             // deploy meets. A foreign key is read where a migration adds it back: one in place can't
             // have had its columns re-collated under key checks, which MySQL refuses, so nothing
             // checks it then. A unique key is read too where this migration's change rebuilds it.
-            let added = !checks.contains_key(key);
+            let added = !checks.contains_key(key) || (d == Dialect::Mysql && check.parent.is_some() && drops_foreign_key(&m.sql, &check.ident, &check.name));
             let rebuilt = matches!(check.kind, RowCheckKind::Keys(_)) && writes.iter().any(|w| w.by == m.name && w.retyped && w.reaches(check));
             let recollated = (d == Dialect::Mysql && (added || rebuilt) && own == Standing::Held && parent.is_none_or(|p| p == Standing::Held) && reached.is_some() && writes.iter().filter(|w| w.reaches(check)).all(|w| w.retyped))
                 .then(|| recollated_rows(check, &tables_here, &tables_now, &converted))
@@ -5868,7 +5869,9 @@ async fn table_identities(db: &mut Db) -> BTreeMap<String, TableIdentity> {
         }
         Dialect::Mysql => (
             "select table_name as t, '' as i from information_schema.tables where table_schema = database() and table_type = 'BASE TABLE'".to_string(),
-            "select table_name as t, lower(column_name) as c, concat(column_type, ' ', coalesce(collation_name, '')) as i from information_schema.columns where table_schema = database()".to_string(),
+            // A generated column's expression too, as a digest with no space in it: a new one writes
+            // its values again.
+            "select table_name as t, lower(column_name) as c, concat(column_type, if(generation_expression <> '', concat(' generated ', md5(generation_expression)), ''), ' ', coalesce(collation_name, '')) as i from information_schema.columns where table_schema = database()".to_string(),
         ),
         Dialect::Sqlite => return BTreeMap::new(),
     };
@@ -5943,8 +5946,19 @@ async fn read_rows(target: &mut Db, query: String, repeats: bool) -> RowRead {
     }
 }
 
-/// A MySQL column's identity ([`table_identities`]) in its parts: its type and its collation, empty
-/// for a type without one.
+/// Whether a MySQL migration drops the foreign key `name` of `table`, as one that drops and adds it
+/// again in one file (under `lock tables`) does, leaving the key as it was at the file's ends.
+#[cfg(feature = "cli")]
+fn drops_foreign_key(sql: &str, table: &str, name: &str) -> bool {
+    split_statements(sql, Dialect::Mysql).iter().any(|s| {
+        let t = &s.tokens;
+        let named = |k: usize, n: &str| t.get(k).is_some_and(|w| unquoted(&crate::sql::last_written(&w.text), Dialect::Mysql).eq_ignore_ascii_case(n));
+        t.len() > 2 && t[0].upper() == "ALTER" && t[1].upper() == "TABLE" && named(2, table) && t.windows(3).enumerate().any(|(k, w)| w[0].upper() == "DROP" && w[1].upper() == "FOREIGN" && w[2].upper() == "KEY" && named(k + 3, name))
+    })
+}
+
+/// A MySQL column's identity ([`table_identities`]) in its parts: its type (with a digest of its
+/// generation where it has one) and its collation, empty for a type without one.
 #[cfg(feature = "cli")]
 fn mysql_column(identity: &str) -> (&str, &str) {
     identity.rsplit_once(' ').unwrap_or((identity, ""))

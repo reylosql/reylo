@@ -587,6 +587,12 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
                 create: vec![format!("alter table {q} add {clause}")],
                 drop: vec![drop],
                 deps,
+                extra: tokenize(&clause, Dialect::Mysql)
+                    .windows(2)
+                    .any(|w| w[0].upper() == "SET" && w[1].upper() == "NULL")
+                    .then(|| format!("{SETS_NULL}{}", json!(fk.cols.iter().map(|c| format!("column {name}.{c}")).collect::<Vec<_>>())))
+                    .into_iter()
+                    .collect(),
                 ..Object::default()
             });
         }
@@ -1282,12 +1288,11 @@ fn alter_table(from: &Body, to: &Body, pairs: &[(String, String)], made: &BTreeS
     // foreign key would make only after.
     let counts: Vec<&String> = to.columns.iter().filter(|c| c.counts() && from.column(&c.name).is_none_or(|was| !was.counts())).map(|c| &c.name).collect();
     let keys_a_count = |def: &str| counts.iter().any(|c| reads(def, c));
-    // The NOT NULL steps [`held_columns`] writes: those a key's `set null` holds back (`late`) wait
-    // here for the key's drop; the others go in a statement of their own, which the alterer moves to
-    // the start of the plan.
-    let held = held_columns(from, to, &pairs);
-    first.extend(held.iter().filter(|(c, _)| late.contains(c)).map(|(_, clause)| clause.clone()));
-    let early: Vec<String> = held.into_iter().filter(|(c, _)| !late.contains(c)).map(|(_, clause)| clause).collect();
+    // The NOT NULL steps [`held_columns`] writes, each set in a statement of its own: those a key holds
+    // back (`late`), which the alterer joins to the key's drop, and the others, which it moves to the
+    // start of the plan.
+    let (late, early): (Vec<(String, String)>, Vec<(String, String)>) = held_columns(from, to, &pairs).into_iter().partition(|(c, _)| late.contains(c));
+    let (late, early): (Vec<String>, Vec<String>) = (late.into_iter().map(|(_, clause)| clause).collect(), early.into_iter().map(|(_, clause)| clause).collect());
     for (name, _, def) in to.indexes.iter().filter(|(n, _, d)| swaps || !made.contains(n) || keys_a_count(d)) {
         let was = from.indexes.iter().find(|(n, _, _)| n == name);
         if was.is_some_and(|(_, _, d)| seen_only(&index_now(d), def) && !indexes_on(d)) {
@@ -1336,6 +1341,9 @@ fn alter_table(from: &Body, to: &Body, pairs: &[(String, String)], made: &BTreeS
     }
     if !first.is_empty() {
         out.push(format!("alter table {} {}", to.q, first.join(", ")));
+    }
+    if !late.is_empty() {
+        out.push(format!("alter table {} {}", to.q, late.join(", ")));
     }
     // A partition taken out of a range or list table is dropped with its rows, first, in place:
     // what follows partitions what is left.
@@ -1499,6 +1507,9 @@ fn partitions_changed(old: &str, new: &str) -> Option<String> {
 /// What a table and its columns carry beside the body: the names of the table's foreign keys, and
 /// of the indexes those keys made for themselves, each a JSON list.
 const KEYS: &str = "foreign keys ";
+/// A foreign key's line naming the columns it sets null, each `column <table>.<column>`, which MySQL
+/// won't make NOT NULL while the key stands.
+const SETS_NULL: &str = "sets null ";
 const OWN: &str = "indexes of keys ";
 
 /// The indexes a new foreign key makes as it is added, which the table's own change leaves to it.
@@ -1522,6 +1533,8 @@ pub struct MysqlAlterer {
     /// Each NOT NULL step a table's statements start with, as written there and as the start of the
     /// plan writes it, under the table's name before any rename.
     early: std::cell::RefCell<Vec<(String, String)>>,
+    /// Each NOT NULL step a key holds back, as written, and its table as a statement names it.
+    late: std::cell::RefCell<Vec<(String, String)>>,
 }
 
 impl MysqlAlterer {
@@ -1535,7 +1548,8 @@ impl MysqlAlterer {
     /// with its NOT NULL step ([`held_columns`]) kept for [`Alterer::finish`] to move to the start of
     /// the plan: there it fails on a NULL before anything else runs, a foreign key's drop included,
     /// which MySQL commits on its own. A column under a key that sets it null keeps its step in
-    /// place, after the key's drop.
+    /// place, after the key's drop, and joins that drop's statement where it is of the same table,
+    /// which MySQL runs as one: a NULL then fails it with the key still in place.
     fn table_statements(&self, table: &str, from: &Body, to: &Body, pairs: &[(String, String)], made: &BTreeSet<String>) -> Vec<String> {
         let set_null = self.set_null.borrow();
         let held = held_columns(from, to, pairs);
@@ -1550,6 +1564,14 @@ impl MysqlAlterer {
             let mut kept = self.early.borrow_mut();
             if !kept.contains(&moved) {
                 kept.push(moved);
+            }
+        }
+        let held_back: Vec<&str> = held.iter().filter(|(c, _)| late.contains(c)).map(|(_, clause)| clause.as_str()).collect();
+        if !held_back.is_empty() {
+            let joined = (format!("alter table {} {}", to.q, held_back.join(", ")), to.q.clone());
+            let mut kept = self.late.borrow_mut();
+            if !kept.contains(&joined) {
+                kept.push(joined);
             }
         }
         alter_table(from, to, pairs, made, &late)
@@ -1790,22 +1812,12 @@ impl Alterer for MysqlAlterer {
             .collect();
         *self.swaps.borrow_mut() = swaps;
         *self.early.borrow_mut() = Vec::new();
-        let sets_null = |o: &Object| tokenize(&o.def, Dialect::Mysql).windows(2).any(|w| w[0].upper() == "SET" && w[1].upper() == "NULL");
-        // A key's own table: the longest whose name its id opens with (`foreign key <table>.<key>`),
-        // either of which may hold a dot.
-        let tables: Vec<&str> = from.objects.keys().filter_map(|id| id.strip_prefix("table ")).collect();
-        *self.set_null.borrow_mut() = from
-            .objects
-            .values()
-            .filter(|o| o.kind == Some(Kind::Constraint) && sets_null(o))
-            .flat_map(|o| {
-                let own = tables.iter().filter(|t| o.id.starts_with(&format!("foreign key {t}."))).max_by_key(|t| t.len()).map(|t| format!("column {t}.")).unwrap_or_default();
-                o.deps.iter().filter(|d| !own.is_empty() && d.starts_with(&own)).cloned().collect::<Vec<_>>()
-            })
-            .collect();
+        *self.late.borrow_mut() = Vec::new();
+        *self.set_null.borrow_mut() = from.objects.values().flat_map(|o| o.extra.iter().filter_map(|l| l.strip_prefix(SETS_NULL)).flat_map(|l| serde_json::from_str::<Vec<String>>(l).unwrap_or_default())).collect();
     }
 
-    /// The NOT NULL steps a table's change starts with go first ([`MysqlAlterer::table_statements`]);
+    /// The NOT NULL steps a table's change starts with go first, or join a key's drop where the key
+    /// holds them back ([`MysqlAlterer::table_statements`]);
     /// a trigger dropped and made again goes under `lock tables` ([`lock_swaps`]); then the
     /// privileges granted (or revoked) on one object to one account, which MySQL takes in one
     /// statement, written as one where the plan has them one after another: `grant select, update
@@ -1820,6 +1832,15 @@ impl Alterer for MysqlAlterer {
             }
         }
         statements.splice(0..0, front);
+        for (here, table) in self.late.borrow().iter() {
+            let Some(at) = statements.iter().position(|s| s == here) else { continue };
+            let drop = format!("alter table {table} drop foreign key ");
+            if let Some(key) = statements[..at].iter().rposition(|s| s.starts_with(&drop)) {
+                let clauses = here[format!("alter table {table} ").len()..].to_string();
+                statements.remove(at);
+                statements[key] = format!("{}, {clauses}", statements[key]);
+            }
+        }
         lock_swaps(&self.swaps.borrow(), statements);
         // Each statement, or a run of grants (or of revokes) on one object to one account.
         let mut runs: Vec<(String, Option<(bool, Vec<String>, String)>)> = Vec::new();
