@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import { DatabaseSync } from "node:sqlite";
 import { join } from "node:path";
-import { mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
 import { defineQuery, type MysqlClient, type MysqlCode, type MysqlNarrowing, type MysqlQueryError, type PostgresClient, type PostgresCondition, type PostgresNarrowing, type PostgresQueryError, type Query, type SqliteCode, type SqliteNarrowing, type SqliteQueryError } from "../src/index.ts";
@@ -477,3 +477,13 @@ export async function types(pg: Query<{}, { id: number }, "one", "postgres">, my
     if (c.error.code === "SQLITE_CONSTRAINT_UNIQ") {}
   }
 }
+
+test("every MySQL message of the shared list names what the oracle reads", async () => {
+  // oracle/src/errors.rs reads the same list, so the two readers can't drift apart.
+  const cases: { errno: number; message: string; names: Record<string, string> }[] = JSON.parse(readFileSync(join(import.meta.dirname, "mysql-error-names.json"), "utf8"));
+  for (const { errno, message, names } of cases) {
+    const error = (await readMysqlError(thrown(message, { errno, sqlState: "HY000", sqlMessage: message }))) as unknown as Record<string, unknown>;
+    const read = Object.fromEntries(["key", "constraint", "table", "column"].filter((f) => error[f] !== undefined).map((f) => [f, error[f]]));
+    assert.deepEqual(read, names, message);
+  }
+});

@@ -84,11 +84,18 @@ fn mysql_fields(errno: u16, message: &str) -> Vec<(&'static str, String)> {
         3819 => out.extend(between("Check constraint '", "' is violated.").map(|c| ("constraint", c))),
         1048 => out.extend(between("Column '", "' cannot be null").map(|c| ("column", c))),
         1364 => out.extend(between("Field '", "' doesn't have a default value").map(|c| ("column", c))),
+        // A value no column holds, as a cast's, is named `(null)`. A column's name may hold any text,
+        // so it is read between the message's fixed words; where the value comes first, as it may
+        // hold the same words, the column is the last match (src/query-error.ts reads them alike).
         1264 | 1265 | 1292 | 1366 | 1406 => {
-            if let (Some(at), Some(row)) = (message.rfind(" for column '"), message.rfind("' at row ")) {
-                // A value no column holds, as a cast's, is named `(null)`.
-                if row > at && message[row + 9..].bytes().all(|b| b.is_ascii_digit()) && &message[at + 13..row] != "(null)" {
-                    out.push(("column", message[at + 13..row].to_string()));
+            let fixed = ["Out of range value for column '", "Data truncated for column '", "Data too long for column '"];
+            let at = match errno {
+                1292 | 1366 => message.rfind(" for column '").map(|at| at + 13),
+                _ => fixed.iter().find_map(|p| message.starts_with(p).then_some(p.len())),
+            };
+            if let (Some(at), Some(row)) = (at, message.rfind("' at row ")) {
+                if row >= at && row + 9 < message.len() && message[row + 9..].bytes().all(|b| b.is_ascii_digit()) && &message[at..row] != "(null)" {
+                    out.push(("column", message[at..row].to_string()));
                 }
             }
         }
@@ -254,6 +261,18 @@ mod tests {
         let errors = serde_json::json!({ "ER_DUP_ENTRY": { "key": ["t.PRIMARY", "t.email"] } });
         assert_eq!(mysql_contradiction(&errors, 1062, "Duplicate entry 'a' for key 't.email'"), None);
         assert!(mysql_contradiction(&errors, 1062, "Duplicate entry 'a' for key 'u.email'").is_some());
+    }
+
+    /// The messages the run time's reader is held to as well (tests/query-error.test.ts).
+    #[test]
+    fn every_mysql_message_of_the_shared_list_names_what_the_run_time_reads() {
+        let cases: Vec<Value> = serde_json::from_str(include_str!("../../tests/mysql-error-names.json")).unwrap();
+        for case in cases {
+            let message = case["message"].as_str().unwrap();
+            let read: std::collections::BTreeMap<String, String> = mysql_fields(case["errno"].as_u64().unwrap() as u16, message).into_iter().map(|(f, n)| (f.to_string(), n)).collect();
+            let names: std::collections::BTreeMap<String, String> = serde_json::from_value(case["names"].clone()).unwrap();
+            assert_eq!(read, names, "{message}");
+        }
     }
 
     #[test]
