@@ -21,7 +21,7 @@ export type { ClickhouseClient, ClientFor, Dialect, Inputs, MysqlClient, Postgre
 export type { QueryTrace } from "./trace.ts";
 export type { StandardQueryV1 } from "./standard-query.ts";
 export { checks } from "./checks.ts";
-export { migrate, type MigrationStorage } from "./migrate.ts";
+export { migrate, type MigrationStorage, type MigrationConnection } from "./migrate.ts";
 export type { MigrateOptions } from "./build-time.ts";
 export type { AnalyzeInput } from "./build-time.ts";
 export type * as TypeDefs from "../spec/index.ts";

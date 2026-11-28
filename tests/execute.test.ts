@@ -1484,6 +1484,95 @@ test("postgres: an array of a domain over an array type comes back as whole arra
   }
 });
 
+test("postgres: an array a row value's field holds is held to one dimension on pg, postgres.js and PGlite, as an array column is, and nests under allow_nested_arrays", { skip: pgLive }, async () => {
+  const setup = "create type pair as (a int4, b int4[]); create type outer_pair as (inner_pair pair); create domain pairs as pair[]";
+  const own = await postgresDatabase("reylo_execute_row_fields", setup);
+  const pg = driver("pg");
+  const client = new pg.Client(own.url);
+  await client.connect();
+  const { PGlite } = driver("@electric-sql/pglite");
+  const lite = new PGlite();
+  await lite.exec(setup);
+  const int4 = { ...pgType("int4"), label: "int4" } as EngineType;
+  const pair = record([field("a", int4), field("b", array(int4, true, "_int4"))], "public.pair");
+  const outer = record([field("inner_pair", pair)], "public.outer_pair");
+  // `pairs[]`, its domain written as its base, `_pair`, as the loader writes it.
+  const pairs = array(array(pair, true, "_pair"), true, "public._pairs");
+  const read = (sql: string, type: EngineType, nestedArrays = false) => defineQuery({ dialect: "postgres", sql: `select ${sql} as v`, params: [], cardinality: "one", columns: [["v", columnKind(type, "postgres")]], nestedArrays });
+  try {
+    for (const [name, c] of [["pg", client], ["postgres.js", own.sql], ["PGlite", lite]] as const) {
+      assert.deepEqual({ ...((await read("row(1, '{1,2}')::pair", pair).run(c as never)) as object) }, { v: { a: 1, b: [1, 2] } }, name);
+      await assert.rejects(async () => read("row(1, '{{1,2}}')::pair", pair).run(c as never), /Column "v" holds, in its row value's field "b", an array of 2 dimensions, and its type has one/, name);
+      await assert.rejects(async () => read("array[null, row(1, '{{1}}')::pair]", array(pair, true, "public._pair")).run(c as never), /Column "v" holds, in its row value's field "b", an array of 2 dimensions/, name);
+      await assert.rejects(async () => read("row(row(1, '{{{1}}}')::pair)::outer_pair", outer).run(c as never), /Column "v" holds, in its row value's field "inner_pair\.b", an array of 3 dimensions/, name);
+      // An array of a domain over an array of rows holds each row's fields to their kinds too.
+      await assert.rejects(async () => read("array[array[row(1, '{{1,2}}')::pair]::pairs]", pairs).run(c as never), /Column "v" holds, in its row value's field "b", an array of 2 dimensions/, name);
+      assert.deepEqual({ ...((await read("row(1, '{{1,2}}')::pair", pair, true).run(c as never)) as object) }, { v: { a: 1, b: [[1, 2]] } }, `${name}, nesting`);
+    }
+  } finally {
+    await client.end();
+    await lite.close();
+    await own.drop();
+  }
+});
+
+test("postgres: a jsonb[] has one dimension on pg, postgres.js and PGlite, under allow_nested_arrays too, and what it returns goes back in unchanged", { skip: pgLive }, async () => {
+  const own = await postgresDatabase("reylo_execute_jsonb_arrays", "create table t (id int4 primary key, docs jsonb[]); create domain doc_list as jsonb[]; insert into t values (1, '{\"[1,2]\",\"[3,4]\"}'), (2, '{{1,2},{3,4}}')");
+  const pg = driver("pg");
+  const client = new pg.Client(own.url);
+  await client.connect();
+  const { PGlite } = driver("@electric-sql/pglite");
+  const lite = new PGlite();
+  await lite.exec("create table t (id int4 primary key, docs jsonb[]); create domain doc_list as jsonb[]; insert into t values (1, '{\"[1,2]\",\"[3,4]\"}'), (2, '{{1,2},{3,4}}')");
+  const docs = array({ kind: "json", label: "jsonb" } as EngineType, true, "_jsonb");
+  try {
+    for (const nestedArrays of [false, true]) {
+      const read = defineQuery({ dialect: "postgres", sql: "select docs from t where id = $1", params: ["id"], cardinality: "one", inputs: { id: { type: pgType("int4") } }, columns: [["docs", "json[]"]], nestedArrays });
+      const write = defineQuery({ dialect: "postgres", sql: "update t set docs = $2 where id = $1 returning docs::text as text", params: ["id", "docs"], cardinality: "one", inputs: { id: { type: pgType("int4") }, docs: { type: docs } }, columns: [["text", "text"]], nestedArrays });
+      for (const [name, c] of [["pg", client], ["postgres.js", own.sql], ["PGlite", lite]] as const) {
+        const one = (await read.run(c as never, { id: 1 })) as { docs: unknown };
+        assert.deepEqual(one.docs, [[1, 2], [3, 4]], name);
+        assert.deepEqual({ ...((await write.run(c as never, { id: 1, docs: one.docs })) as object) }, { text: '{"[1, 2]","[3, 4]"}' }, `${name}, written back`);
+        await assert.rejects(async () => read.run(c as never, { id: 2 }), /Column "docs" holds an array of 2 dimensions, and its type has one/, `${name}, nestedArrays ${nestedArrays}`);
+        // An array of a domain over jsonb[] holds each whole array to one dimension too.
+        const lists = defineQuery({ dialect: "postgres", sql: "select array['{{1,2},{3,4}}'::doc_list] as docs", params: [], cardinality: "one", columns: [["docs", "{json[]}[]"]], nestedArrays });
+        await assert.rejects(async () => lists.run(c as never), /Column "docs" holds an array of 2 dimensions, and its type has one/, `${name}, a domain's, nestedArrays ${nestedArrays}`);
+      }
+    }
+    // PGlite parses an array of a type it learned by refreshArrayTypes() itself on a statement's first run in a transaction, where Reylo names no parser: the same as on later runs.
+    await lite.exec(`create domain review_doc as jsonb; create table r (id int4, docs review_doc[]); insert into r values (1, '{{1,2},{3,4}}'), (2, '{"1","\\"false\\""}')`);
+    await lite.refreshArrayTypes();
+    for (const run of ["first", "later"]) {
+      await lite.transaction(async (tx: never) => {
+        for (const id of [1, 2]) {
+          const q = defineQuery({ dialect: "postgres", sql: `select docs from r where id = ${id} and ${run === "first" ? "true" : "1 = 1"}`, params: [], cardinality: "one", columns: [["docs", "json[]"]] });
+          if (run === "later") await q.run(tx).catch(() => {});
+          if (id === 1) await assert.rejects(async () => q.run(tx), /Column "docs" holds an array of 2 dimensions, and its type has one/, `PGlite, a transaction's ${run} run`);
+          else assert.deepEqual({ ...((await q.run(tx)) as object) }, { docs: [1, "false"] }, `PGlite, a transaction's ${run} run`);
+        }
+      });
+    }
+    // A statement warmed on one result whose same text then reads a built-in jsonb[], as another search_path makes it, is read by PGlite's own parser, which decodes each value.
+    await lite.exec(`create schema other; create table other.r (id int4, docs jsonb[]); insert into other.r values (3, '{"[1,2]"}'), (4, '{{1,2},{3,4}}')`);
+    const moved = defineQuery({ dialect: "postgres", sql: "select docs from r where id in (2, 3)", params: [], cardinality: "one", columns: [["docs", "json[]"]] });
+    await lite.transaction(async (tx: never) => {
+      assert.deepEqual({ ...((await moved.run(tx)) as object) }, { docs: [1, "false"] }, "PGlite, warmed on the domain's array");
+      await (tx as { exec(sql: string): Promise<unknown> }).exec("set local search_path = other");
+      assert.deepEqual({ ...((await moved.run(tx)) as object) }, { docs: [[1, 2]] }, "PGlite, then a built-in jsonb[]");
+    });
+    const deeper = defineQuery({ dialect: "postgres", sql: "select docs from r where id in (2, 4)", params: [], cardinality: "one", columns: [["docs", "json[]"]] });
+    await lite.transaction(async (tx: never) => {
+      await deeper.run(tx);
+      await (tx as { exec(sql: string): Promise<unknown> }).exec("set local search_path = other");
+      await assert.rejects(async () => deeper.run(tx), /Column "docs" holds an array of 2 dimensions, and its type has one/, "PGlite, then a built-in jsonb[] of 2 dimensions");
+    });
+  } finally {
+    await client.end();
+    await lite.close();
+    await own.drop();
+  }
+});
+
 test("postgres: under allow_nested_arrays, an array of every element whose value is an array or an object comes back and goes back in at depths 1 to 3 on pg, postgres.js and PGlite", { skip: pgLive }, async () => {
   const own = await postgresDatabase("reylo_execute_nested_arrays");
   const pg = driver("pg");

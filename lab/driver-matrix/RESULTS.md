@@ -2,7 +2,7 @@
 
 Generated 2026-11-27T02:15:38.192Z by `./run.sh` against the working tree at fd4bd1771 (uncommitted changes in src/: no; src/execute.ts dff24a17e159, src/index.ts 0fec96da0d83). The report and the diagnoses are in [README.md](README.md).
 
-6643 rows: 6501 pass, 60 fail, 63 unsupported (reylo refuses them with its own TypeError, as its contract says), 16 skip, 3 not run. Failing controls: 32 of 127 control rows fail, as designed.
+6561 rows: 6424 pass, 60 fail, 63 unsupported (reylo refuses them with its own TypeError, as its contract says), 11 skip, 3 not run. Failing controls: 32 of 127 control rows fail, as designed.
 
 ## Per job
 
@@ -71,8 +71,6 @@ Generated 2026-11-27T02:15:38.192Z by `./run.sh` against the working tree at fd4
 | @tursodatabase/database/compat@0.7.2 | node 26.11.1 | SQLite file (Turso's engine) | 28 | 0 | 0 | 1 | 0 |
 | @tursodatabase/database@0.6.1 | node 26.11.1 | SQLite file (Turso's engine) | 53 | 0 | 0 | 0 | 0 |
 | @tursodatabase/database/compat@0.6.1 | node 26.11.1 | SQLite file (Turso's engine) | 28 | 0 | 0 | 1 | 0 |
-| @tursodatabase/database@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | 50 | 0 | 0 | 3 | 0 |
-| @tursodatabase/database/compat@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | 27 | 0 | 0 | 2 | 0 |
 | sqlite3@5.1.7 | node 26.11.1 | SQLite file | 53 | 0 | 0 | 0 | 0 |
 | sqlite@5.1.1 | node 26.11.1 | SQLite file (over sqlite3 5.1.7) | 53 | 0 | 0 | 0 | 0 |
 | sqlite3@6.0.1 | node 26.11.1 | SQLite file | 53 | 0 | 0 | 0 | 0 |
@@ -6454,88 +6452,6 @@ Deliberately broken clients (drivers/control.ts). Every row marked FAIL here is 
 | @tursodatabase/database/compat@0.6.1 | node 26.11.1 | SQLite file (Turso's engine) | compat db.transaction(fn) | S7c tx: savepoint rollback keeps the outer write | SKIP | the compat Database's db.transaction(fn) inside another fails ("cannot start a transaction within a transaction"), where better-sqlite3's runs as a savepoint |
 | @tursodatabase/database/compat@0.6.1 | node 26.11.1 | SQLite file (Turso's engine) | compat db.transaction(fn) | S7d tx: a failing statement rolls the transaction back | pass | Error: step failed: Runtime error: UNIQUE constraint failed: uniq.k (19) [code=GenericFailure] (matched by message: the error carries no code field) |
 | @tursodatabase/database/compat@0.6.1 | node 26.11.1 | SQLite file (Turso's engine) | compat db.transaction(fn) | S7e tx: a read inside transaction(fn) is usable synchronously | pass |  |
-| @tursodatabase/database@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | Database (connect()) | S0 run() returns a promise on every client; runSync() returns the value on a sync client and is refused elsewhere | pass | reylo called prepare(); run returned a promise and rejected on a failing statement; runSync refused the client before calling it |
-| @tursodatabase/database@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | Database (connect()) | S1a params: int, text, bool, null | pass |  |
-| @tursodatabase/database@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | Database (connect()) | S1b omitted param (undefined) binds NULL | pass |  |
-| @tursodatabase/database@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | Database (connect()) | S1c binary params: a plain Uint8Array and a view into a larger buffer bind as their bytes | pass |  |
-| @tursodatabase/database@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | Database (connect()) | S1i JSON null: a JSON parameter the statement takes no null for is stored as JSON's null for null, and is refused when left out | pass |  |
-| @tursodatabase/database@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | Database (connect()) | S2a many: 3 rows | pass |  |
-| @tursodatabase/database@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | Database (connect()) | S2b one: the row | pass |  |
-| @tursodatabase/database@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | Database (connect()) | S2c maybeOne: zero rows gives null | pass |  |
-| @tursodatabase/database@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | Database (connect()) | S2d maybeOne: two rows throw reylo's error | pass |  |
-| @tursodatabase/database@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | Database (connect()) | S2e with(client)(params) | pass |  |
-| @tursodatabase/database@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | Database (connect()) | S3 write without RETURNING (none), then a separate read | pass |  |
-| @tursodatabase/database@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | Database (connect()) | S3n write without parameters (none), then a separate read | pass |  |
-| @tursodatabase/database@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | Database (connect()) | S4 INSERT ... RETURNING | pass |  |
-| @tursodatabase/database@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | Database (connect()) | S5a repeated :id (runtime lexer) | pass |  |
-| @tursodatabase/database@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | Database (connect()) | S5b repeated :id (mapper text/order) | pass |  |
-| @tursodatabase/database@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | Database (connect()) | S6a syntax error rejects with the driver's error | pass | SqliteError: prepare failed: unexpected token 'selec' at offset 0 [code=GenericFailure] (matched by message: the error carries no code field) |
-| @tursodatabase/database@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | Database (connect()) | S6b unique violation rejects with the driver's error | pass | Error: step failed: Runtime error: UNIQUE constraint failed: uniq.k (19) [code=GenericFailure] (matched by message: the error carries no code field) |
-| @tursodatabase/database@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | Database (connect()) | S6c try: a unique violation resolves to the database's error, read the same on every driver | pass | QueryError code=SQLITE_CONSTRAINT errcode=19 table=uniq columns=k: UNIQUE constraint failed: uniq.k |
-| @tursodatabase/database@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | Database (connect()) | S6d try: rows resolve to the value; Reylo's own error rejects; a syntax error resolves to the database's error | pass | QueryError code=undefined errcode=undefined: unexpected token 'selec' at offset 0 |
-| @tursodatabase/database@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | Database (connect()) | S10 representation: every value is Reylo's one type for its SQL type, whatever the driver gives by itself | pass | Column "big" holds an integer past ±(2^53 - 1), which the driver already rounded to 9007199254740992: a number cannot ho |
-| @tursodatabase/database@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | Database (connect()) | S10j built JSON: SQLite's text of the JSON a statement builds is parsed into the object its type says, other JSON text stays a string | SKIP | Turso 0.4 answers json_group_array over no rows with NULL, where SQLite and Turso 0.6 and later answer [] |
-| @tursodatabase/database@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | Database (connect()) | S11 round trip: the row S10 returns goes back in as the parameters it came from, every column equal | pass |  |
-| @tursodatabase/database@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | Database (connect()) | S11c round trip: a number JSON has none for, inside JSON a statement builds, goes back in as a JSON parameter as its database's JSON holds it | pass |  |
-| @tursodatabase/database@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | Database (connect()) | S8 20 concurrent queries resolve with the right rows | pass |  |
-| @tursodatabase/database@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | Database in BEGIN/COMMIT (exec) | S0 run() returns a promise on every client; runSync() returns the value on a sync client and is refused elsewhere | pass | reylo called prepare(); run returned a promise and rejected on a failing statement; runSync refused the client before calling it |
-| @tursodatabase/database@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | Database in BEGIN/COMMIT (exec) | S1a params: int, text, bool, null | pass |  |
-| @tursodatabase/database@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | Database in BEGIN/COMMIT (exec) | S1b omitted param (undefined) binds NULL | pass |  |
-| @tursodatabase/database@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | Database in BEGIN/COMMIT (exec) | S1c binary params: a plain Uint8Array and a view into a larger buffer bind as their bytes | pass |  |
-| @tursodatabase/database@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | Database in BEGIN/COMMIT (exec) | S1i JSON null: a JSON parameter the statement takes no null for is stored as JSON's null for null, and is refused when left out | pass |  |
-| @tursodatabase/database@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | Database in BEGIN/COMMIT (exec) | S2a many: 3 rows | pass |  |
-| @tursodatabase/database@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | Database in BEGIN/COMMIT (exec) | S2b one: the row | pass |  |
-| @tursodatabase/database@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | Database in BEGIN/COMMIT (exec) | S2c maybeOne: zero rows gives null | pass |  |
-| @tursodatabase/database@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | Database in BEGIN/COMMIT (exec) | S2d maybeOne: two rows throw reylo's error | pass |  |
-| @tursodatabase/database@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | Database in BEGIN/COMMIT (exec) | S2e with(client)(params) | pass |  |
-| @tursodatabase/database@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | Database in BEGIN/COMMIT (exec) | S3 write without RETURNING (none), then a separate read | pass |  |
-| @tursodatabase/database@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | Database in BEGIN/COMMIT (exec) | S3n write without parameters (none), then a separate read | pass |  |
-| @tursodatabase/database@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | Database in BEGIN/COMMIT (exec) | S4 INSERT ... RETURNING | pass |  |
-| @tursodatabase/database@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | Database in BEGIN/COMMIT (exec) | S5a repeated :id (runtime lexer) | pass |  |
-| @tursodatabase/database@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | Database in BEGIN/COMMIT (exec) | S5b repeated :id (mapper text/order) | pass |  |
-| @tursodatabase/database@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | Database in BEGIN/COMMIT (exec) | S6a syntax error rejects with the driver's error | pass | SqliteError: prepare failed: unexpected token 'selec' at offset 0 [code=GenericFailure] (matched by message: the error carries no code field) |
-| @tursodatabase/database@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | Database in BEGIN/COMMIT (exec) | S6b unique violation rejects with the driver's error | pass | Error: step failed: Runtime error: UNIQUE constraint failed: uniq.k (19) [code=GenericFailure] (matched by message: the error carries no code field) |
-| @tursodatabase/database@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | Database in BEGIN/COMMIT (exec) | S6c try: a unique violation resolves to the database's error, read the same on every driver | pass | QueryError code=SQLITE_CONSTRAINT errcode=19 table=uniq columns=k: UNIQUE constraint failed: uniq.k |
-| @tursodatabase/database@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | Database in BEGIN/COMMIT (exec) | S6d try: rows resolve to the value; Reylo's own error rejects; a syntax error resolves to the database's error | pass | QueryError code=undefined errcode=undefined: unexpected token 'selec' at offset 0 |
-| @tursodatabase/database@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | Database in BEGIN/COMMIT (exec) | S7a tx: write then commit is visible | pass |  |
-| @tursodatabase/database@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | Database in BEGIN/COMMIT (exec) | S7b tx: write then rollback is not visible | pass |  |
-| @tursodatabase/database@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | Database in BEGIN/COMMIT (exec) | S7c tx: savepoint rollback keeps the outer write | SKIP | Turso 0.4 has no SAVEPOINT ("SAVEPOINT not supported yet") |
-| @tursodatabase/database@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | Database in BEGIN/COMMIT (exec) | S7d tx: a failing statement rolls the transaction back | pass | Error: step failed: Runtime error: UNIQUE constraint failed: uniq.k (19) [code=GenericFailure] (matched by message: the error carries no code field) |
-| @tursodatabase/database@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | Database in BEGIN/COMMIT (exec) | S7n tx: a write without parameters, then commit, is visible | pass |  |
-| @tursodatabase/database@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | Database in BEGIN/COMMIT (exec) | S10 representation: every value is Reylo's one type for its SQL type, whatever the driver gives by itself | pass | Column "big" holds an integer past ±(2^53 - 1), which the driver already rounded to 9007199254740992: a number cannot ho |
-| @tursodatabase/database@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | Database in BEGIN/COMMIT (exec) | S10j built JSON: SQLite's text of the JSON a statement builds is parsed into the object its type says, other JSON text stays a string | SKIP | Turso 0.4 answers json_group_array over no rows with NULL, where SQLite and Turso 0.6 and later answer [] |
-| @tursodatabase/database@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | Database in BEGIN/COMMIT (exec) | S11 round trip: the row S10 returns goes back in as the parameters it came from, every column equal | pass |  |
-| @tursodatabase/database@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | Database in BEGIN/COMMIT (exec) | S11c round trip: a number JSON has none for, inside JSON a statement builds, goes back in as a JSON parameter as its database's JSON holds it | pass |  |
-| @tursodatabase/database@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | Database in BEGIN/COMMIT (exec) | S8 20 concurrent queries resolve with the right rows | pass |  |
-| @tursodatabase/database/compat@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | compat Database | S0 run() returns a promise on every client; runSync() returns the value on a sync client and is refused elsewhere | pass | reylo called prepare(); run returned a promise and rejected on a failing statement; runSync returned the value and threw |
-| @tursodatabase/database/compat@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | compat Database | S1a params: int, text, bool, null | pass |  |
-| @tursodatabase/database/compat@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | compat Database | S1b omitted param (undefined) binds NULL | pass |  |
-| @tursodatabase/database/compat@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | compat Database | S1c binary params: a plain Uint8Array and a view into a larger buffer bind as their bytes | pass |  |
-| @tursodatabase/database/compat@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | compat Database | S1i JSON null: a JSON parameter the statement takes no null for is stored as JSON's null for null, and is refused when left out | pass |  |
-| @tursodatabase/database/compat@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | compat Database | S2a many: 3 rows | pass |  |
-| @tursodatabase/database/compat@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | compat Database | S2b one: the row | pass |  |
-| @tursodatabase/database/compat@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | compat Database | S2c maybeOne: zero rows gives null | pass |  |
-| @tursodatabase/database/compat@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | compat Database | S2d maybeOne: two rows throw reylo's error | pass |  |
-| @tursodatabase/database/compat@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | compat Database | S2e with(client)(params) | pass |  |
-| @tursodatabase/database/compat@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | compat Database | S3 write without RETURNING (none), then a separate read | pass |  |
-| @tursodatabase/database/compat@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | compat Database | S3n write without parameters (none), then a separate read | pass |  |
-| @tursodatabase/database/compat@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | compat Database | S4 INSERT ... RETURNING | pass |  |
-| @tursodatabase/database/compat@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | compat Database | S5a repeated :id (runtime lexer) | pass |  |
-| @tursodatabase/database/compat@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | compat Database | S5b repeated :id (mapper text/order) | pass |  |
-| @tursodatabase/database/compat@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | compat Database | S6a syntax error rejects with the driver's error | pass | SqliteError: prepare failed: unexpected token 'selec' at offset 0 [code=GenericFailure] (matched by message: the error carries no code field) |
-| @tursodatabase/database/compat@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | compat Database | S6b unique violation rejects with the driver's error | pass | Error: step failed: Runtime error: UNIQUE constraint failed: uniq.k (19) [code=GenericFailure] (matched by message: the error carries no code field) |
-| @tursodatabase/database/compat@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | compat Database | S6c try: a unique violation resolves to the database's error, read the same on every driver | pass | QueryError code=SQLITE_CONSTRAINT errcode=19 table=uniq columns=k: UNIQUE constraint failed: uniq.k |
-| @tursodatabase/database/compat@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | compat Database | S6d try: rows resolve to the value; Reylo's own error rejects; a syntax error resolves to the database's error | pass | QueryError code=undefined errcode=undefined: unexpected token 'selec' at offset 0 |
-| @tursodatabase/database/compat@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | compat Database | S10 representation: every value is Reylo's one type for its SQL type, whatever the driver gives by itself | pass | Column "big" holds an integer past ±(2^53 - 1), which the driver already rounded to 9007199254740992: a number cannot ho |
-| @tursodatabase/database/compat@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | compat Database | S10j built JSON: SQLite's text of the JSON a statement builds is parsed into the object its type says, other JSON text stays a string | SKIP | Turso 0.4 answers json_group_array over no rows with NULL, where SQLite and Turso 0.6 and later answer [] |
-| @tursodatabase/database/compat@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | compat Database | S11 round trip: the row S10 returns goes back in as the parameters it came from, every column equal | pass |  |
-| @tursodatabase/database/compat@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | compat Database | S11c round trip: a number JSON has none for, inside JSON a statement builds, goes back in as a JSON parameter as its database's JSON holds it | pass |  |
-| @tursodatabase/database/compat@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | compat Database | S8 20 concurrent queries resolve with the right rows | pass |  |
-| @tursodatabase/database/compat@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | compat db.transaction(fn) | S7a tx: write then commit is visible | pass |  |
-| @tursodatabase/database/compat@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | compat db.transaction(fn) | S7b tx: write then rollback is not visible | pass |  |
-| @tursodatabase/database/compat@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | compat db.transaction(fn) | S7c tx: savepoint rollback keeps the outer write | SKIP | the compat Database's db.transaction(fn) inside another fails ("cannot start a transaction within a transaction"), where better-sqlite3's runs as a savepoint |
-| @tursodatabase/database/compat@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | compat db.transaction(fn) | S7d tx: a failing statement rolls the transaction back | pass | Error: step failed: Runtime error: UNIQUE constraint failed: uniq.k (19) [code=GenericFailure] (matched by message: the error carries no code field) |
-| @tursodatabase/database/compat@0.4.4 | node 26.11.1 | SQLite file (Turso's engine) | compat db.transaction(fn) | S7e tx: a read inside transaction(fn) is usable synchronously | pass |  |
 | sqlite3@5.1.7 | node 26.11.1 | SQLite file | Database | S0 run() returns a promise on every client; runSync() returns the value on a sync client and is refused elsewhere | pass | reylo called all(); run returned a promise and rejected on a failing statement; runSync refused the client before calling it |
 | sqlite3@5.1.7 | node 26.11.1 | SQLite file | Database | S1a params: int, text, bool, null | pass |  |
 | sqlite3@5.1.7 | node 26.11.1 | SQLite file | Database | S1b omitted param (undefined) binds NULL | pass |  |

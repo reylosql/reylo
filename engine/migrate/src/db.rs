@@ -799,12 +799,35 @@ pub fn transaction_pooler(url: &str, key: &str) -> Option<String> {
         return None;
     }
     let rest = &rest[host_start(rest)..];
-    let authority = rest[..rest.find(['/', '?', '#']).unwrap_or(rest.len())].to_ascii_lowercase();
-    let (host, port) = match authority.rsplit_once(':') {
-        Some((host, port)) if !port.contains(']') => (host, port.parse::<u16>().ok()),
-        _ => (authority.as_str(), None),
-    };
-    transaction_pooler_at(host, port, &shown_url(url), key)
+    let authority = rest[..rest.find(['/', '?']).unwrap_or(rest.len())].to_ascii_lowercase();
+    // The URL's hosts, each with its port where it writes one: an IPv6 address in brackets. An empty
+    // one keeps its place, as libpq pairs hosts and ports by position, and is no pooler.
+    let (mut hosts, mut ports): (Vec<String>, Vec<Option<String>>) = authority
+        .split(',')
+        .map(|chunk| match chunk.strip_prefix('[').and_then(|c| c.split_once(']')) {
+            Some((host, rest)) => (host.to_string(), rest.strip_prefix(':').map(String::from)),
+            None => chunk.split_once(':').map_or((chunk.to_string(), None), |(host, port)| (host.to_string(), Some(port.to_string()))),
+        })
+        .unzip();
+    // The query's hosts and ports replace the URL's own, as libpq reads them (a project's env files
+    // write their PGHOST and PGPORT there), and the driver tries each host in turn: every one is
+    // checked, with its own port or the one port.
+    let query = url.split_once('?').map_or("", |(_, q)| q);
+    let param = |name: &str| query.split('&').filter_map(|pair| pair.split_once('=')).filter(|(n, _)| crate::percent_decode(n) == name).map(|(_, v)| crate::percent_decode(v).to_ascii_lowercase()).last();
+    if let Some(given) = param("host") {
+        hosts = given.split(',').map(String::from).collect();
+        if param("port").is_none() && ports.len() != hosts.len() {
+            ports = vec![ports.into_iter().flatten().next(); hosts.len()];
+        }
+    }
+    if let Some(given) = param("port") {
+        ports = given.split(',').map(|p| Some(p.to_string())).collect();
+    }
+    let shown = shown_url(url);
+    hosts.iter().enumerate().find_map(|(i, host)| {
+        let port = ports.get(i).or(if ports.len() == 1 { ports.first() } else { None }).cloned().flatten().and_then(|p| p.parse::<u16>().ok());
+        transaction_pooler_at(host, port, &shown, key)
+    })
 }
 
 /// [`transaction_pooler`] of a host and port already parsed, as a driver's connect options hold them, with `shown` naming the connection in the message.
@@ -848,8 +871,9 @@ pub fn with_database(url: &str, name: &str) -> String {
         None => "",
     };
     // A `dbname` setting names the database over the path, as libpq and tokio-postgres read it: it
-    // would send a shadow's session to the target's own database.
-    let (query, fragment) = query.split_at(query.find('#').unwrap_or(query.len()));
+    // would send a shadow's session to the target's own database. They read a Postgres URL's query
+    // to its end, a `#` included, so a `dbname` after one counts too.
+    let (query, fragment) = if crate::postgres_scheme(url) { (query, "") } else { query.split_at(query.find('#').unwrap_or(query.len())) };
     let kept: Vec<&str> = query.strip_prefix('?').unwrap_or(query).split('&').filter(|pair| !pair.is_empty() && crate::percent_decode(pair.split('=').next().unwrap_or_default()) != "dbname").collect();
     let query = if kept.is_empty() { String::new() } else { format!("?{}", kept.join("&")) };
     format!("{}://{authority}/{name}{query}{fragment}", &url[..scheme_end])
@@ -1018,17 +1042,19 @@ pub(crate) fn pg_dump(url: &str, major: i64, args: &[String]) -> Result<String, 
 }
 
 /// The URL without its password, and the password, decoded.
+/// A `password` the query names is taken too, and wins over the login's, as libpq reads the URL.
 fn without_password(url: &str) -> (String, Option<String>) {
-    let Some(scheme_end) = url.find("://") else { return (url.to_string(), None) };
+    let (url, in_query) = crate::without_query_password(url);
+    let Some(scheme_end) = url.find("://") else { return (url, in_query) };
     let rest = &url[scheme_end + 3..];
     let at = host_start(rest);
     if at == 0 {
-        return (url.to_string(), None);
+        return (url.clone(), in_query);
     }
     let userinfo = &rest[..at - 1];
     match userinfo.split_once(':') {
-        Some((user, password)) => (format!("{}://{user}@{}", &url[..scheme_end], &rest[at..]), Some(crate::percent_decode(password))),
-        None => (url.to_string(), None),
+        Some((user, password)) => (format!("{}://{user}@{}", &url[..scheme_end], &rest[at..]), in_query.or_else(|| Some(crate::percent_decode(password)))),
+        None => (url.clone(), in_query),
     }
 }
 
@@ -2371,6 +2397,15 @@ mod url_tests {
         assert!(!neon.contains("secret"), "{neon}");
         let supabase = transaction_pooler("postgres://postgres.abc:secret@aws-1-us-east-1.pooler.supabase.com:6543/postgres", "shadow_url").expect("Supabase's transaction pooler");
         assert!(supabase.contains("port 5432") && supabase.ends_with("in shadow_url in .reylo.yaml") && !supabase.contains("secret"), "{supabase}");
+        // The query's port and host replace the URL's own, as a project's env files write PGPORT and PGHOST.
+        assert!(transaction_pooler("postgres://postgres.abc@aws-1-us-east-1.pooler.supabase.com/postgres?port=6543", "").is_some());
+        assert!(transaction_pooler("postgres://u@/neondb?host=ep-late-darkness-bb241gty-pooler.c-15.us-east-1.aws.neon.tech", "").is_some());
+        assert_eq!(transaction_pooler("postgres://postgres.abc@aws-1-us-east-1.pooler.supabase.com:6543/postgres?port=5432", ""), None);
+        // Each host the driver may try, with its own port or the one port.
+        assert!(transaction_pooler("postgres://u@/postgres?host=direct.example,aws-1-us-east-1.pooler.supabase.com&port=5432,6543", "").is_some());
+        assert!(transaction_pooler("postgres://u@/postgres?host=direct.example,aws-1-us-east-1.pooler.supabase.com&port=6543", "").is_some());
+        assert!(transaction_pooler("postgres://u@direct.example:5432,aws-1-us-east-1.pooler.supabase.com:6543/postgres", "").is_some());
+        assert!(transaction_pooler("postgres://u@,aws-1-us-east-1.pooler.supabase.com/postgres?port=5432,6543", "").is_some());
         // An app's own pool has no project file's key to name.
         let pool = transaction_pooler("postgres://neondb_owner@ep-late-darkness-bb241gty-pooler.c-15.us-east-1.aws.neon.tech:5432/neondb", "").expect("Neon's pooled host");
         assert!(pool.ends_with("host ep-late-darkness-bb241gty.c-15.us-east-1.aws.neon.tech"), "{pool}");
@@ -2405,5 +2440,16 @@ mod tests {
         assert_eq!(with_database("postgres://u:p@h/app?dbname=app", "postgres"), "postgres://u:p@h/postgres");
         assert_eq!(with_database("postgres://u:p@h/app?%64bname=app", "postgres"), "postgres://u:p@h/postgres");
         assert_eq!(with_database("mysql://root@h:3306", "reylo_shadow_1"), "mysql://root@h:3306/reylo_shadow_1");
+        // A `#` in a Postgres query is part of a value, so a `dbname` after one is still dropped.
+        assert_eq!(with_database("postgres://u@h/app?application_name=a#b&dbname=app", "reylo_shadow_1"), "postgres://u@h/reylo_shadow_1?application_name=a#b");
+    }
+
+    #[test]
+    fn pg_dump_takes_a_password_from_the_query_or_the_login_in_its_environment() {
+        use super::without_password;
+        assert_eq!(without_password("postgres://u:p%40ss@h/db"), ("postgres://u@h/db".to_string(), Some("p@ss".to_string())));
+        // A project's env files write PGPASSWORD into the query, which wins over the login's, as libpq reads it.
+        assert_eq!(without_password("postgres://u:old@h/db?sslmode=require&password=s3cret"), ("postgres://u@h/db?sslmode=require".to_string(), Some("s3cret".to_string())));
+        assert_eq!(without_password("postgres://u@h/db"), ("postgres://u@h/db".to_string(), None));
     }
 }

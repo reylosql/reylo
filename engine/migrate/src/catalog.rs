@@ -544,6 +544,10 @@ pub const PLATFORM_EXTENSIONS: &[&str] = &["pg_stat_statements", "pgcrypto", "uu
 /// schema public revoke all on tables from anon`) makes its change, from there.
 pub const PLATFORM_API_ROLES: &[&str] = &["anon", "authenticated", "service_role"];
 
+/// The role Supabase's dashboard reads the database as, which it grants every privilege on what its
+/// extensions made as it makes a project.
+pub const PLATFORM_DASHBOARD_ROLE: &str = "dashboard_user";
+
 /// The role whose default privileges in `public` grant the API's roles what it makes.
 pub const PLATFORM_CREATOR: &str = "postgres";
 
@@ -697,12 +701,17 @@ pub(crate) fn not_extension(catalog: &str, alias: &str) -> String {
 /// privileges it has and those it was made with (`pg_init_privs`), where they differ: what was
 /// granted or revoked on it since. Each row: the extension (`ext`), `pg_identify_object`'s `type`
 /// and `identity`, and its privileges as `json_build_array(have, made with)`, each a list of
-/// `{grantee, privilege, grantable}` without its owner's. The platform's own are left out.
+/// `{grantee, privilege, grantable}` without its owner's. The platform's own are left out, and so is
+/// what [`PLATFORM_DASHBOARD_ROLE`] holds on what a platform's extension made ([`platform_extension`]):
+/// Supabase grants it everything in them as it makes a project, which no database made since has,
+/// and no shadow may grant, since there those extensions are Supabase's administrator's. Its grant
+/// on an extension the project made is the project's.
 pub(crate) fn extension_member_privileges() -> String {
+    let platforms = format!("({} and pg_get_userbyid(a.grantee) = '{PLATFORM_DASHBOARD_ROLE}')", platform_extension("x", "xn"));
     let explode = |of: &str| {
         format!(
             "(select json_agg(json_build_object('grantee', case when a.grantee = 0 then 'public' else quote_ident(pg_get_userbyid(a.grantee)) end, 'privilege', a.privilege_type, 'grantable', a.is_grantable) order by a.grantee, a.privilege_type)
-               from aclexplode(coalesce({of}, acldefault(m.kind, m.owner))) a where a.grantee <> m.owner)"
+               from aclexplode(coalesce({of}, acldefault(m.kind, m.owner))) a where a.grantee <> m.owner and not {platforms})"
         )
     };
     format!(
@@ -719,6 +728,7 @@ pub(crate) fn extension_member_privileges() -> String {
         ) m
         join pg_depend d on d.classid = m.cls and d.objid = m.oid and d.objsubid = 0 and d.deptype = 'e' and d.refclassid = 'pg_extension'::regclass
         join pg_extension x on x.oid = d.refobjid
+        join pg_namespace xn on xn.oid = x.extnamespace
         left join pg_init_privs i on i.classoid = m.cls and i.objoid = m.oid and i.objsubid = 0
         , lateral pg_identify_object(m.cls, m.oid, 0) o
         where m.acl is distinct from i.initprivs and {}
@@ -1813,6 +1823,34 @@ pub(crate) fn owned_objects() -> String {
 // carry it (a view's body names its tables with their database).
 
 async fn mysql(db: &mut Db) -> Result<Vec<String>, Error> {
+    // SHOW CREATE TABLE and SHOW CREATE VIEW quote names by the session's settings, in double quotes
+    // under ANSI_QUOTES and not at all where sql_quote_show_create is off, so the schema is read
+    // without the one and with the other, and the session's own are put back on every path.
+    let session = db.rows("select @@session.sql_mode as mode, @@session.sql_quote_show_create as quote").await?;
+    let (mode, quote) = session.first().map(|r| (r.text("mode").to_string(), r.flag("quote"))).unwrap_or_default();
+    let plain: Vec<&str> = mode.split(',').filter(|m| !m.is_empty() && !matches!(*m, "ANSI_QUOTES" | "ANSI")).collect();
+    let unquoted = plain.len() != mode.split(',').filter(|m| !m.is_empty()).count();
+    let mut set = Ok(());
+    if unquoted {
+        set = db.exec(&format!("set session sql_mode = {}", literal(&plain.join(",")))).await;
+    }
+    if set.is_ok() && !quote {
+        set = db.exec("set session sql_quote_show_create = 1").await;
+    }
+    let read = match set {
+        Ok(()) => mysql_lines(db).await,
+        Err(e) => Err(e),
+    };
+    let mode = if unquoted { db.exec(&format!("set session sql_mode = {}", literal(&mode))).await } else { Ok(()) };
+    let quote = if quote { Ok(()) } else { db.exec("set session sql_quote_show_create = 0").await };
+    let lines = read?;
+    mode?;
+    quote?;
+    Ok(lines)
+}
+
+/// The catalog lines of a MySQL schema, read in a session whose quoting [`mysql`] has set.
+async fn mysql_lines(db: &mut Db) -> Result<Vec<String>, Error> {
     let name = db.rows("select database() as name").await?.first().map(|r| r.text("name").to_string()).unwrap_or_default();
     let strip = |s: &str| s.replace(&format!("`{name}`."), "").replace(&format!("{name}."), "");
     let kept = not_history("table_name");
@@ -1937,24 +1975,8 @@ async fn mysql(db: &mut Db) -> Result<Vec<String>, Error> {
     // table's. Whether an object runs as its definer or its invoker is read.
     // A view's body is read as its own statement writes it, which MySQL writes alike however the
     // view was written: `view_definition` keeps a comma join as `from a join b`, where the same view
-    // made from its statement reads `from (a join b)`. The statement quotes names by the session's
-    // settings, so it is read without ANSI_QUOTES and with sql_quote_show_create on.
-    let session = db.rows("select @@session.sql_mode as mode, @@session.sql_quote_show_create as quote").await?;
-    let (mode, quote) = session.first().map(|r| (r.text("mode").to_string(), r.flag("quote"))).unwrap_or_default();
-    let plain: Vec<&str> = mode.split(',').filter(|m| !m.is_empty() && !matches!(*m, "ANSI_QUOTES" | "ANSI")).collect();
-    let unquoted = plain.len() != mode.split(',').filter(|m| !m.is_empty()).count();
-    if unquoted {
-        db.exec(&format!("set session sql_mode = {}", literal(&plain.join(",")))).await?;
-    }
-    if !quote {
-        db.exec("set session sql_quote_show_create = 1").await?;
-    }
-    let views = mysql_views(db, &strip).await;
-    let mode = if unquoted { db.exec(&format!("set session sql_mode = {}", literal(&mode))).await } else { Ok(()) };
-    let quote = if quote { Ok(()) } else { db.exec("set session sql_quote_show_create = 0").await };
-    lines.extend(views?);
-    mode?;
-    quote?;
+    // made from its statement reads `from (a join b)`.
+    lines.extend(mysql_views(db, &strip).await?);
 
     // Each routine's parameters are read in a query of their own and joined here, not in a
     // subquery correlated with the routines: Vitess, which PlanetScale's MySQL runs behind, plans

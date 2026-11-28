@@ -123,6 +123,39 @@ function jsonMember(f: RowField, v: unknown, dialect: Dialect, fail: (message: s
   return dialect !== "postgres" && f.type.kind === "json" ? new Raw(writeJson(v, dialect, fail)!) : v;
 }
 
+/** What a thrown value says: an error's message, anything else as its text, or its type where it has none. */
+function thrown(e: unknown): string {
+  if (e instanceof Error) return e.message;
+  try {
+    return String(e);
+  } catch {
+    return `a thrown ${typeof e}`;
+  }
+}
+
+/**
+ * An element of a jsonb[] member as the JSON text the database receives, written once by Reylo's
+ * writer at its index, as JSON.stringify writes it there (its toJSON() read once, with that key),
+ * so that what is checked is what is bound: an element whose text is an array is refused, since
+ * Postgres reads a JSON array inside a member as one more dimension of the array.
+ */
+function jsonElement(v: unknown, index: number, written: string, fail: (message: string) => never): Raw | null {
+  const key = String(index);
+  const of = written.replace(/\s*\[\s*\]\s*$/, "");
+  let text: string | undefined;
+  try {
+    text = writeJson({ [key]: v }, "postgres", (message) => fail(`is ${message}`));
+  } catch (e) {
+    if (e instanceof ParameterError) throw e;
+    return fail(`is ${of}, which holds a JSON value: ${thrown(e)}.`);
+  }
+  // `{}` where it writes no value at all, as for a toJSON() that returns undefined: a member holds JSON, never nothing.
+  if (text === undefined || text === "{}") return fail(`is ${of}, which holds a JSON value; got ${describe(v)}.`);
+  const element = text.slice(`{${JSON.stringify(key)}:`.length, -1);
+  if (element.startsWith("[")) fail(`is a JSON array, which an element of ${written} can't be: Postgres reads it as one more dimension of the array. Pass the array as one value of a jsonb column, or wrap it in an object.`);
+  return element === "null" ? null : new Raw(element);
+}
+
 /**
  * A whole array's text, from the value `check` gave it: each element in its checked form, a row
  * value, a range, a geometric type and a vector already its text, so that an array there is a level.
@@ -143,7 +176,7 @@ function check(type: EngineType, written: string, v: unknown, dialect: Dialect, 
       try {
         if (typeof v !== "bigint" && JSON.stringify(v, (_key, x: unknown) => (typeof x === "bigint" ? 0 : x)) === undefined) fail(`is ${written}, which holds a JSON value; got ${describe(v)}.`);
       } catch (e) {
-        fail(`is ${written}, which holds a JSON value: ${(e as Error).message}.`);
+        fail(`is ${written}, which holds a JSON value: ${thrown(e)}.`);
       }
       return v;
     case "enum":
@@ -173,6 +206,8 @@ function check(type: EngineType, written: string, v: unknown, dialect: Dialect, 
             const inner = type.element.type;
             return Array.isArray(checked) && inner.kind === "array" ? wholeText(inner, checked) : checked;
           }
+          // Postgres reads a JSON array inside a member as one more dimension of the array, so a JSON element may be anything but one (`jsonElement`).
+          if (dialect === "postgres" && kind === "json") return jsonElement(e, i, written, at);
           const level = dialect === "postgres" && Array.isArray(e) && isLevel(kind, e);
           return check(level ? type : type.element.type, level ? written : element, e, dialect, at);
         });

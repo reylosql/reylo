@@ -10,14 +10,14 @@
 // the databases its queries are written for.
 
 import type { QueryError } from "./query-error.ts";
-import { columnKind, describe, given, hstoreText, isLevel, isMultirangeKind, isRangeKind, isRowKind, numbersInJson, ParameterError, writeJson, postgresInterval, postgresLiteral, postgresYear, rowMasks, vectorText, withinDimensions, zoned, type Columns, type JsonNumbers, type Kind } from "./values.ts";
+import { columnKind, describe, given, holdsArray, holdsJsonArray, hstoreText, isLevel, isMultirangeKind, isRangeKind, isRowKind, numbersInJson, ParameterError, writeJson, postgresInterval, postgresLiteral, postgresYear, rowMasks, vectorText, withinDimensions, zoned, type Columns, type JsonNumbers, type Kind } from "./values.ts";
 import { bareName, holdsWholeArrays, isMysqlSet, schemaOf, type EngineType } from "./engine-type.ts";
 import { withSqlcommenter } from "./sqlcommenter.ts";
 import type { JsonSchema } from "./engine-type.ts";
 import type { SqlMode } from "./engine-core.ts";
 import type { Checks } from "./checks.ts";
 import type { Members, Structured } from "./rows.ts";
-import type { RowBuilder } from "./row.ts";
+import { lastOfEach, type RowBuilder } from "./row.ts";
 import { decodeCodecs, encodePlan, type Libraries, type Plan } from "./codecs.ts";
 
 export type Dialect = "postgres" | "mysql" | "sqlite" | "clickhouse";
@@ -251,7 +251,7 @@ export type Runtime<D extends Dialect = Dialect> = {
   /** The same at once, for the synchronous clients (`.trySync()`). */
   readErrorSync?(error: unknown): QueryError<D> | undefined;
   /** A column's raw value as `.run()` gives it, as a Standard Query's `decode` maps it (src/standard-query.ts). */
-  decoder(name: string, kind: Kind, delim: string | undefined, nonFinite: JsonNumbers | undefined, nestedArrays: boolean | undefined): (v: never) => unknown;
+  decoder(name: string, kind: Kind, delim: string | undefined, nonFinite: JsonNumbers | undefined, nestedArrays: boolean | undefined, dropped?: boolean): (v: never) => unknown;
 };
 
 /** Placeholders' places in a statement: `[start, end]` for each, at JavaScript's offsets, in text order. */
@@ -322,10 +322,10 @@ export function execute<D extends Dialect>(
   const runSync = query.runtime.runSync;
   if (runSync && (isSyncSqlite(c) || isDurableObjectSql(c))) return withCodecs(query, executeSyncSqlite(c, query, params, runSync));
   const nonFinite = jsonPlans(query);
-  // A Postgres array column holds the dimensions its type declares and no more (src/values.ts, `withinDimensions`), unless the project lets it nest.
-  const arrays = query.dialect === "postgres" && !query.nestedArrays ? (query.columns ?? []).filter(([, kind]) => kind.endsWith("[]")) : [];
+  // A Postgres array column holds the dimensions its type declares and no more (src/values.ts, `withinDimensions`), unless the project lets it nest, which an array of JSON never does: its value can't tell a level from a JSON array.
+  const arrays = query.dialect === "postgres" ? lastOfEach(query.columns ?? []).filter(([, kind]) => (query.nestedArrays ? holdsJsonArray(kind) : holdsArray(kind))) : [];
   if (!nonFinite.length && !arrays.length) return withCodecs(query, executeAsync(c, query, params));
-  return withCodecs(query, executeAsync(c, query, params).then((rows) => inJson(rows, nonFinite, arrays)));
+  return withCodecs(query, executeAsync(c, query, params).then((rows) => inJson(rows, nonFinite, arrays, query.nestedArrays === true)));
 }
 
 /**
@@ -338,10 +338,10 @@ function jsonPlans(query: QueryModule): (readonly [name: string, at: JsonNumbers
 }
 
 /** The rows with what each JSON column's plan reads inside its document read there, and each Postgres array column held to its dimensions. */
-function inJson(rows: unknown[], nonFinite: readonly (readonly [name: string, at: JsonNumbers])[], arrays: Columns): unknown[] {
+function inJson(rows: unknown[], nonFinite: readonly (readonly [name: string, at: JsonNumbers])[], arrays: Columns, jsonOnly = false): unknown[] {
   for (const row of rows as Record<string, unknown>[]) {
     for (const [name, at] of nonFinite) row[name] = numbersInJson(row[name], at, name);
-    for (const [name, kind] of arrays) withinDimensions(row[name], kind, name);
+    for (const [name, kind] of arrays) withinDimensions(row[name], kind, name, undefined, jsonOnly);
   }
   return rows;
 }
