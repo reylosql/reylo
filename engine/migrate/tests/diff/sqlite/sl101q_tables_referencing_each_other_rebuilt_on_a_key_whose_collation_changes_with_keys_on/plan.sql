@@ -1,4 +1,4 @@
-create table new_zz_a (id int, y text collate nocase, unique (y collate nocase));
+create table new_zz_a (id int, y text collate nocase check (y collate nocase <> ''), unique (y collate nocase));
 insert into new_zz_a (rowid, id, y) select rowid, id, y from zz_a;
 drop table zz_a;
 alter table new_zz_a rename to zz_a;

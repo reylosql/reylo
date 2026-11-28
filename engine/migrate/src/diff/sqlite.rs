@@ -1473,7 +1473,12 @@ fn keys_of(schema: &Schema, table: &Object) -> Vec<BTreeSet<String>> {
     let declared: BTreeMap<String, String> = parts
         .iter()
         .filter_map(|p| {
-            let at = p.tokens.iter().position(|t| t.upper() == "COLLATE")?;
+            // Its own COLLATE, outside parentheses: one in a CHECK is the expression's.
+            let mut depth = 0;
+            let at = p.tokens.iter().position(|t| {
+                depth += i32::from(t.text == "(") - i32::from(t.text == ")");
+                depth == 0 && t.upper() == "COLLATE"
+            })?;
             Some((p.column.clone()?, unquote(p.tokens.get(at + 1)?).to_uppercase()))
         })
         .collect();
