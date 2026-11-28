@@ -321,10 +321,18 @@ fn strip(e: &Expr) -> &Expr {
 /// for a NULL in the list or a bound: `1 in (1, NULL)` is 1, and `5 between NULL and 1` is 0. AND
 /// and OR give a value for NULL (`NULL and 0` is 0), and so do `IS`, `<=>`, CASE and a subquery.
 pub(crate) fn nulls_with(e: &Expr) -> Vec<Vec<String>> {
-    let all = |exprs: &[&Expr]| -> Vec<Vec<String>> { exprs.iter().flat_map(|e| nulls_with(e)).collect() };
     match e {
         Expr::Nested(inner) => nulls_with(inner),
         Expr::Identifier(_) | Expr::CompoundIdentifier(_) => column(e).into_iter().collect(),
+        _ => strict_operands(e).into_iter().flat_map(nulls_with).collect(),
+    }
+}
+
+/// The operands of an operator or a call that make it NULL wherever one of them is NULL, as
+/// [`nulls_with`] reads them; none for anything else, a column among them.
+pub(crate) fn strict_operands(e: &Expr) -> Vec<&Expr> {
+    match e {
+        Expr::Nested(inner) => strict_operands(inner),
         Expr::BinaryOp {
             left,
             op:
@@ -348,25 +356,17 @@ pub(crate) fn nulls_with(e: &Expr) -> Vec<Vec<String>> {
                 | BinaryOperator::Xor
                 | BinaryOperator::Regexp,
             right,
-        } => all(&[&**left, &**right]),
-        Expr::BinaryOp { left, op: BinaryOperator::Arrow | BinaryOperator::LongArrow, .. } => nulls_with(left),
-        Expr::UnaryOp { op: UnaryOperator::Not | UnaryOperator::Minus | UnaryOperator::Plus | UnaryOperator::BitwiseNot, expr } => nulls_with(expr),
-        Expr::Like { expr, pattern, any: false, .. } | Expr::RLike { expr, pattern, .. } => all(&[&**expr, &**pattern]),
-        Expr::InList { expr, .. } | Expr::Between { expr, .. } => nulls_with(expr),
-        Expr::MemberOf(m) => all(&[&*m.value, &*m.array]),
-        Expr::Cast { expr, .. } | Expr::Collate { expr, .. } | Expr::Convert { expr, .. } | Expr::Extract { expr, .. } | Expr::Ceil { expr, .. } | Expr::Floor { expr, .. } => nulls_with(expr),
-        Expr::Interval(i) => nulls_with(&i.value),
-        Expr::Substring { expr, substring_from, substring_for, .. } => {
-            let mut out = nulls_with(expr);
-            out.extend(substring_from.iter().chain(substring_for).flat_map(|x| nulls_with(x)));
-            out
-        }
-        Expr::Trim { expr, trim_what, trim_characters: None, .. } => {
-            let mut out = nulls_with(expr);
-            out.extend(trim_what.iter().flat_map(|x| nulls_with(x)));
-            out
-        }
-        Expr::Position { expr, r#in } => all(&[&**expr, &**r#in]),
+        } => vec![&**left, &**right],
+        Expr::BinaryOp { left, op: BinaryOperator::Arrow | BinaryOperator::LongArrow, .. } => vec![&**left],
+        Expr::UnaryOp { op: UnaryOperator::Not | UnaryOperator::Minus | UnaryOperator::Plus | UnaryOperator::BitwiseNot, expr } => vec![&**expr],
+        Expr::Like { expr, pattern, any: false, .. } | Expr::RLike { expr, pattern, .. } => vec![&**expr, &**pattern],
+        Expr::InList { expr, .. } | Expr::Between { expr, .. } => vec![&**expr],
+        Expr::MemberOf(m) => vec![&*m.value, &*m.array],
+        Expr::Cast { expr, .. } | Expr::Collate { expr, .. } | Expr::Convert { expr, .. } | Expr::Extract { expr, .. } | Expr::Ceil { expr, .. } | Expr::Floor { expr, .. } => vec![&**expr],
+        Expr::Interval(i) => vec![&*i.value],
+        Expr::Substring { expr, substring_from, substring_for, .. } => std::iter::once(&**expr).chain(substring_from.as_deref()).chain(substring_for.as_deref()).collect(),
+        Expr::Trim { expr, trim_what, trim_characters: None, .. } => std::iter::once(&**expr).chain(trim_what.as_deref()).collect(),
+        Expr::Position { expr, r#in } => vec![&**expr, &**r#in],
         Expr::Function(f) if f.over.is_none() && f.filter.is_none() && f.within_group.is_empty() => match &f.args {
             ast::FunctionArguments::List(list) if list.duplicate_treatment.is_none() && list.clauses.is_empty() => {
                 let count = list.args.len();
@@ -379,9 +379,9 @@ pub(crate) fn nulls_with(e: &Expr) -> Vec<Vec<String>> {
                         At(positions) => positions.contains(i),
                         Last => i + 1 == count,
                     })
-                    .flat_map(|(_, a)| match a {
-                        ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(x)) => nulls_with(x),
-                        _ => Vec::new(),
+                    .filter_map(|(_, a)| match a {
+                        ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(x)) => Some(x),
+                        _ => None,
                     })
                     .collect()
             }

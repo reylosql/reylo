@@ -14,7 +14,8 @@
 export type Dialect = 'postgres' | 'mysql' | 'sqlite' | 'clickhouse';
 type Schema = string | boolean | { [key: string]: unknown };
 
-const LEAVES: Record<string, string> = { string: 'string', number: 'number', integer: 'number', boolean: 'boolean', null: 'null' };
+// An integer takes a BigInt too, which `.run()` writes as its digits (src/render.ts, `schemaType`).
+const LEAVES: Record<string, string> = { string: 'string', number: 'number', integer: 'number | bigint', boolean: 'boolean', null: 'null' };
 
 /** A JSON Schema type name, other than `object` and `array`, as TypeScript. */
 function leaf(name: string, _dialect: Dialect, at: string): string {

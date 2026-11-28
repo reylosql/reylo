@@ -17,7 +17,7 @@ import { decodePlan } from "./codecs.ts";
 import { compile, rawStatement, sentText, type Dialect, type QueryModule } from "./execute.ts";
 import type { StandardTypedV1 } from "./standard.ts";
 import { lastOfEach, rowOf, type RowBuilder } from "./row.ts";
-import { DecodeError } from "./values.ts";
+import { DecodeError, numbersInJson } from "./values.ts";
 
 /** The Standard Query interface: a statement a driver can execute, as a typed function from an input to an output. */
 export interface StandardQueryV1<Input = unknown, Output = Input, D extends StandardQueryV1.Dialect = StandardQueryV1.Dialect>
@@ -161,7 +161,10 @@ export function standardQuery<D extends Dialect, Output>(module: QueryModule<D>,
   // A column a later one of its name replaces in the row is never returned, so, as in `.run()`, it is held to no dimensions.
   const kept = new Set(lastOfEach((module.columns ?? []).map(([name], i) => [name, i] as const)).map(([, i]) => i));
   const decoders = (mapped ? module.columns : undefined)?.map(([name, kind, delim], i): ((v: never) => unknown) => {
-    const decode = module.runtime.decoder(name, kind, delim, module.nonFinite?.[i] ?? undefined, module.nestedArrays || !kept.has(i));
+    const at = module.nonFinite?.[i] ?? undefined;
+    const read = module.runtime.decoder(name, kind, delim, at, module.nestedArrays || !kept.has(i));
+    // Postgres's decoder reads a document's plan itself; on MySQL and SQLite it is read here, as `.run()` reads it.
+    const decode = at === undefined || dialect === "postgres" ? read : (v: never) => numbersInJson(read(v), at, name);
     // A family the project file's `js.codecs` gives another type takes it here too, as in `.run()` (src/codecs.ts).
     const plan = module.codecs?.[name];
     return plan === undefined ? decode : (v) => decodePlan(plan, decode(v), name, module.libraries);
