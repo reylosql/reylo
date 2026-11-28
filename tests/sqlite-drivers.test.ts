@@ -1,4 +1,5 @@
 import { test } from "node:test";
+import { spawnSync } from "node:child_process";
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
@@ -109,11 +110,14 @@ test("a refusal is placed at the call or the text it names, in UTF-8 bytes", () 
 // only when a statement compiles.
 const d1 = skip || (!existsSync(join(DRIVERS, "wrangler")) && "lab/drivers has no wrangler installed");
 
-function worker(root: string, d1Binding: boolean, durableObject: false | "sqlite" | "kv" | "exports" = false) {
+function worker(root: string, d1Binding: boolean, durableObject: false | "sqlite" | "kv" | "exports" = false, services = false) {
   const config = {
     name: "reylo-test",
     main: "worker.js",
     compatibility_date: "2026-10-01",
+    // Bindings to Workers that aren't running locally, listed before D1: wrangler's proxy calls the
+    // Worker on any read of such a binding's properties, and that call throws.
+    ...(services && { services: [{ binding: "OTHER", service: "reylo-test-other" }, { binding: "ENTRY", service: "reylo-test-other", entrypoint: "Admin" }] }),
     ...(d1Binding && { d1_databases: [{ binding: "DB", database_name: "reylo-test", database_id: "00000000-0000-0000-0000-000000000000" }] }),
     ...(durableObject && { durable_objects: { bindings: [{ name: "BOARD", class_name: "Board" }] } }),
     // The class declared by migrations, or by the declarative `exports` that replaces them.
@@ -146,6 +150,43 @@ test("a statement Cloudflare D1 refuses fails the type check at the call, with D
     }
   } finally {
     await session.close();
+  }
+});
+
+test("D1 is found by its binding's name, beside service bindings to Workers that aren't running", { skip: d1, timeout: 120_000 }, async () => {
+  const { root, env } = project(["wrangler"]);
+  worker(root, true, false, true);
+  assert.match((await analyze(root, env, PRETTY)).analysis.diagnostics[0]?.message ?? "", /^Cloudflare D1, as wrangler \d+\.\d+\.\d+ runs it locally, refuses this statement: not authorized to use function: json_pretty$/);
+  // And so is a Durable Object's SQL storage, with no D1 database.
+  worker(root, false, "sqlite", true);
+  assert.match((await analyze(root, env, PRETTY)).analysis.diagnostics[0]?.message ?? "", /^A Durable Object's SQL storage, as wrangler \d+\.\d+\.\d+ runs it locally, refuses this statement: not authorized to use function: json_pretty$/);
+});
+
+// A wrangler of the test's own, whose D1 child ends at the start or under a statement. The check is
+// left out, and the process that asked goes on to its end rather than ending with its wait unsettled.
+test("a D1 child that ends before it is ready or under a statement leaves the check out, and the process that asked goes on", { timeout: 60_000 }, () => {
+  const ending = {
+    start: `throw new Error("workerd is missing");`,
+    statement: `const statement = { bind: () => statement, all: () => process.exit(1), run: async () => ({}) };
+export const unstable_readConfig = () => ({ d1_databases: [{ binding: "DB" }] });
+export const getPlatformProxy = async () => ({ env: { DB: { prepare: () => statement, batch: async () => [] } }, dispose: async () => {} });`,
+  };
+  for (const [when, source] of Object.entries(ending)) {
+    const root = mkdtempSync(join(tmpdir(), "reylo-d1-ends-"));
+    writeFileSync(join(root, "package.json"), JSON.stringify({ devDependencies: { wrangler: "*" } }));
+    writeFileSync(join(root, "wrangler.json"), "{}");
+    mkdirSync(join(root, "node_modules", "wrangler"), { recursive: true });
+    writeFileSync(join(root, "node_modules", "wrangler", "package.json"), JSON.stringify({ name: "wrangler", version: "0.0.0", type: "module", main: "index.js" }));
+    writeFileSync(join(root, "node_modules", "wrangler", "index.js"), source);
+    new DatabaseSync(join(root, "app.db")).close();
+    // A file rather than `--eval`, whose `--input-type` the D1 child would be forked with too.
+    writeFileSync(join(root, "check.mjs"), `const { openProjectDrivers } = await import(${JSON.stringify(new URL("../src/sqlite-drivers.ts", import.meta.url).href)});
+const drivers = await openProjectDrivers(${JSON.stringify(root)}, ${JSON.stringify(join(root, "app.db"))});
+const refusals = await Promise.all(drivers.map((d) => d.refuses("select 1", 0)));
+console.log(JSON.stringify({ drivers: drivers.length, refusals }));`);
+    const run = spawnSync(process.execPath, [join(root, "check.mjs")], { encoding: "utf8", timeout: 50_000 });
+    assert.equal(run.status, 0, `${when}: ${run.stderr}`);
+    assert.deepEqual(JSON.parse(run.stdout), when === "start" ? { drivers: 0, refusals: [] } : { drivers: 1, refusals: [null] }, when);
   }
 });
 

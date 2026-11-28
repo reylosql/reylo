@@ -275,6 +275,8 @@ const DRIVERS: [string, Open][] = [
 
 /** How long workerd may take to start before D1 is left out. */
 const D1_START = 30_000;
+/** The period of the timer that holds the process while the D1 child is waited on: long, since it only has to exist. */
+const HOLD_INTERVAL = 1 << 30;
 
 /** A D1 child process: the version of wrangler it runs, what it stands for, and a statement compiled there against `ddl`. */
 interface D1Process {
@@ -373,7 +375,20 @@ async function startD1(entry: string, dir: string, ended: () => void): Promise<D
     stdio: ["ignore", "ignore", "ignore", "ipc"],
     env: { ...process.env, WRANGLER_SEND_METRICS: "false" },
   });
+  // Neither the child nor its channel keeps this process alive, so a type check or a build ends when
+  // its own work does, and the child ends with it. While the start or a statement waits on the child,
+  // a timer holds the process instead: without it, a child that ended first would end this process
+  // too, before its exit was seen and with the wait unsettled.
   child.unref();
+  child.channel?.unref();
+  let hold: ReturnType<typeof setInterval> | undefined;
+  const holding = (held: boolean) => {
+    if (held) hold ??= setInterval(() => {}, HOLD_INTERVAL);
+    else {
+      clearInterval(hold);
+      hold = undefined;
+    }
+  };
   type Reply = { kind: "ready"; d1: boolean; storage?: D1Process["storage"] } | { kind: "explain"; id: number; error?: string };
   const pending = new Map<number, (error: string | undefined) => void>();
   let next = 0;
@@ -381,13 +396,11 @@ async function startD1(entry: string, dir: string, ended: () => void): Promise<D
   let sent: string | undefined;
   const gone = new Promise<never>((_, fail) => child.once("exit", () => fail(new Error("D1's process ended"))));
   gone.catch(() => {});
-  // The channel keeps this process alive only while a statement waits on its answer, so a type
-  // check or a build ends when its own work does; the child ends with this process.
   child.on("message", (m: Reply) => {
     if (m.kind !== "explain") return;
     pending.get(m.id)?.(m.error);
     pending.delete(m.id);
-    if (!pending.size) child.channel?.unref();
+    if (!pending.size) holding(false);
   });
   let running = false;
   let storage: D1Process["storage"] = "d1";
@@ -395,11 +408,13 @@ async function startD1(entry: string, dir: string, ended: () => void): Promise<D
     if (running) ended();
     for (const settle of pending.values()) settle(undefined);
     pending.clear();
+    holding(false);
   });
   const stop = () => {
     if (child.connected) child.send({ kind: "close" });
     setTimeout(() => child.kill(), 2_000).unref();
   };
+  holding(true);
   try {
     const timeout = new Promise<never>((_, fail) => setTimeout(() => fail(new Error("workerd did not start")), D1_START).unref());
     const ready = await Promise.race([gone, timeout, new Promise<Extract<Reply, { kind: "ready" }>>((done) => child.once("message", done))]);
@@ -408,9 +423,10 @@ async function startD1(entry: string, dir: string, ended: () => void): Promise<D
   } catch (e) {
     stop();
     throw e;
+  } finally {
+    holding(false);
   }
   running = true;
-  child.channel?.unref();
   return {
     version,
     storage,
@@ -425,7 +441,7 @@ async function startD1(entry: string, dir: string, ended: () => void): Promise<D
           // A count of bindings D1 reads otherwise than the analysis is no refusal of the statement.
           done(message && !/^Wrong number of parameter bindings/.test(message) ? message : undefined);
         });
-        child.channel?.ref();
+        holding(true);
         const text = JSON.stringify(ddl);
         if (text !== sent) {
           child.send({ kind: "schema", ddl });
