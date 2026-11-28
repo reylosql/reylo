@@ -1841,14 +1841,15 @@ impl Alterer for MysqlAlterer {
         // A table's held step joins the last drop of its own keys before it, which MySQL runs as one
         // statement, placed after every statement that takes a key on the column away (a key that
         // references it, or that key's table), which the step waits for. The drop moves down past
-        // those, and past other keys' drops alone, none of which waits for another's: anything else
+        // those, and past other keys' plain drops (no clause of theirs a `modify`), none of which waits
+        // for another's: anything else
         // between may wait for the drop (the table its key references, dropped), and then the two
         // stay apart, as the plan has them.
         let unkeyed_by = self.unkeyed_by.borrow();
         let drops_a_key = |s: &str| {
             let t = tokenize(s, Dialect::Mysql);
             let clause = |k: usize| t.get(k).map(Token::upper).unwrap_or_default();
-            t.len() > 5 && clause(0) == "ALTER" && clause(1) == "TABLE" && clause(3) == "DROP" && clause(4) == "FOREIGN" && clause(5) == "KEY" && !t.iter().any(|w| w.upper() == "MODIFY")
+            t.len() > 5 && clause(0) == "ALTER" && clause(1) == "TABLE" && clause(3) == "DROP" && clause(4) == "FOREIGN" && clause(5) == "KEY" && !t.windows(2).any(|w| w[0].text == "," && w[1].upper() == "MODIFY")
         };
         for (here, table, columns) in self.late.borrow().iter() {
             let Some(at) = statements.iter().position(|s| s == here) else { continue };
