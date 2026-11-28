@@ -330,7 +330,7 @@ Applying to postgres://db.example.com/app
 
 A deploy cut off between migrations resumes once it confirms the schema hasn't changed. If that check fails or can't run (as on MySQL), run `reylo migrate history push` to store the fingerprint again. That command needs a shadow database.
 
-A deploy cut off during a MySQL migration never runs it again by itself. MySQL commits the change before the history row, and a truncate leaves nothing in the schema to show it ran. If it ran, record it with `reylo migrate history push`. If it didn't, run it with `reylo run --file`, then record it.
+A deploy cut off during a MySQL migration never runs it again by itself, since MySQL commits the change before the history row. Settle it with `reylo migrate history push`. It records the migration where its change is in place, and takes it out to run again where it never ran. A truncate or a swap of two names shows neither, so it's recorded as run: if one of those didn't run, run it by hand with `reylo run --file`.
 
 Migrations and app builds go live at different times, so old builds fail on renamed or dropped columns. Rename in two steps. To rename `users.email` to `contact`, add `contact`, copy values, and deploy code that reads `contact` and writes both:
 
