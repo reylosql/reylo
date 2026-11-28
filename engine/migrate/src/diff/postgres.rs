@@ -8,7 +8,7 @@
 //! the two, since the server's rendering of an expression is not always one it reads back to itself.
 
 use super::{Alterer, Change, Kind, Object, Schema, TypeClass};
-use crate::catalog::{not_extension, not_platform, not_platform_schema, pg_not_history, pg_not_history_schema, pg_not_kept_out, project_extension, project_relation, PG_USER_NS};
+use crate::catalog::{not_extension, not_platform, not_platform_schema, pg_not_history, pg_not_history_schema, project_extension, project_relation, PG_USER_NS};
 use crate::db::{Db, Row};
 use crate::{Dialect, Error};
 use regex::Regex;
@@ -299,7 +299,7 @@ async fn read_objects(db: &mut Db, platform: Option<&[String]>) -> Result<Schema
     // The history tables, and what comes with them, are left out: `c` or `t` the `pg_class` row. A
     // table of the platform's is read whatever its name, a history table's (`auth.schema_migrations`).
     let kept = |condition: String| if platform.is_some() { "true".to_string() } else { condition };
-    let (kept_c, kept_t, kept_rel) = (kept(pg_not_history("c")), kept(pg_not_history("t")), kept(pg_not_kept_out("c.relname")));
+    let (kept_c, kept_t, kept_rel) = (kept(pg_not_history("c")), kept(pg_not_history("t")), kept(pg_not_history("c")));
     let pg_not_history_schema = |n: &str| kept(pg_not_history_schema(n));
     // A trigger's function, `f`: in the platform's schemas, where they are read.
     let trigger_function = match &named {
@@ -2051,6 +2051,9 @@ async fn read_objects(db: &mut Db, platform: Option<&[String]>) -> Result<Schema
     } else {
         ("''", "null::json", "'[]'::json")
     };
+    // Another tool's schemas and tables are in no publication's list, and another tool's publication is read as none.
+    let schemas = schemas.replace("where pn.pnpubid = p.oid)", &format!("where pn.pnpubid = p.oid and {PG_USER_NS})"));
+    let (published, tool_publication) = (crate::catalog::pg_published("c", "n"), crate::catalog::pg_tool_publication("p", version));
     // Postgres 18 publishes a table's stored generated columns where a publication says so.
     let generated = if version >= 180000 { "p.pubgencols = 's'" } else { "false" };
     // Postgres 19 publishes all sequences, and all tables but those an EXCEPT names, which it keeps among the publication's tables, marked.
@@ -2063,9 +2066,9 @@ async fn read_objects(db: &mut Db, platform: Option<&[String]>) -> Result<Schema
         .rows(&format!(
             "select p.oid, format('%I', p.pubname) as name, p.puballtables as all_tables, {all_sequences} as all_sequences, {excepted} as excepted, p.pubviaroot as via_root, {generated} as generated,
               concat_ws(', ', case when p.pubinsert then 'insert' end, case when p.pubupdate then 'update' end, case when p.pubdelete then 'delete' end, case when p.pubtruncate then 'truncate' end) as publish,
-              format('%s', (select json_agg(json_build_array(format('%I.%I', n.nspname, c.relname), format('%I.%I', n.nspname, c.relname) || {columns}, {listed}) order by format('%I.%I', n.nspname, c.relname)) from pg_publication_rel pr join pg_class c on c.oid = pr.prrelid join pg_namespace n on n.oid = c.relnamespace where pr.prpubid = p.oid {listed_only})) as tables,
+              format('%s', (select json_agg(json_build_array(format('%I.%I', n.nspname, c.relname), format('%I.%I', n.nspname, c.relname) || {columns}, {listed}) order by format('%I.%I', n.nspname, c.relname)) from pg_publication_rel pr join pg_class c on c.oid = pr.prrelid join pg_namespace n on n.oid = c.relnamespace where pr.prpubid = p.oid {listed_only} and {published})) as tables,
               format('%s', {schemas}) as schemas
-            from pg_publication p where {}",
+            from pg_publication p where {} and not {tool_publication}",
             database_wide("p.pubowner")
         ))
         .await?

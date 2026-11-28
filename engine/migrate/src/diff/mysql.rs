@@ -387,8 +387,9 @@ pub async fn read(db: &mut Db) -> Result<Schema, Error> {
 }
 
 async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
-    let kept = crate::catalog::mysql_project("table_name");
-    let kept_trigger = crate::catalog::mysql_project_trigger();
+    let tools = crate::catalog::mysql_tool_tables(db).await?;
+    let kept = crate::catalog::mysql_project("table_name", &tools);
+    let kept_trigger = crate::catalog::mysql_project_trigger(&tools);
     let first = |rows: Vec<Row>, name: &str| rows.first().map(|r| r.text(name).to_string()).unwrap_or_default();
     let ctx = Ctx {
         db: first(db.rows("select database() as n").await?, "n"),
