@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import { DatabaseSync } from "node:sqlite";
 import { join } from "node:path";
-import { mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
 import { defineQuery, type MysqlClient, type MysqlCode, type MysqlNarrowing, type MysqlQueryError, type PostgresClient, type PostgresCondition, type PostgresNarrowing, type PostgresQueryError, type Query, type SqliteCode, type SqliteNarrowing, type SqliteQueryError } from "../src/index.ts";
@@ -143,6 +143,7 @@ test("MySQL: the error each driver throws reads as one, named from MySQL's own l
     ["a null", thrown("Column 'email' cannot be null", { errno: 1048, sqlState: "23000", sqlMessage: "Column 'email' cannot be null" }), { ...MY_NONE, message: "Column 'email' cannot be null", code: "ER_BAD_NULL_ERROR", errno: 1048, sqlState: "23000", column: "email" }],
     ["a missing value", thrown("Field 'email' doesn't have a default value", { errno: 1364, sqlState: "HY000", sqlMessage: "Field 'email' doesn't have a default value" }), { ...MY_NONE, message: "Field 'email' doesn't have a default value", code: "ER_NO_DEFAULT_FOR_FIELD", errno: 1364, sqlState: "HY000", column: "email" }],
     ["a value too long", thrown("Data too long for column 'email' at row 1", { errno: 1406, sqlState: "22001", sqlMessage: "Data too long for column 'email' at row 1" }), { ...MY_NONE, message: "Data too long for column 'email' at row 1", code: "ER_DATA_TOO_LONG", errno: 1406, sqlState: "22001", column: "email" }],
+    ["a value that holds the words of the message, which names its column last", thrown("Incorrect integer value: 'x' for column 'zz' for column 'n' at row 1", { errno: 1366, sqlState: "HY000", sqlMessage: "Incorrect integer value: 'x' for column 'zz' for column 'n' at row 1" }), { ...MY_NONE, message: "Incorrect integer value: 'x' for column 'zz' for column 'n' at row 1", code: "ER_TRUNCATED_WRONG_VALUE_FOR_FIELD", errno: 1366, sqlState: "HY000", column: "n" }],
     ["a cast out of range, which names no column", thrown("Out of range value for column '(null)' at row 1", { errno: 1264, sqlState: "22003", sqlMessage: "Out of range value for column '(null)' at row 1" }), { ...MY_NONE, message: "Out of range value for column '(null)' at row 1", code: "ER_WARN_DATA_OUT_OF_RANGE", errno: 1264, sqlState: "22003" }],
     ["mysql2's refused connection", thrown("connect ECONNREFUSED 127.0.0.1:1", { errno: -61, code: "ECONNREFUSED", syscall: "connect", fatal: true }), undefined],
     ["mariadb's refused connection, which has a state", thrown("connect ECONNREFUSED 127.0.0.1:1", { errno: -61, code: "ECONNREFUSED", fatal: true, sqlState: "HY000" }), undefined],
@@ -476,3 +477,13 @@ export async function types(pg: Query<{}, { id: number }, "one", "postgres">, my
     if (c.error.code === "SQLITE_CONSTRAINT_UNIQ") {}
   }
 }
+
+test("every MySQL message of the shared list names what the oracle reads", async () => {
+  // oracle/src/errors.rs reads the same list, so the two readers can't drift apart.
+  const cases: { errno: number; message: string; names: Record<string, string> }[] = JSON.parse(readFileSync(join(import.meta.dirname, "mysql-error-names.json"), "utf8"));
+  for (const { errno, message, names } of cases) {
+    const error = (await readMysqlError(thrown(message, { errno, sqlState: "HY000", sqlMessage: message }))) as unknown as Record<string, unknown>;
+    const read = Object.fromEntries(["key", "constraint", "table", "column"].filter((f) => error[f] !== undefined).map((f) => [f, error[f]]));
+    assert.deepEqual(read, names, message);
+  }
+});

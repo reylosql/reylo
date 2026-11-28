@@ -34,6 +34,8 @@ export type BuildTime = {
   analyze(input: AnalyzeInput): Promise<StatementDescriptor>;
   /** `reylo migrate deploy`, run as the command line runs it (src/migrate-deploy.ts). */
   migrate(options: MigrateOptions): Promise<string[]>;
+  /** The project's migrations in the order a deploy runs them, or the deploy's refusal of them, for `migrate(db)` (src/embedded-module.ts). */
+  migrations(): Promise<{ list?: { name: string; sql: string }[]; error?: string }>;
 };
 
 type NodeRequire = ((id: string) => unknown) & { resolve?(id: string): string };

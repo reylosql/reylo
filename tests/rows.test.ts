@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import type { EngineType } from "../src/engine.ts";
 import { renderParamType } from "../src/render.ts";
 import { prepareRows, rowsOf, variant, type Members, type RowsType } from "../src/rows.ts";
+import { writeJson } from "../src/values.ts";
 import { array, checked, field, lite, my, pg, record } from "./descriptors.ts";
 
 /** A structured parameter as the engine gives it: its type (one record, or an array of them) and its column list as written. */
@@ -191,6 +192,33 @@ test("an array member tells its levels from its elements as a parameter does, so
   const tagged = structured(false, [["tags", ints, "ints[]", true, true]]);
   assert.deepEqual(prepareRows("tagged", tagged.rows, [{ tags: [[1, 2], [[3]], null] }], "postgres", true).value, [{ tags: ['{"1","2"}', '{{"3"}}', null] }]);
   assert.throws(() => prepareRows("tagged", tagged.rows, [{ tags: [["x"]] }], "postgres", true), /"tags" element 1 element 1 /);
+});
+
+test("a jsonb[] member's element is any JSON but an array, which Postgres would read as one more dimension, checked as the text it is bound as", () => {
+  const docsOf = structured(false, [["docs", array({ kind: "json", label: "jsonb" } as EngineType), "jsonb[]", true, true]]);
+  assert.equal(renderParamType(docsOf.type, "postgres", false, docsOf.members), "readonly { docs?: (Exclude<JsonInput, readonly unknown[]> | null)[] | null }[]");
+  // The rows as the database receives them, written as the bind writes them.
+  const bound = (docs: unknown) => writeJson(prepareRows("docs", docsOf.rows, [{ docs }], "postgres", true).value, "postgres", (message) => assert.fail(message));
+  assert.equal(bound([{ a: [1] }, "x", null]), '[{"docs":[{"a":[1]},"x",null]}]');
+  assert.throws(() => bound([[1, 2]]), /"docs" element 1 is a JSON array, which an element of jsonb\[\] can't be: Postgres reads it as one more dimension/);
+  // A value whose toJSON() writes an array is one too, its toJSON() read once, at the element's index, and what it returns written as JSON.stringify writes it.
+  assert.throws(() => bound([{ toJSON: () => [1] }]), /"docs" element 1 is a JSON array/);
+  const keys: string[] = [];
+  let calls = 0;
+  assert.equal(bound([null, { toJSON: (key: string) => (keys.push(key), { k: 1, nested: { toJSON: () => ++calls } }) }]), '[{"docs":[null,{"k":1,"nested":1}]}]');
+  assert.deepEqual(keys, ["1"]);
+  assert.equal(bound([{ toJSON: () => ({ ok: true, toJSON: () => [1, 2] }) }, { toJSON: () => Object.assign(new Number(7), { toJSON: () => 99 }) }]), '[{"docs":[{"ok":true},7]}]');
+  // One that writes no JSON value, or whose toJSON() throws, is refused with its place.
+  assert.throws(() => bound([{ toJSON: () => undefined }]), /"docs" element 1 is jsonb, which holds a JSON value; got/);
+  assert.throws(() => bound([{ toJSON: () => { throw new Error("nope"); } }]), /"docs" element 1 is jsonb, which holds a JSON value: nope\./);
+  assert.throws(() => bound([{ toJSON: () => { throw null; } }]), /"docs" element 1 is jsonb, which holds a JSON value: null\./);
+  assert.throws(() => bound([{ toJSON: () => { throw Object.create(null); } }]), /"docs" element 1 is jsonb, which holds a JSON value: a thrown object\./);
+  // Reylo's own writer keeps a number past 2^53 exact and refuses NaN.
+  assert.equal(bound([{ big: 9007199254740993n }]), '[{"docs":[{"big":9007199254740993}]}]');
+  assert.throws(() => bound([{ n: NaN }]), /"docs" element 1 is .*NaN/);
+  // An element a schema types is any value of it but an array.
+  const typed = structured(false, [["docs", array(checked({ type: ["object", "array"] }), true), "doc[]", true, true]]);
+  assert.match(renderParamType(typed.type, "postgres", false, typed.members), /docs\?: \(Exclude<.*, readonly unknown\[\]> \| null\)\[\] \| null/);
 });
 
 test("an hstore member takes an object of its keys, written as the text hstore reads", () => {

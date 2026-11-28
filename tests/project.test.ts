@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { engine } from "../src/engine.ts";
-import { findProjectFile, packageDir, readEnvFile, resolveProject } from "../src/project.ts";
+import { environmentValue, findProjectFile, packageDir, readEnvFile, resolveProject, withEnvFiles } from "../src/project.ts";
 import { Session } from "../src/analyze.ts";
 
 // The engine's core reads the project file, whichever database's engine is asked.
@@ -18,6 +18,50 @@ function tree(files: Record<string, string>): string {
   }
   return root;
 }
+
+test("libpq's variables from the env files name what a Postgres URL leaves out, as the binary writes them", () => {
+  // The binary's project reader writes them by the same cases (engine/native/src/project.rs).
+  const cases: { case: string; url: string; files: Record<string, string>; folded: string; names: string[] }[] = JSON.parse(readFileSync(new URL("../engine/native/src/url-env-file-cases.json", import.meta.url), "utf8"));
+  for (const c of cases) assert.deepEqual(withEnvFiles(c.url, (name) => c.files[name]), { url: c.folded, names: c.names }, c.case);
+});
+
+test("the type check's URL takes libpq's variables from the env files where the environment sets none, and says so", async () => {
+  const e = await engine("postgres");
+  const dir = tree({ "package.json": "{}", ".env": "DATABASE_URL=postgres://app@db.internal/\nPGDATABASE=shop\nPGPASSWORD=s3cret\n", ".env.local": "PGDATABASE=local\n" });
+  // The first file that sets a variable wins, as for DATABASE_URL.
+  const project = resolveProject(e, dir, {});
+  assert.equal(project.url, "postgres://app@db.internal/?password=s3cret&dbname=local");
+  assert.equal(project.urlSource, "DATABASE_URL in .env, PGPASSWORD in .env, PGDATABASE in .env.local");
+  // The environment's variable wins over the files', and is written in too, so that one connection is one URL.
+  const fromEnvironment = resolveProject(e, dir, { PGDATABASE: "other" });
+  assert.equal(fromEnvironment.url, "postgres://app@db.internal/?password=s3cret&dbname=other");
+  assert.equal(fromEnvironment.urlSource, "DATABASE_URL in .env, PGPASSWORD in .env, PGDATABASE in the environment");
+  // A URL that names its database takes no PGDATABASE, and one of another database none at all.
+  assert.equal(resolveProject(e, dir, { DATABASE_URL: "postgres://app:pw@db.internal/shop" }).url, "postgres://app:pw@db.internal/shop");
+  assert.equal(resolveProject(e, dir, { DATABASE_URL: "mysql://root@127.0.0.1/app" }).url, "mysql://root@127.0.0.1/app");
+  // A variable the environment sets empty, the files leave alone, as dotenv does.
+  assert.equal(resolveProject(e, dir, { PGDATABASE: "" }).url, "postgres://app@db.internal/?password=s3cret");
+  // A dry run's shadow is the URL it names alone.
+  assert.equal(resolveProject(e, dir, { REYLO_ANALYSIS_URL: "postgres://app@shadow/" }).url, "postgres://app@shadow/");
+  // A certificate file is named from the project's root, where its env files are.
+  writeFileSync(join(dir, ".env"), "DATABASE_URL=postgres://app@db.internal/shop\nPGSSLROOTCERT=certs/root.pem\n");
+  assert.equal(resolveProject(e, dir, {}).url, `postgres://app@db.internal/shop?sslrootcert=${encodeURIComponent(join(dir, "certs/root.pem"))}`);
+});
+
+test("a direct_url of Reylo's own takes no variable the env files set, and one that names DATABASE_URL does", async () => {
+  const e = await engine("postgres");
+  const dir = tree({ "package.json": "{}", ".env": "DATABASE_URL=postgres://app@db.internal/\nPGDATABASE=shop\n", ".reylo.yaml": "direct_url: postgres://localhost/\n" });
+  assert.equal(resolveProject(e, dir, {}).url, "postgres://localhost/");
+  writeFileSync(join(dir, ".reylo.yaml"), "direct_url: ${BUILD_DATABASE_URL:-${DATABASE_URL}}\n");
+  assert.equal(resolveProject(e, dir, {}).url, "postgres://app@db.internal/?dbname=shop");
+  assert.equal(resolveProject(e, dir, { BUILD_DATABASE_URL: "postgres://build/" }).url, "postgres://build/");
+});
+
+test("a variable of the environment is read in any case of its name on Windows, the first of two spellings in order", () => {
+  assert.equal(environmentValue({ pgdatabase: "x" }, "PGDATABASE", "win32"), "x");
+  assert.equal(environmentValue({ pgdatabase: "local", pgDatabase: "reporting" }, "PGDATABASE", "win32"), "reporting");
+  assert.equal(environmentValue({ pgdatabase: "x" }, "PGDATABASE", "linux"), undefined);
+});
 
 test("an env file reads as dotenv reads it, and as the binary reads it", () => {
   // The binary's reader is held to the same cases (engine/native/src/project.rs).
