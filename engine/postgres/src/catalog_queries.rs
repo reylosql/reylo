@@ -49,6 +49,53 @@ fn queries() -> Vec<(&'static str, String)> {
 /// own functions, in its schema, which [`queries`] checks the probe for first.
 const EXTENSION_CALLS: [&str; 3] = ["VERSION_QUERY", "ANALYZE_QUERY", "ANSWER_QUERY"];
 
+/// The functions the queries call, each in a form that is an exact match of a built-in taking no
+/// polymorphic argument. A query that needs another adds it here once it is checked to be so:
+/// `unnest`, `array_agg`, `cardinality`, `array_length`, `to_jsonb` and the like take any type, and
+/// an overload of narrower types created in `pg_catalog` would be the closer match.
+const FUNCTIONS: [&str; 40] = [
+    "bit_or",
+    "bool_or",
+    "count",
+    "current_setting",
+    "float4out",
+    "format_type",
+    "generate_series",
+    "has_schema_privilege",
+    "int2out",
+    "int4out",
+    "jsonb_in",
+    "max",
+    "md5",
+    "oidout",
+    "pg_get_constraintdef",
+    "pg_function_is_visible",
+    "pg_get_expr",
+    "pg_get_function_sqlbody",
+    "pg_get_indexdef",
+    "pg_get_ruledef",
+    "pg_get_serial_sequence",
+    "pg_get_viewdef",
+    "pg_operator_is_visible",
+    "pg_table_is_visible",
+    "quote_literal",
+    "regclassout",
+    "regcollationout",
+    "regnamespaceout",
+    "regoperatorout",
+    "regprocedureout",
+    "regtypeout",
+    "regexp_matches",
+    "replace",
+    "string_agg",
+    "textcat",
+    "textin",
+    "textout",
+    "to_number",
+    "to_regclass",
+    "to_regprocedure",
+];
+
 /// A name list's parts, as the parse tree's JSON writes them (`[{"node": {"String": {"sval": …}}}]`).
 fn parts(names: Option<&Value>) -> Vec<&str> {
     names.and_then(Value::as_array).into_iter().flatten().filter_map(|n| n.pointer("/node/String/sval").and_then(Value::as_str)).collect()
@@ -105,7 +152,7 @@ fn violations(sql: &str) -> Vec<String> {
             "FuncCall" => {
                 let name = parts(m.get("funcname"));
                 match name.as_slice() {
-                    ["pg_catalog", function] if crate::catalog_objects::FUNCTIONS.contains(function) => {}
+                    ["pg_catalog", function] if FUNCTIONS.contains(function) => {}
                     ["reylo", _] => {}
                     _ => out.push(format!("the function `{}`, not one of pg_catalog's the queries may call", name.join("."))),
                 }
@@ -337,16 +384,4 @@ fn every_query_the_engine_defines_is_checked() {
     }
     let unchecked: Vec<&String> = defined.iter().filter(|n| !checked.contains(&n.as_str()) && !EXTENSION_CALLS.contains(&n.as_str())).collect();
     assert!(unchecked.is_empty(), "add each to queries(): {unchecked:?}");
-}
-
-/// The catalog's objects a host checks the session's role against ([`crate::catalog_objects`]) are
-/// the ones the queries read: each table a query reads and each function it calls is listed, and
-/// each listed one is read.
-#[test]
-fn the_catalog_objects_are_the_ones_the_queries_read() {
-    let read: Vec<Reads> = queries().into_iter().map(|(_, sql)| reads(&sql)).collect();
-    let tables: BTreeSet<&str> = read.iter().flat_map(|r| r.catalogs.iter().map(String::as_str)).collect();
-    let functions: BTreeSet<&str> = read.iter().flat_map(|r| r.functions.iter().filter_map(|f| f.strip_prefix("pg_catalog."))).collect();
-    assert_eq!(tables, crate::catalog_objects::TABLES.iter().copied().collect::<BTreeSet<_>>(), "TABLES in catalog_objects.rs");
-    assert_eq!(functions, crate::catalog_objects::FUNCTIONS.iter().copied().collect::<BTreeSet<_>>(), "FUNCTIONS in catalog_objects.rs");
 }

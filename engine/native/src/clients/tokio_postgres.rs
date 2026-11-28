@@ -209,7 +209,7 @@ async fn query(client: &Client, prepared: Option<&Prepared>, sql: &str, params: 
     };
     let stmt = match stmt {
         Ok(stmt) => stmt,
-        Err(e) => return refusal(client, &e).await.unwrap_or_else(|| Err(failed("failed to prepare", e))).map(Err),
+        Err(e) => return refusal(client, &e, params).await.unwrap_or_else(|| Err(failed("failed to prepare", e))).map(Err),
     };
     let mut values: Vec<Box<dyn ToSql + Sync + Send>> = Vec::new();
     for (ty, value) in stmt.params().iter().zip(params) {
@@ -218,44 +218,66 @@ async fn query(client: &Client, prepared: Option<&Prepared>, sql: &str, params: 
     let refs: Vec<&(dyn ToSql + Sync)> = values.iter().map(|v| v.as_ref() as &(dyn ToSql + Sync)).collect();
     let rows = match client.query(&stmt, &refs).await {
         Ok(rows) => rows,
-        Err(e) => return refusal(client, &e).await.unwrap_or_else(|| Err(failed("failed", e))).map(Err),
+        Err(e) => return refusal(client, &e, params).await.unwrap_or_else(|| Err(failed("failed", e))).map(Err),
     };
     Ok(Ok(rows.iter().map(|row| (0..row.len()).map(|i| cell(row, i)).collect()).collect()))
 }
 
 /// What a catalog query refused for a privilege the session's role lacks (42501) is: `None` for any
 /// other error. The server raises 42501 alike for USAGE on a schema a name is looked up in and for
-/// EXECUTE or SELECT on the catalog's own functions and tables, with words in the server's language
-/// alone to tell them apart, so the server is asked whether the role may use each object the
-/// engine's queries read (`reylo_engine_postgres::catalog_objects`). Where it may, the refusal was
-/// of a schema: the catalog as the role sees it, an answer, which the schema's fingerprint holds
-/// too. A statement that names such a schema is refused by its own describe, which says so at its
-/// place, and one that reaches it only through a view is analyzed without what the role may not
-/// read, which each reader of a refused query takes as unknown. Where it may not, the analysis
-/// cannot be made, and says what the role lacks.
-async fn refusal(client: &Client, e: &::tokio_postgres::Error) -> Option<Result<DbError, HostError>> {
+/// EXECUTE or SELECT on anything of the catalog's own, with words in the server's language alone to
+/// tell them apart; but a schema refuses a lookup only of a name qualified by it (a search path
+/// passes over a schema the role may not use), so the refusal is a schema's where a name among the
+/// query's parameters is qualified by one the role may not use. That is the catalog as the role
+/// sees it, an answer, which the schema's fingerprint holds too: a statement that names such a
+/// schema is refused by its own describe, which says so at its place, and one that reaches it only
+/// through a view is analyzed without what the role may not read, which each reader of a refused
+/// query takes as unknown. Any other refusal is of the catalog, and the analysis cannot be made.
+async fn refusal(client: &Client, e: &::tokio_postgres::Error, params: &[Value]) -> Option<Result<DbError, HostError>> {
     let d = e.as_db_error().filter(|d| *d.code() == ::tokio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE)?;
     let answer = DbError { message: d.message().to_string(), code: Some(d.code().code().to_string()), position: None };
-    let functions: Vec<&str> = reylo_engine_postgres::catalog_objects::FUNCTIONS.to_vec();
-    let tables: Vec<&str> = reylo_engine_postgres::catalog_objects::TABLES.to_vec();
-    Some(match client.query(CATALOG_PRIVILEGES_QUERY, &[&functions, &tables]).await {
-        Ok(rows) if rows.is_empty() => Ok(answer),
-        Ok(rows) => {
-            let lacked: Vec<String> = rows.iter().map(|row| row.get::<_, String>(0)).collect();
-            Err(HostError(format!("The type check's role may not use {} of the catalog, which the analysis reads: grant it, or run the type check as a role that may", lacked.join(", "))))
-        }
-        Err(_) => Err(HostError(format!("The type check's role may not read the catalog, which the analysis reads: {}", pg_message(e)))),
+    let mut schemas = Vec::new();
+    params.iter().for_each(|param| qualifiers(param, &mut schemas));
+    let unusable = if schemas.is_empty() { Ok(Vec::new()) } else { client.query(UNUSABLE_SCHEMAS_QUERY, &[&schemas]).await };
+    Some(match unusable {
+        Ok(rows) if !rows.is_empty() => Ok(answer),
+        _ => Err(HostError(format!("The type check's role may not use part of the catalog the analysis reads: {}. Grant it, or run the type check as a role that may", pg_message(e)))),
     })
 }
 
-/// The objects of the catalog among `$1` (functions) and `$2` (tables), all `pg_catalog`'s, that the
-/// session's role may not use, as `function pg_catalog.to_regclass(text)` and `table pg_proc`.
-const CATALOG_PRIVILEGES_QUERY: &str = "SELECT 'function '::pg_catalog.text OPERATOR(pg_catalog.||) p.oid::pg_catalog.regprocedure::pg_catalog.text FROM pg_catalog.pg_proc p \
-    WHERE p.pronamespace OPERATOR(pg_catalog.=) 'pg_catalog'::pg_catalog.regnamespace::pg_catalog.oid AND p.proname OPERATOR(pg_catalog.=) ANY ($1::pg_catalog.name[]) \
-      AND NOT pg_catalog.has_function_privilege(p.oid, 'EXECUTE'::pg_catalog.text) \
-    UNION ALL SELECT 'table '::pg_catalog.text OPERATOR(pg_catalog.||) c.relname::pg_catalog.text FROM pg_catalog.pg_class c \
-    WHERE c.relnamespace OPERATOR(pg_catalog.=) 'pg_catalog'::pg_catalog.regnamespace::pg_catalog.oid AND c.relname OPERATOR(pg_catalog.=) ANY ($2::pg_catalog.name[]) \
-      AND NOT pg_catalog.has_table_privilege(c.oid, 'SELECT'::pg_catalog.text)";
+/// The schemas among `$1` the session's role may not use.
+const UNUSABLE_SCHEMAS_QUERY: &str = "SELECT n.nspname::pg_catalog.text FROM pg_catalog.pg_namespace n \
+    WHERE n.nspname OPERATOR(pg_catalog.=) ANY ($1::pg_catalog.name[]) AND NOT pg_catalog.has_schema_privilege(n.oid, 'USAGE'::pg_catalog.text)";
+
+/// The schema each name among `value`'s strings is qualified by, as the server reads a name: a
+/// part in double quotes as written (a doubled quote one), any other folded to lowercase, and the
+/// schema the part before the last.
+fn qualifiers(value: &Value, out: &mut Vec<String>) {
+    match value {
+        Value::String(name) => {
+            let mut parts = vec![String::new()];
+            let mut chars = name.chars().peekable();
+            let mut quoted = false;
+            while let Some(c) = chars.next() {
+                match c {
+                    '"' if quoted && chars.peek() == Some(&'"') => {
+                        chars.next();
+                        parts.last_mut().expect("one part at least").push('"');
+                    }
+                    '"' => quoted = !quoted,
+                    '.' if !quoted => parts.push(String::new()),
+                    c if quoted => parts.last_mut().expect("one part at least").push(c),
+                    c => parts.last_mut().expect("one part at least").extend(c.to_lowercase()),
+                }
+            }
+            if parts.len() >= 2 {
+                out.push(parts[parts.len() - 2].clone());
+            }
+        }
+        Value::Array(items) => items.iter().for_each(|item| qualifiers(item, out)),
+        _ => {}
+    }
+}
 
 /// One parameter of a catalog query, by the type the server inferred from the cast in its text.
 fn bind(ty: &Type, value: &Value) -> Option<Box<dyn ToSql + Sync + Send>> {
@@ -337,6 +359,18 @@ fn pg_message(e: &::tokio_postgres::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A name's schema, as the server reads the name: quoted parts as written, others folded.
+    #[test]
+    fn a_names_schema_is_read_as_the_server_reads_it() {
+        let schemas = |value: Value| {
+            let mut out = Vec::new();
+            qualifiers(&value, &mut out);
+            out
+        };
+        assert_eq!(schemas(json!(["Hidden.items", "items", "\"My.Schema\".t", "db.s.t", "\"a\"\"b\".t"])), ["hidden", "My.Schema", "s", "a\"b"]);
+        assert_eq!(schemas(json!([3, null, "f"])), Vec::<String>::new());
+    }
 
     /// The futures' outputs, the futures polled together as a round's needs are.
     async fn together<F: Future>(futures: Vec<F>) -> Vec<F::Output> {

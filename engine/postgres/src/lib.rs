@@ -14,7 +14,6 @@ pub mod bodies;
 pub mod api;
 pub mod capabilities;
 pub mod cardinality;
-pub mod catalog_objects;
 #[cfg(test)]
 mod catalog_queries;
 pub mod errors;

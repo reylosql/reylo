@@ -1064,7 +1064,7 @@ test("on Postgres, a role refused a function of the catalog's fails the analysis
     await own.sql.unsafe(`drop role if exists ${role}; create role ${role} login; grant select on items to ${role}; revoke execute on function pg_catalog.to_regclass(text) from public`);
     const failed = await analyze(root, { DATABASE_URL: url.href }, "select title from items where id = :id");
     assert.ok(!failed.ok);
-    assert.match(failed.message, /^The type check's role may not use function to_regclass\(text\) of the catalog, which the analysis reads: grant it, or run the type check as a role that may/);
+    assert.match(failed.message, /^The type check's role may not use part of the catalog the analysis reads: permission denied for function to_regclass \(42501\)\. Grant it, or run the type check as a role that may/);
   } finally {
     await own.sql.unsafe(`grant execute on function pg_catalog.to_regclass(text) to public; drop owned by ${role}; drop role ${role}`).catch(() => {});
     await own.drop();
